@@ -22,6 +22,13 @@ _SHELL_PUNCTUATION = {"&", "&&", "|", "||", ";", "<", ">", "(", ")"}
 _CODEX_EXIT = re.compile(r"(?:Process exited with code\s+|Exit code:\s*)(-?\d+)", re.IGNORECASE)
 _CODEX_RUNNING = re.compile(r"Process running with session ID\s+(\d+)", re.IGNORECASE)
 _GIT_COMMIT_SHA = re.compile(r"^\[[^\]\r\n]+\s+([0-9a-f]{7,40})\]", re.MULTILINE)
+VERIFICATION_SCOPES = {"project_default", "named_check", "targeted", "unknown"}
+VERIFICATION_SCOPE_LABELS = {
+    "project_default": "default project scope",
+    "named_check": "named check",
+    "targeted": "targeted or parameterized scope; target details not stored",
+    "unknown": "scope unknown; do not infer project-wide coverage",
+}
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,7 @@ class CommandEvidence:
     finished_at: str | None
     completion_state: str
     exit_code: int | None
+    verification_scope: str = "unknown"
     commit_sha: str | None = None
     truncated: bool = False
 
@@ -52,31 +60,55 @@ class CommandEvidence:
         return "result unknown"
 
 
-def verification_runner(command: list[str]) -> str | None:
-    """Return a fixed, argument-free label for an allowlisted verifier."""
+def verification_classification(command: list[str]) -> tuple[str | None, str]:
+    """Return an argument-free runner label and conservative scope enum."""
     if not command:
-        return None
+        return None, "unknown"
     names = [Path(part).name.lower() for part in command[:4]]
     first = names[0]
     if first in {"pytest", "py.test"}:
-        return "pytest"
+        return "pytest", "project_default" if len(command) == 1 else "targeted"
     if first in {"python", "python3", "py"} and len(command) >= 3 and command[1] == "-m":
         module = str(command[2]).lower()
         if module in {"pytest", "unittest"}:
-            return f"python -m {module}"
+            return f"python -m {module}", "project_default" if len(command) == 3 else "targeted"
     if first in {"npm", "pnpm", "yarn", "bun"}:
         action = str(command[1]).lower() if len(command) > 1 else ""
         script = str(command[2]).lower() if action == "run" and len(command) > 2 else action
         if script in {"test", "check", "lint", "build", "typecheck", "smoke"}:
-            return f"{first} {('run ' if action == 'run' else '')}{script}"
+            expected_length = 3 if action == "run" else 2
+            scope = "named_check" if len(command) == expected_length else "targeted"
+            return f"{first} {('run ' if action == 'run' else '')}{script}", scope
     if first in {"cargo", "go", "dotnet", "mvn", "mvnw", "gradle", "gradlew"}:
         action = str(command[1]).lower() if len(command) > 1 else ""
         if action in {"test", "check", "verify", "build"}:
-            return f"{first} {action}"
-    return None
+            return f"{first} {action}", "named_check" if len(command) == 2 else "targeted"
+    return None, "unknown"
 
 
-def _simple_commands(command: object) -> list[list[str]] | None:
+def verification_runner(command: list[str]) -> str | None:
+    """Compatibility wrapper returning only the fixed verifier label."""
+    return verification_classification(command)[0]
+
+
+def verification_scope_for_cwd(scope: str, cwd: str | None, checkout_path: str | None) -> str:
+    normalized = scope if scope in VERIFICATION_SCOPES else "unknown"
+    if normalized not in {"project_default", "named_check"}:
+        return normalized
+    if not cwd or not checkout_path:
+        return "targeted"
+    try:
+        same_root = os.path.normcase(os.path.realpath(cwd)) == os.path.normcase(os.path.realpath(checkout_path))
+    except (OSError, ValueError):
+        return "targeted"
+    return normalized if same_root else "targeted"
+
+
+def verification_scope_label(scope: object) -> str:
+    return VERIFICATION_SCOPE_LABELS.get(str(scope), VERIFICATION_SCOPE_LABELS["unknown"])
+
+
+def _simple_commands(command: object) -> list[tuple[list[str], bool]] | None:
     if not isinstance(command, str) or not command.strip() or "\n" in command:
         return None
     try:
@@ -99,15 +131,19 @@ def _simple_commands(command: object) -> list[list[str]] | None:
         commands[-1].append(token)
     if not commands[-1]:
         return None
+    prepared: list[tuple[list[str], bool]] = []
     for argv in commands:
+        had_environment_assignment = False
         while argv and "=" in argv[0] and not argv[0].startswith(("/", "./", "../")):
             name, _, _ = argv[0].partition("=")
             if not name.replace("_", "a").isalnum() or name[:1].isdigit():
                 break
             argv.pop(0)
+            had_environment_assignment = True
         if not argv or Path(argv[0]).name.lower() in {"cd", "pushd", "popd"}:
             return None
-    return commands
+        prepared.append((argv, had_environment_assignment))
+    return prepared
 
 
 def _is_git_commit(argv: list[str]) -> bool:
@@ -134,18 +170,40 @@ def _is_git_commit(argv: list[str]) -> bool:
     return False
 
 
-def _command_classification(command: object) -> tuple[str | None, str | None]:
+def _is_git_add(argv: list[str]) -> bool:
+    return bool(
+        len(argv) >= 2
+        and Path(argv[0]).name.lower() in {"git", "git.exe"}
+        and argv[1] == "add"
+    )
+
+
+def _command_classification(command: object) -> tuple[str | None, str | None, str]:
     commands = _simple_commands(command)
     if not commands:
-        return None, None
-    matches: list[tuple[str, str | None]] = []
-    for argv in commands:
-        runner = verification_runner(argv)
+        return None, None, "unknown"
+    matches: list[tuple[str, str | None, str]] = []
+    unmatched: list[list[str]] = []
+    for argv, parameterized_by_environment in commands:
+        runner, scope = verification_classification(argv)
         if runner:
-            matches.append(("verification", runner))
+            if parameterized_by_environment:
+                scope = "targeted"
+            matches.append(("verification", runner, scope))
         elif _is_git_commit(argv):
-            matches.append(("git_commit", None))
-    return matches[0] if len(matches) == 1 else (None, None)
+            matches.append(("git_commit", None, "unknown"))
+        else:
+            unmatched.append(argv)
+    if unmatched:
+        if not (
+            len(matches) == 1
+            and matches[0][0] == "git_commit"
+            and all(_is_git_add(argv) for argv in unmatched)
+        ):
+            # An unrecognized setup command may alter what a later verifier
+            # selects. Do not persist a misleading partial receipt.
+            return None, None, "unknown"
+    return matches[0] if len(matches) == 1 else (None, None, "unknown")
 
 
 def _stamp(value: object) -> str | None:
@@ -192,6 +250,7 @@ def _evidence(
         finished_at=finished_at,
         completion_state=completion_state,
         exit_code=exit_code,
+        verification_scope=str(pending.get("verification_scope") or "unknown"),
         commit_sha=_commit_sha(output) if pending["command_kind"] == "git_commit" and exit_code == 0 else None,
         truncated=truncated,
     )
@@ -231,7 +290,7 @@ def _claude_evidence(path: str, fallback_session_id: str) -> list[CommandEvidenc
                 if not isinstance(item, dict) or item.get("type") != "tool_use" or item.get("name") != "Bash":
                     continue
                 inputs = item.get("input") if isinstance(item.get("input"), dict) else {}
-                command_kind, runner = _command_classification(inputs.get("command"))
+                command_kind, runner, verification_scope = _command_classification(inputs.get("command"))
                 call_id = str(item.get("id") or "")
                 if not call_id or not command_kind:
                     continue
@@ -241,6 +300,7 @@ def _claude_evidence(path: str, fallback_session_id: str) -> list[CommandEvidenc
                     "tool": "claude-code",
                     "cwd": str(row.get("cwd") or "") or None,
                     "runner": runner,
+                    "verification_scope": verification_scope,
                     "command_kind": command_kind,
                     "started_at": _stamp(row.get("timestamp")),
                 }
@@ -332,7 +392,7 @@ def _codex_evidence(path: str, fallback_session_id: str) -> list[CommandEvidence
                 arguments = {}
             if not isinstance(arguments, dict):
                 continue
-            command_kind, runner = _command_classification(arguments.get("cmd") or arguments.get("command"))
+            command_kind, runner, verification_scope = _command_classification(arguments.get("cmd") or arguments.get("command"))
             call_id = str(payload.get("call_id") or "")
             if not call_id or not command_kind:
                 continue
@@ -342,6 +402,7 @@ def _codex_evidence(path: str, fallback_session_id: str) -> list[CommandEvidence
                 "tool": "codex-cli",
                 "cwd": str(arguments.get("workdir") or "") or cwd,
                 "runner": runner,
+                "verification_scope": verification_scope,
                 "command_kind": command_kind,
                 "started_at": _stamp(row.get("timestamp")),
             }

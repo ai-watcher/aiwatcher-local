@@ -45,6 +45,7 @@ from .cli import (
     timeline_analysis,
 )
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
+from .command_evidence import verification_scope_label
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .git_identity import identity_for_session, repository_identity
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule
@@ -1647,6 +1648,7 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
                     parts.append("historical: starting Git state unavailable")
                 else:
                     parts.append("stale: current Git state differs")
+            parts.append(verification_scope_label(item.get("verification_scope")))
             parts.extend(
                 str(item.get(key) or "").strip()
                 for key in ("name", "path", "artifact")
@@ -1657,6 +1659,11 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
                 "status": str(item.get("status") or "observed").strip()[:40],
                 "completion_state": str(item.get("completion_state") or "unknown").strip()[:40],
                 "authoritative": item.get("authoritative") is True,
+                "verification_scope": (
+                    item.get("verification_scope")
+                    if item.get("verification_scope") in {"project_default", "named_check", "targeted"}
+                    else "unknown"
+                ),
             })
         else:
             tests.append({

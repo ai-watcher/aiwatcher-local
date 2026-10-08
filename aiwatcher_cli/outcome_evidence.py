@@ -15,7 +15,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .command_evidence import CommandEvidence, command_evidence_coverage, command_evidence_for_session
+from .command_evidence import (
+    CommandEvidence,
+    command_evidence_coverage,
+    command_evidence_for_session,
+    verification_scope_for_cwd,
+)
 from .git_identity import identity_for_session, repository_identity, resolve_git_identity
 from .local_state import (
     recent_commit_receipts,
@@ -467,6 +472,9 @@ def _ingest_session_command_evidence(
                     source_id=observed.source_id,
                     completion_state=observed.completion_state,
                     state_binding="historical",
+                    verification_scope=verification_scope_for_cwd(
+                        observed.verification_scope, cwd, identity.checkout_path,
+                    ),
                     truncated=observed.truncated,
                 )
             except (OSError, ValueError):
@@ -614,6 +622,11 @@ def _verification_receipts(
             "attribution": "session_bound" if exact_session else "inferred_time_window",
             "completion_state": receipt.get("completion_state") or "completed",
             "state_binding": receipt.get("state_binding") or "historical",
+            "verification_scope": (
+                receipt.get("verification_scope")
+                if receipt.get("verification_scope") in {"project_default", "named_check", "targeted"}
+                else "unknown"
+            ),
             "truncated": bool(receipt.get("truncated")),
             "_finished_at_sort": stamp.timestamp(),
         })
@@ -955,6 +968,7 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
 
     current_pass = any(
         item.get("status") == "passed" and item.get("authoritative") is True
+        and item.get("verification_scope") in {"project_default", "named_check"}
         for item in evidence.tests
     )
     if evidence.commits and current_pass:

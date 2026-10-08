@@ -47,7 +47,12 @@ from .companion import (
     tray_status,
     uninstall_login_autostart,
 )
-from .command_evidence import environment_session_identity, verification_runner as _verification_runner
+from .command_evidence import (
+    environment_session_identity,
+    verification_classification as _verification_classification,
+    verification_runner as _verification_runner,
+    verification_scope_for_cwd,
+)
 from .evidence_capture import record_missing_evidence_snapshots
 from . import compaction, compaction_outcomes, prompt_signals
 from .local_state import (
@@ -7130,7 +7135,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     run_started = datetime.now().astimezone()
-    verification_runner = _verification_runner(command)
+    verification_runner, verification_scope = _verification_classification(command)
     verification_before = _verification_git_fingerprint(os.getcwd()) if verification_runner else {}
     print("AIWatcher Local run")
     print("Watching local AI logs while your command runs. No prompt or source content is uploaded.\n")
@@ -7167,6 +7172,9 @@ def command_run(args: argparse.Namespace) -> int:
                 session_source=session_source,
                 completion_state="completed",
                 state_binding=_verification_state_binding(verification_before, verification_after),
+                verification_scope=verification_scope_for_cwd(
+                    verification_scope, os.getcwd(), checkout,
+                ),
             )
         except (OSError, ValueError):
             # The wrapped command's real exit code always wins over optional

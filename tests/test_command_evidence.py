@@ -9,10 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiwatcher_cli.command_evidence import (
+    _command_classification,
     command_evidence_coverage,
     command_evidence_for_session,
     environment_session_identity,
+    verification_classification,
     verification_runner,
+    verification_scope_for_cwd,
 )
 
 
@@ -25,6 +28,23 @@ class CommandEvidenceTests(unittest.TestCase):
         self.assertEqual(verification_runner(["python3", "-m", "pytest", "secret-test-name"]), "python -m pytest")
         self.assertEqual(verification_runner(["npm", "run", "check", "--", "private"]), "npm run check")
         self.assertIsNone(verification_runner(["bash", "-lc", "pytest"]))
+
+    def test_verification_scope_is_conservative_and_argument_free(self) -> None:
+        self.assertEqual(verification_classification(["pytest"]), ("pytest", "project_default"))
+        self.assertEqual(verification_classification(["pytest", "-q"]), ("pytest", "targeted"))
+        self.assertEqual(verification_classification(["npm", "run", "check"]), ("npm run check", "named_check"))
+        self.assertEqual(verification_classification(["npm", "run", "check", "--", "private"]), ("npm run check", "targeted"))
+        self.assertEqual(verification_classification(["cargo", "test"]), ("cargo test", "named_check"))
+        self.assertEqual(verification_classification(["go", "test"]), ("go test", "named_check"))
+        self.assertEqual(verification_scope_for_cwd("project_default", "/repo/pkg", "/repo"), "targeted")
+        self.assertEqual(
+            _command_classification("PYTEST_ADDOPTS=tests/private pytest"),
+            ("verification", "pytest", "targeted"),
+        )
+        self.assertEqual(
+            _command_classification("export PYTEST_ADDOPTS=tests/private && pytest"),
+            (None, None, "unknown"),
+        )
 
     def test_claude_pairs_bash_result_without_persisting_command_or_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -55,6 +75,7 @@ class CommandEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence[0].session_id, "session-1")
         self.assertEqual(evidence[0].cwd, "/repo/review")
         self.assertEqual(evidence[0].runner, "python -m pytest")
+        self.assertEqual(evidence[0].verification_scope, "targeted")
         self.assertEqual(evidence[0].status, "passed")
         self.assertNotIn("command", evidence[0].__dict__)
         self.assertNotIn("output", evidence[0].__dict__)

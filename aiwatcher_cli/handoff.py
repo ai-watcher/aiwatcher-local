@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Sequence
 
+from .command_evidence import verification_scope_label
 from .local_state import issue_brief_token, recent_decisions
 from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
@@ -765,6 +766,13 @@ def build_handoff_capsule(
         and item.get("status") in {"passed", "failed"}
         for item in evidence.tests
     )
+    broad_verification = any(
+        item.get("authoritative") is True
+        and item.get("completion_state") == "completed"
+        and item.get("status") in {"passed", "failed"}
+        and item.get("verification_scope") == "project_default"
+        for item in evidence.tests
+    )
 
     checkpoint_lines = [
         "- First verify that the source session identity above matches the work the user meant to continue.",
@@ -842,12 +850,17 @@ def build_handoff_capsule(
                 f"- {item.get('artifact') or item.get('name')}: "
                 f"{item.get('status') or item.get('updated_at') or 'observed'}"
                 f"{' (current for this Git state)' if item.get('current') is True else ' (stale; Git state changed during verification)' if item.get('state_binding') == 'git_state_changed' else ' (historical; starting Git state unavailable)' if item.get('state_binding') == 'historical' else ' (stale; current Git state differs)' if item.get('current') is False else ''}"
+                f" [{verification_scope_label(item.get('verification_scope'))}]"
                 f"{' [session-bound]' if item.get('attribution') == 'session_bound' else ' [time-window candidate; may belong to another session]' if item.get('attribution') == 'inferred_time_window' else ''}"
                 for item in evidence.tests[:6]
             ]
             if evidence.tests else []
         ),
         *([] if completed_verification else ["- No session-bound completed verification was observed; do not claim the prior work is verified."]),
+        *(
+            ["- Verification was targeted or its scope is unknown; do not infer project-wide coverage."]
+            if completed_verification and not broad_verification else []
+        ),
         "",
         "Decisions and constraints",
         *(["- Decisions below are self-reported and not verified against what actually happened."] if decisions else []),

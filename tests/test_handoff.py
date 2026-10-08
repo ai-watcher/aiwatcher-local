@@ -33,6 +33,7 @@ class HandoffTests(unittest.TestCase):
                 "name": "pytest", "status": "passed", "completion_state": "completed",
                 "attribution": "session_bound", "source": "Session-bound terminal receipt",
                 "authoritative": True,
+                "verification_scope": "project_default",
             }],
         )
         with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
@@ -52,6 +53,7 @@ class HandoffTests(unittest.TestCase):
                 "name": "pytest", "status": "passed", "completion_state": "completed",
                 "attribution": "session_bound", "current": False,
                 "state_binding": "git_state_changed",
+                "verification_scope": "targeted",
             }],
         )
         with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
@@ -59,7 +61,27 @@ class HandoffTests(unittest.TestCase):
 
         self.assertIn("pytest: passed", brief)
         self.assertIn("stale; Git state changed during verification", brief)
+        self.assertIn("targeted or parameterized scope; target details not stored", brief)
         self.assertIn("No session-bound completed verification was observed", brief)
+
+    def test_authoritative_targeted_verification_warns_about_limited_scope(self) -> None:
+        session = LocalSession(
+            session_id="targeted", tool="codex-cli", project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = OutcomeEvidence(
+            session_id="targeted", project_path="/repo", repo_root="/repo",
+            checkout_path="/repo", tests=[{
+                "name": "pytest", "status": "passed", "completion_state": "completed",
+                "attribution": "session_bound", "current": True, "authoritative": True,
+                "state_binding": "git_state", "verification_scope": "targeted",
+            }],
+        )
+        with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
+            brief = build_handoff_capsule(session, [])["next_brief"]
+
+        self.assertNotIn("No session-bound completed verification was observed", brief)
+        self.assertIn("do not infer project-wide coverage", brief)
 
     def test_historical_verification_explains_missing_start_state(self) -> None:
         session = LocalSession(
