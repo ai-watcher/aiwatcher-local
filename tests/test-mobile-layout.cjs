@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
@@ -17,7 +18,11 @@ function chromeCommand() {
 }
 
 test('Home, Sessions, and Fresh Start render without horizontal clipping at 320px', async () => {
-  const browser = await chromium.launch({ executablePath: chromeCommand(), headless: true });
+  const bundledChromium = chromium.executablePath();
+  const browser = await chromium.launch({
+    ...(fs.existsSync(bundledChromium) ? {} : { executablePath: chromeCommand() }),
+    headless: true,
+  });
   try {
     const page = await browser.newPage({ viewport: { width: 320, height: 800 } });
     await page.goto(pathToFileURL(path.join(__dirname, 'mobile-layout-fixture.html')).href);

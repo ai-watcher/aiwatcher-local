@@ -14,6 +14,7 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - name: Validate browser adapter
         run: |
           node --check browser-extension/background.js
