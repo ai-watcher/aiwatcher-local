@@ -48,7 +48,7 @@ from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent
 from .command_evidence import verification_scope_label
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .git_identity import identity_for_session, repository_identity
-from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule
+from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, bound_handoff_words, build_handoff_capsule
 from .metrics import (
     model_cost_comparison,
     pace_vs_baseline,
@@ -1659,6 +1659,8 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
                 "status": str(item.get("status") or "observed").strip()[:40],
                 "completion_state": str(item.get("completion_state") or "unknown").strip()[:40],
                 "authoritative": item.get("authoritative") is True,
+                "current": item.get("current") if isinstance(item.get("current"), bool) else None,
+                "state_binding": str(item.get("state_binding") or "")[:40],
                 "verification_scope": (
                     item.get("verification_scope")
                     if item.get("verification_scope") in {"project_default", "named_check", "targeted"}
@@ -1729,6 +1731,8 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
         "inspect_first": continuation_items("inspect_first", 10),
         "evidence": {
             "commits": commits,
+            "commit_attribution": raw_evidence.get("commit_attribution"),
+            "committed_files": [str(item) for item in (raw_evidence.get("files_touched") or [])[:12]],
             "changed_files": [str(item) for item in (raw_evidence.get("changed_files") or [])[:12]],
             "tests": [item for item in tests if item.get("summary")][:6],
             "confidence": raw_evidence.get("confidence"),
@@ -3068,12 +3072,6 @@ def build_basic_handoff_detail(
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
     usage = _usage_summary(row)
     ai_assist = build_ai_assist_status(ai_assist_config())
-    assist_mode = str(ai_assist.get("mode") or "off")
-    assist_line = (
-        "AI Assist is off; this brief is assembled from local metadata only."
-        if assist_mode == "off" else
-        f"AI Assist mode is {ai_assist.get('active_label')}; only use it after explicit user confirmation."
-    )
     warnings = [
         (
             f"Source session had {usage['tokens_label']} tokens, "
@@ -3082,100 +3080,44 @@ def build_basic_handoff_detail(
         ),
         "Detailed git, timeline, and prompt evidence is still loading; inspect the repository before editing.",
     ]
-    objective_text = objective.strip() if objective and objective.strip() else (
-        "Continue the same user goal from the source workspace, but verify the source session identity before editing."
-    )
-    next_brief = "\n".join([
-        "AIWatcher Fresh Start brief",
+    objective_text = objective.strip() if objective and objective.strip() else None
+    next_brief = bound_handoff_words("\n".join([
+        "AIWatcher Fresh Start preview",
         "",
-        "You are starting a fresh AI work session from an AIWatcher handoff.",
-        "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
-        "Continue from source-session metadata and workspace state, not from hidden conversation history.",
-        f"Target tool: {TARGET_LABELS[target]}.",
-        f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        "This is a provisional metadata-only fallback while detailed Git and verification evidence loads.",
+        "Do not invent prior intent, completed work, or test results.",
         "",
-        "Source session identity",
-        f"- Identity confidence: {attachment.identity_label} ({attachment.confidence})",
-        f"- Source session id: {session_id}",
-        f"- Source tool/surface: {row.tool} / {row.surface or 'unknown'}",
-        f"- Source model: {row.model or 'unknown'}",
-        f"- Last observed activity: {row.updated_at.isoformat() if row.updated_at else 'unknown'}",
-        f"- Identity note: {attachment.identity_reason}",
-        f"- Return capability: {attachment.exact_return_label}",
-        f"- Return note: {attachment.exact_return_reason}",
-        *(
-            [
-                f"- Same-project sessions observed: {same_project_count}",
-                "- If this is not the intended source chat, stop and ask the user which session to continue.",
-            ]
-            if same_project_count > 1
-            else []
-        ),
+        "Objective and context",
+        f"- {'User objective: ' + objective_text if objective_text else 'Objective not captured; confirmation is required before editing.'}",
+        f"- Continuation: {HANDOFF_TYPE_LABELS[handoff_type]} for {TARGET_LABELS[target]}.",
         "",
-        "Goal",
-        f"- User objective: {objective_text}",
-        "- Preserve momentum without replaying the bloated prior conversation.",
-        "- Choose the smallest useful next checkpoint before editing.",
+        "Working checkout",
+        f"- Project: {project}",
+        f"- Source session: {session_id}",
+        f"- Tool/model: {row.tool} / {row.model or 'unknown'}",
+        f"- Identity: {attachment.identity_label} ({attachment.confidence}); {attachment.identity_reason}",
+        *([f"- Same-project sessions observed: {same_project_count}; confirm the intended source."] if same_project_count > 1 else []),
         "",
-        "How to continue",
-        "- If this is a fresh chat: first reconstruct the task from the workspace and evidence below.",
-        "- If this is a forked chat: keep the parent chat as source of truth and return only the final summary, files touched, verification, and unresolved questions.",
-        "- If this is a subagent task: inspect only the assigned lane, then report evidence and recommendations back to the orchestrator.",
-        "- If evidence is insufficient, ask one focused clarification instead of guessing.",
+        "Verification and test signals",
+        "- Detailed checkout, commit, changed-file, and terminal verification evidence is not available in this preview.",
+        "- Do not claim the prior work is complete or verified from this preview.",
         *([
             "",
             "Source of truth to load first",
             *[f"- {item}" for item in (source_refs or [])[:8] if item],
         ] if source_refs else []),
-        *([
-            "",
-            "Do not lose these constraints",
-            *[f"- {item}" for item in (constraints or [])[:8] if item],
-        ] if constraints else []),
-        *([
-            "",
-            "Acceptance checks",
-            *[f"- {item}" for item in (acceptance_criteria or [])[:8] if item],
-        ] if acceptance_criteria else []),
         "",
-        "Workspace",
-        f"- Project: {project}",
-        f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
-        f"- AIWatcher assist: {assist_line}",
+        "Decisions and constraints",
+        *([f"- {item}" for item in (constraints or [])[:8] if item] if constraints else ["- No explicit constraints were captured."]),
         "",
-        "What remains uncertain",
-        "- Detailed git, timeline, and prompt evidence is still loading.",
-        "- Working-tree files may come from another AI chat or manual edits in the same repository.",
-        *(
-            ["- AIWatcher has not verified the exact active chat. Confirm this handoff matches the intended work before editing."]
-            if attachment.identity_label != "Exact active session"
-            else []
-        ),
+        "First action",
+        "- Wait for the enriched brief when available; otherwise confirm this source session and repository before editing.",
+        "- Run `git status --short`, inspect branch/HEAD and changed files, then ask one focused outcome question if the goal is still unknown.",
+        "- Preserve unrelated changes and stop before destructive or production actions.",
         "",
-        "Why start fresh",
-        *[f"- {item}" for item in warnings],
-        "",
-        "First response required",
-        "- Say what appears done.",
-        "- Say what remains uncertain.",
-        "- Name the exact files, docs, commands, or screens you will inspect first.",
-        "- Propose one smallest next checkpoint and wait if the scope is ambiguous or risky.",
-        "",
-        "Immediate next checkpoint",
-        "- First verify that the source session identity above matches the work the user meant to continue.",
-        "- Run `git status --short`.",
-        "- Treat changed files as workspace evidence, not guaranteed proof from this source session.",
-        "- Inspect changed files and any source-of-truth files listed above before editing.",
-        "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
-        "",
-        "Guardrails",
-        "- Preserve unrelated changes.",
-        "- Do not expose secrets.",
-        "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
-        "",
-        "Done report",
-        "- Summarize what changed, what was verified, what remains uncertain, and whether the result looks useful.",
-    ])
+        "Acceptance criteria and guardrails",
+        *([f"- {item}" for item in (acceptance_criteria or [])[:8] if item] if acceptance_criteria else ["- Report what changed, verification run, remaining uncertainty, and the next action."]),
+    ]), max_words=250)
     return {
         "session_id": row.session_id,
         "project": project,

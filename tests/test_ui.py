@@ -4987,7 +4987,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["session_id"], "cached-fast")
         self.assertIn("runtime_attachment", capsule)
 
-    def test_basic_handoff_detail_is_copyable_without_event_scan(self) -> None:
+    def test_basic_handoff_detail_is_bounded_provisional_preview_without_event_scan(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
             session_id="basic-fast",
@@ -5018,12 +5018,12 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(capsule["basic"])
         self.assertEqual(capsule["enrichment_status"], "loading")
         self.assertEqual(capsule["usage"]["tokens_label"], "128.0k")
-        self.assertIn("AIWatcher Fresh Start brief", capsule["next_brief"])
-        self.assertIn("How to continue", capsule["next_brief"])
-        self.assertIn("If this is a forked chat", capsule["next_brief"])
-        self.assertIn("If this is a subagent task", capsule["next_brief"])
-        self.assertIn("First response required", capsule["next_brief"])
-        self.assertIn("Detailed git, timeline, and prompt evidence is still loading", capsule["next_brief"])
+        self.assertIn("AIWatcher Fresh Start preview", capsule["next_brief"])
+        self.assertIn("provisional metadata-only fallback", capsule["next_brief"])
+        self.assertIn("Objective not captured; confirmation is required before editing", capsule["next_brief"])
+        self.assertNotIn("User objective: Continue the same user goal", capsule["next_brief"])
+        self.assertIn("Detailed checkout, commit, changed-file, and terminal verification evidence", capsule["next_brief"])
+        self.assertLessEqual(len(capsule["next_brief"].split()), 250)
 
     def test_structured_handoff_fields_shape_the_brief(self) -> None:
         now = datetime.now(timezone.utc)
@@ -5101,7 +5101,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertTrue(capsule["basic"])
         self.assertEqual(capsule["handoff_type"], "bugbash")
-        self.assertIn("Continuation type: Bug bash continuation.", capsule["next_brief"])
+        self.assertIn("Continuation: Bug bash continuation for Codex.", capsule["next_brief"])
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
 
@@ -5221,6 +5221,8 @@ class DashboardWindowTests(unittest.TestCase):
         )
         self.assertFalse(tests[0]["authoritative"])
         self.assertFalse(tests[1]["authoritative"])
+        self.assertFalse(tests[0]["current"])
+        self.assertEqual(tests[0]["state_binding"], "git_state_changed")
 
     def test_handoff_detail_reuses_recent_authoritative_evidence(self) -> None:
         now = datetime.now(timezone.utc)
