@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="../aiwatcher_cli/web/index.css">
+  <title>AIWatcher mobile layout fixture</title>
+</head>
+<body class="drawer-open">
+  <main>
+    <section class="runtime-strip">
+      <div class="runtime-copy">
+        <span class="cache-pill">Watcher running</span>
+        <span>Local index ready with a deliberately long status</span>
+        <span class="freshness">Updated moments ago from local metadata</span>
+      </div>
+    </section>
+    <section class="ambient">
+      <div class="ambient-top"><span>no session running - last was codex-cli</span><span class="freshness">Updated moments ago</span></div>
+      <div class="ambient-hero">403.8M <u>cumulative thread tokens</u></div>
+    </section>
+    <div class="sessions-table-wrap">
+      <table class="sessions-table">
+        <thead><tr><th>Chat</th><th>Project</th><th>Model</th><th>Tokens</th><th>Action</th></tr></thead>
+        <tbody><tr><td>Long chat title</td><td>/long/project/path</td><td>model</td><td>403.8M</td><td class="session-row-action"><button class="row-action">Review</button></td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <aside class="drawer open">
+    <div class="drawer-header"><div>Fresh Start</div></div>
+    <div class="drawer-content">
+      <div class="session-review-shell">
+        <section class="detail-section session-hero">
+          <span class="session-id-chip">codex-session-with-a-very-long-identity-that-must-wrap</span>
+          <p class="session-meta">A very long repository and checkout identity that must remain visible on a narrow screen.</p>
+        </section>
+      </div>
+    </div>
+  </aside>
+  <pre id="layout-result">pending</pre>
+  <script>
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const button = document.querySelector('.sessions-table .row-action').getBoundingClientRect();
+      const drawer = document.querySelector('.drawer');
+      const shell = document.querySelector('.session-review-shell');
+      const chip = document.querySelector('.session-id-chip').getBoundingClientRect();
+      const runtime = document.querySelector('.runtime-strip');
+      const ambient = document.querySelector('.ambient');
+      document.getElementById('layout-result').textContent = JSON.stringify({
+        viewportWidth: innerWidth,
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        homeFits: runtime.scrollWidth <= runtime.clientWidth && ambient.scrollWidth <= ambient.clientWidth,
+        actionVisible: button.left >= 0 && button.right <= innerWidth,
+        drawerFits: drawer.scrollWidth <= drawer.clientWidth,
+        shellFits: shell.scrollWidth <= shell.clientWidth,
+        chipVisible: chip.left >= 0 && chip.right <= innerWidth
+      });
+    }));
+  </script>
+</body>
+</html>

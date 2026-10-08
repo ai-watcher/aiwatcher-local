@@ -20,6 +20,7 @@ env/
 .coverage
 htmlcov/
 .tox/
+node_modules/
 
 # Local export artifacts. No prompt text or source, but they do carry local
 # paths, project names, session ids and usage history -- the same things the
