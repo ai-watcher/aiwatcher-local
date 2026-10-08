@@ -4466,6 +4466,29 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(marked["ai_assist"]["config"]["stored_keys"]["openai"])
         self.assertNotIn("sk-local-test", json.dumps(marked))
 
+    def test_cached_summary_rehydrates_watcher_after_start_and_stop(self) -> None:
+        running = {"running": True, "status": "running", "label": "Companion running"}
+        stopped = {
+            "running": False, "status": "stopped", "label": "Companion stopped",
+            "command": "aiwatcher companion start",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "get_watcher_status", side_effect=[running, stopped]),
+            ):
+                cached = {"summary_complete": True, "watcher": {"status": "obsolete"}}
+                after_start = ui._mark_summary_cache(
+                    cached, status="fresh", source="memory", refreshing=False,
+                )
+                after_stop = ui._mark_summary_cache(
+                    cached, status="stale", source="disk", refreshing=False,
+                )
+
+        self.assertEqual(after_start["watcher"], running)
+        self.assertEqual(after_stop["watcher"], stopped)
+
     def test_marked_cached_summary_uses_current_claims_switch_and_install_kind(self) -> None:
         # The Trust tab's claims are code, the update switch is a toggle the
         # user just set, and the install kind is a path check. None belongs

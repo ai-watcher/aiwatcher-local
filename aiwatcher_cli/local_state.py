@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .processes import pid_is_running
+
 if os.name == "nt":
     import msvcrt
 else:
@@ -1405,26 +1407,48 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
     except (TypeError, ValueError):
         updated = None
     age_seconds = (datetime.now(timezone.utc) - updated).total_seconds() if updated else None
-    running = age_seconds is not None and age_seconds <= max_age_seconds
+    try:
+        interval_seconds = max(2, int(heartbeat.get("interval_seconds") or 0))
+    except (TypeError, ValueError):
+        interval_seconds = 0
+    freshness_seconds = min(
+        15 * 60,
+        max(max(1, int(max_age_seconds)), max(30, interval_seconds * 2)),
+    )
+    try:
+        pid = int(heartbeat.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    process_alive = pid_is_running(pid)
+    fresh = age_seconds is not None and age_seconds <= freshness_seconds
+    running = fresh and process_alive
     mode = str(heartbeat.get("mode") or "watch")
     process_label = "Companion" if mode == "companion" else "Watcher"
+    status = "running" if running else "stale" if process_alive else "stopped"
     return {
         "running": running,
-        "status": "running" if running else "stale",
-        "label": f"{process_label} running" if running else f"{process_label} not recently seen",
+        "status": status,
+        "label": (
+            f"{process_label} running"
+            if running else f"{process_label} not recently seen"
+            if status == "stale" else f"{process_label} stopped"
+        ),
         "detail": (
             f"{process_label} is checking local sessions for context pressure and handoff opportunities."
             if running
             else f"The last {process_label.lower()} heartbeat is stale. Restart it to catch new session pressure."
+            if status == "stale"
+            else f"The recorded {process_label.lower()} process is no longer running. Start it to catch new session pressure."
         ),
         "command": command,
         "updated_at": updated.isoformat() if updated else None,
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-        "pid": heartbeat.get("pid"),
+        "pid": pid or None,
         "mode": mode,
         "notify": bool(heartbeat.get("notify")),
         "overlay": bool(heartbeat.get("overlay")),
-        "interval_seconds": heartbeat.get("interval_seconds"),
+        "interval_seconds": interval_seconds or None,
+        "freshness_seconds": freshness_seconds,
     }
 
 

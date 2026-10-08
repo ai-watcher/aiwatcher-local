@@ -459,6 +459,17 @@ class StartCommandCliTests(unittest.TestCase):
         )
         clear.assert_called_once_with(pid=os.getpid())
 
+    def test_companion_heartbeat_clears_state_after_unexpected_exception(self) -> None:
+        with (
+            patch.object(cli, "record_watcher_heartbeat"),
+            patch.object(cli, "clear_watcher_heartbeat") as clear,
+            patch.object(cli.time_module, "sleep", side_effect=RuntimeError("failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                cli._run_companion_heartbeat(30)
+
+        clear.assert_called_once_with(pid=os.getpid())
+
     def test_pid_probe_treats_permission_error_as_running(self) -> None:
         with (
             patch.object(cli.sys, "platform", "linux"),
@@ -3220,6 +3231,22 @@ class PromptPreflightTests(unittest.TestCase):
             result = cli.command_watch(args)
         self.assertEqual(result, 0)
         self.assertIn("No local AI sessions detected", output.getvalue())
+
+    def test_watch_clears_state_after_unexpected_exception(self) -> None:
+        args = SimpleNamespace(
+            days=1, interval=15, once=False, cost_threshold=5.0,
+            calls_threshold=250, tokens_threshold=500_000, target="generic",
+        )
+        with (
+            patch.object(cli, "get_watcher_status", return_value={"running": False}),
+            patch.object(cli, "record_watcher_heartbeat"),
+            patch.object(cli, "clear_watcher_heartbeat") as clear,
+            patch.object(cli, "sessions_since", side_effect=RuntimeError("scan failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "scan failed"):
+                cli.command_watch(args)
+
+        clear.assert_called_once_with(pid=os.getpid())
 
     def test_watch_runway_pressure_names_target_and_resume_command(self) -> None:
         now = datetime.now(timezone.utc)

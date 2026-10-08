@@ -1018,7 +1018,7 @@ function runtimeReturnPanel(runtime, sourcePath) {
     </details>
   </section>`;
 }
-let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
+let watcherCommand = 'aiwatcher companion start';
 let currentData = null;
 // The dropdown defaulted to whichever option came first in the markup, which
 // was Codex, while every observed session on this machine is claude-code. Set
@@ -1043,10 +1043,18 @@ function renderWatcher(watcher) {
   const pill = document.getElementById('watcherPill');
   const start = document.getElementById('watcherStart');
   const commandText = document.getElementById('watcherCommandText');
-  watcherCommand = (watcher && watcher.command) || watcherCommand;
-  if (watcher && watcher.running) {
+  if (watcher && watcher.command) watcherCommand = watcher.command;
+  const status = watcher && watcher.status ? watcher.status : 'unknown';
+  const label = watcher && watcher.label ? watcher.label : 'Watcher status unavailable';
+  if (status === 'running' && watcher.running) {
     pill.className = 'cache-pill fresh';
-    pill.textContent = 'Watcher running';
+    pill.textContent = label;
+    start.hidden = true;
+    return;
+  }
+  if (status === 'unknown') {
+    pill.className = 'cache-pill refreshing';
+    pill.textContent = label;
     start.hidden = true;
     return;
   }
@@ -1054,9 +1062,9 @@ function renderWatcher(watcher) {
   // data the watcher is not currently collecting. It used to read in the same
   // blue as "building".
   pill.className = 'cache-pill refreshing';
-  pill.textContent = watcher && watcher.status === 'stale' ? 'Watcher stale' : 'Watcher stopped';
-  commandText.textContent = watcherCommand || 'aiwatcher watch';
-  start.hidden = false;
+  pill.textContent = label;
+  commandText.textContent = watcherCommand;
+  start.hidden = !watcher || !watcher.command;
 }
 // ---------------------------------------------------------------------------
 // What is running right now.
