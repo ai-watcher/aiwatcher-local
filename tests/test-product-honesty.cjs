@@ -96,9 +96,29 @@ test('session hero and project row visibly distinguish cumulative token scope', 
   assert.match(ctx.renderProjectSessionRow(session), /Cumulative thread total/);
 });
 
-test('320px contracts wrap drawer identity content and stack session actions', () => {
-  assert.match(css, /\.session-hero \.session-meta \{[^}]*overflow-wrap: anywhere/);
-  assert.match(css, /\.session-review-shell \{[^}]*max-width: 100%[^}]*min-width: 0/);
-  assert.match(css, /\.sessions-table \.row-action \{ width: 100%; \}/);
-  assert.match(css, /\.session-id-chip \{ max-width: 100%; white-space: normal; overflow-wrap: anywhere; \}/);
+test('home and project aggregates visibly preserve mixed cumulative scope', () => {
+  const ctx = vm.createContext({
+    esc: value => String(value),
+    meterSvg: () => '',
+    ambientScaleLabels: () => '',
+  });
+  vm.runInContext(extract('miniStats'), ctx);
+  vm.runInContext(extract('ambientQuiet'), ctx);
+  const scope = 'Mixed scope; includes 1 cumulative thread total';
+  assert.match(ctx.miniStats({ sessions: 2, api_value: '$0.00', tokens: '403.8M', tool_calls: 1, tokens_scope_label: scope }), new RegExp(scope));
+  assert.equal(ctx.ambientQuiet({
+    totals: { sessions: 1 }, presence: { live: 0 },
+    recent_sessions: [{ tokens: '403.8M', tokens_scope: 'cumulative_thread', tool: 'codex-cli' }],
+  }).heroUnit, 'cumulative thread tokens');
+});
+
+test('Projects rows show the aggregate token scope beside the value', () => {
+  assert.match(js, /p\.tokens_scope_label \|\| 'Session totals'/);
+  assert.match(js, /class="match-note">\$\{esc\(p\.tokens_scope_label/);
+});
+
+test('mobile rendering test remains wired to the real dashboard stylesheet', () => {
+  const fixture = fs.readFileSync(path.join(__dirname, 'mobile-layout-fixture.html'), 'utf8');
+  assert.match(fixture, /\.\.\/aiwatcher_cli\/web\/index\.css/);
+  assert.match(fixture, /id="layout-result"/);
 });

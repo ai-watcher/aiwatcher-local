@@ -108,19 +108,19 @@
   <text x="296" y="617" font-size="11" fill="#a7b1c0" text-anchor="middle">4 points reduced</text>
 
   <g font-size="10.5" fill="#98a5b8" letter-spacing="0.4">
-    <text x="54" y="654">PREDICTED TOKEN SAVINGS</text>
-    <text x="324" y="654">MODEL CALLS AVOIDED</text>
-    <text x="594" y="654">TOOL CALLS AVOIDED</text>
-    <text x="864" y="654">API-EQUIVALENT SAVINGS</text>
+    <text x="54" y="654">MODELED DIRECTION</text>
+    <text x="324" y="654">MODEL CALL DIRECTION</text>
+    <text x="594" y="654">TOOL CALL DIRECTION</text>
+    <text x="864" y="654">BILLING CLAIM</text>
   </g>
   <g font-size="16" font-weight="700" fill="#eef3fb">
-    <text x="54" y="678">444.0k-678.1k</text>
-    <text x="324" y="678">488-745</text>
-    <text x="594" y="678">319-486</text>
-    <text x="864" y="678">$23.20-$35.43</text>
+    <text x="54" y="678">Lower pressure</text>
+    <text x="324" y="678">May be lower</text>
+    <text x="594" y="678">May be lower</text>
+    <text x="864" y="678">Not measured</text>
   </g>
 
-  <text x="54" y="702" font-size="11" fill="#98a5b8" font-style="italic">medium confidence · 23 local claude sessions spanning 21 days</text>
+  <text x="54" y="702" font-size="11" fill="#98a5b8" font-style="italic">Fixed heuristics only · compare observed outcomes; no savings claimed</text>
   <rect x="978" y="688" width="80" height="22" rx="11" fill="#0d1320" stroke="#263145"/>
   <text x="1018" y="703" font-size="10" fill="#a7b1c0" text-anchor="middle">Observed</text>
   <rect x="1064" y="688" width="100" height="22" rx="11" fill="#0d1320" stroke="#263145"/>

@@ -123,12 +123,7 @@ function openReceipt(receiptId) {
     : `<section class="detail-section"><h3>Observed session</h3><div class="empty">Waiting for a matching local session. Refresh after the agent finishes.</div></section>`;
   const inferred = receipt.inferred
     ? `<section class="detail-section"><h3>${esc(receipt.inferred.label)}</h3>
-       <div class="mini-grid">
-         <div class="mini"><span class="label">Tokens below baseline</span><strong>${esc(receipt.inferred.tokens_label || '—')}</strong></div>
-         <div class="mini"><span class="label">Model calls</span><strong>${esc(receipt.inferred.model_calls ?? '—')}</strong></div>
-         <div class="mini"><span class="label">Tool calls</span><strong>${esc(receipt.inferred.tool_calls ?? '—')}</strong></div>
-         <div class="mini"><span class="label">API-equivalent</span><strong>${esc(receipt.inferred.api_value_label || '—')}</strong></div>
-       </div><p>${esc(receipt.inferred.disclaimer)}</p></section>`
+       <p>${esc(receipt.inferred.disclaimer)}</p></section>`
     : '';
   setDrawerContent(`<section class="detail-section">
     <h2>${esc(receipt.decision_label)}</h2>
@@ -4039,7 +4034,7 @@ function miniStats(totals) {
   return `<div class="mini-grid">
     <div class="mini"><span class="label">Sessions</span><strong>${esc(totals.sessions)}</strong></div>
     <div class="mini"><span class="label">API value</span><strong>${esc(totals.api_value)}</strong></div>
-    <div class="mini"><span class="label">Tokens</span><strong>${esc(totals.tokens)}</strong></div>
+    <div class="mini"><span class="label">Tokens</span><strong>${esc(totals.tokens)}</strong><span class="mini-note">${esc(totals.tokens_scope_label || 'Session totals')}</span></div>
     <div class="mini"><span class="label">Tool calls</span><strong>${esc(totals.tool_calls)}</strong></div>
   </div>`;
 }
@@ -4948,9 +4943,10 @@ function renderProveClaim(unbanked, survival) {
   return parts.join('');
 }
 function renderInsightHeadline(totals) {
+  const tokenScope = esc(totals.tokens_scope_label || 'Session totals');
   const split = totals.replayed_tokens_label && totals.replayed_share_pct
-    ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%)</span>`
-    : `<span class="pill">${esc(totals.tokens_label)} tokens</span>`;
+    ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%) &middot; ${tokenScope}</span>`
+    : `<span class="pill">${esc(totals.tokens_label)} tokens &middot; ${tokenScope}</span>`;
   return `<div class="headline">
     <span class="headline-figure">${esc(totals.api_value_label)}</span>
     <span class="headline-sub">${esc(totals.window_label)} &middot; ${esc(totals.sessions)} sessions</span>
@@ -6328,7 +6324,9 @@ function ambientQuiet(data) {
   return {
     state: 'idle',
     hero: last ? esc(last.tokens) : esc(totals.tokens_label || '-'),
-    heroUnit: last ? 'tokens in the last session' : 'tokens this window',
+    heroUnit: last
+      ? (last.tokens_scope === 'cumulative_thread' ? 'cumulative thread tokens' : 'tokens in the last session')
+      : esc(totals.tokens_scope_label || 'Session totals'),
     // "no session running" was asserted from the absence of a *chartable*
     // session, not from the absence of a session. A Codex thread exposes a
     // running total and no per-turn numbers, so it is live and unplottable at
@@ -6352,7 +6350,7 @@ function ambientQuiet(data) {
       // it a third time. One labelled statement of a number per screen.
       // The hero is the last session's tokens; this is every session in the
       // window. Two token totals 200px apart, and only one of them was scoped.
-      totals.tokens_label ? ['tokens this window', totals.tokens_label] : null,
+      totals.tokens_label ? [totals.tokens_scope_label || 'session totals', totals.tokens_label] : null,
       totals.useful_outcomes ? ['useful', String(totals.useful_outcomes)] : null,
       // Frozen across every range because it is a rate, not a window total.
       totals.projected_month_label ? ['projected month', totals.projected_month_label] : null,
@@ -6728,7 +6726,7 @@ async function loadOnce(resetDetail, forceRefresh) {
         <td title="${esc(p.name || '')}"><button class="row-open" onclick="selectProject(decodeURIComponent(this.closest('tr').dataset.id))">${esc(projectName({ project_full: p.name || p.short_name }))}</button></td>
         <td>${healthPill(p.health)}</td>
         <td class="mono">${esc(p.sessions)}</td>
-        <td class="mono">${esc(p.tokens_label)}</td>
+        <td class="mono" title="${esc(p.tokens_scope_label || 'Session totals')}">${esc(p.tokens_label)}<span class="match-note">${esc(p.tokens_scope_label || 'Session totals')}</span></td>
         <td class="mono">${esc(p.calls)}</td>
         <td class="mono">${esc(p.api_value_label)}</td>
       </tr>`).join('')

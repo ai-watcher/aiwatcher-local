@@ -663,6 +663,56 @@ class DashboardServeTests(unittest.TestCase):
 
         kill.assert_not_called()
 
+    def test_restart_reports_failure_when_verified_process_does_not_release_port(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.os, "name", "posix"),
+            patch.object(ui.os, "kill"),
+            patch.object(ui, "is_port_available", return_value=False),
+            patch.object(ui.time, "monotonic", side_effect=[10.0, 14.0]),
+            patch.object(ui.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(OSError, "refusing to start a second dashboard"):
+                ui.restart_local_server(8765)
+
+    def test_restart_reports_failure_when_verified_process_cannot_be_signaled(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.os, "name", "posix"),
+            patch.object(ui.os, "kill", side_effect=PermissionError("denied")),
+        ):
+            with self.assertRaisesRegex(OSError, "refusing to start a second dashboard"):
+                ui.restart_local_server(8765)
+
+    def test_windows_taskkill_failure_does_not_start_a_second_dashboard(self) -> None:
+        taskkill = Mock(returncode=1)
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.os, "name", "nt"),
+            patch.object(ui.subprocess, "run", return_value=taskkill) as run,
+            patch.object(ui, "is_port_available", return_value=False),
+        ):
+            with self.assertRaisesRegex(OSError, "refusing to start a second dashboard"):
+                ui.restart_local_server(8765)
+
+        run.assert_called_once()
+
+    def test_serve_does_not_bind_when_verified_restart_fails(self) -> None:
+        with (
+            patch.object(ui, "restart_local_server", side_effect=OSError("termination failed")),
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+        ):
+            with self.assertRaisesRegex(OSError, "termination failed"):
+                ui.serve(host="127.0.0.1", port=8765, auto_port=True, restart=True)
+
+        server_cls.assert_not_called()
+
     def test_recorded_dashboard_requires_matching_health_pid(self) -> None:
         response = Mock()
         response.read.return_value = json.dumps({
@@ -5961,7 +6011,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(receipt["risk_points_reduced"], 6)
         self.assertEqual(receipt["actual"]["tokens"], 1_200)
         self.assertEqual(receipt["outcome"], "useful")
-        self.assertIsNotNone(receipt["inferred"])
+        self.assertEqual(set(receipt["inferred"]), {"label", "disclaimer"})
+        self.assertEqual(receipt["inferred"]["label"], "No causal savings claimed")
 
     def test_receipt_uses_post_intervention_events_for_existing_thread(self) -> None:
         now = datetime.now(timezone.utc)
@@ -6053,6 +6104,18 @@ class DashboardWindowTests(unittest.TestCase):
         titles = {item["title"] for item in summary["insights"]}
         self.assertNotIn("Large-context session", titles)
         self.assertNotIn("Possible iterative loop", titles)
+        self.assertEqual(
+            summary["totals"]["tokens_scope_label"],
+            "Cumulative thread totals; not bounded to this window",
+        )
+        with patch.object(ui, "rows_for_window", return_value=[cumulative]):
+            detail = ui.build_project_detail("/repo", days=1)
+        self.assertEqual(
+            detail["totals"]["tokens_scope_label"],
+            "Cumulative thread totals; not bounded to this window",
+        )
+        self.assertEqual(detail["health"]["status"], "limited")
+        self.assertEqual(detail["health"]["label"], "Cumulative totals only")
 
 
 class WeeklyDigestTests(unittest.TestCase):

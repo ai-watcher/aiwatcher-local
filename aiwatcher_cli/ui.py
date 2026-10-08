@@ -810,6 +810,24 @@ def has_cumulative_totals(session: LocalSession) -> bool:
     return any("cumulative" in note.lower() for note in session.notes)
 
 
+def aggregate_token_scope(rows: list[LocalSession]) -> dict[str, str]:
+    cumulative_count = sum(1 for row in rows if has_cumulative_totals(row))
+    if rows and cumulative_count == len(rows):
+        return {
+            "scope": "cumulative_only",
+            "label": "Cumulative thread totals; not bounded to this window",
+        }
+    if cumulative_count:
+        return {
+            "scope": "mixed",
+            "label": (
+                f"Mixed scope; includes {cumulative_count} cumulative thread total"
+                f"{'' if cumulative_count == 1 else 's'}"
+            ),
+        }
+    return {"scope": "session", "label": "Session totals"}
+
+
 def group_rows(rows: list[LocalSession], key_fn) -> list[dict[str, object]]:
     grouped: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
@@ -870,19 +888,28 @@ def _append_detected_tool_rows(
 
 
 def _project_health(items: list[LocalSession]) -> dict[str, object]:
-    stats = summarize(items)
+    bounded_items = [item for item in items if not has_cumulative_totals(item)]
+    stats = summarize(bounded_items)
     tokens = int(stats["tokens"])
     calls = int(stats["calls"])
     tool_calls = int(stats["tool_calls"])
     api_value = float(stats["api_value_usd"])
-    plan_limited = token_split(items)["plan_limited"]
-    sessions = int(stats["sessions"])
+    plan_limited = token_split(bounded_items)["plan_limited"]
+    sessions = len(items)
     if sessions <= 0:
         return {
             "status": "limited",
             "label": "Limited data",
             "tone": "limited",
             "reason": "No recent local sessions were found.",
+            "action_label": "Review",
+        }
+    if not bounded_items:
+        return {
+            "status": "limited",
+            "label": "Cumulative totals only",
+            "tone": "limited",
+            "reason": "These lifetime thread totals are not bounded to the reporting window.",
             "action_label": "Review",
         }
     if tool_calls >= 1_000 or calls >= 1_000 or tokens >= 50_000_000:
@@ -931,6 +958,7 @@ def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
             UNATTRIBUTED_PROJECT,
         )
         stats = summarize(items)
+        token_scope = aggregate_token_scope(items)
         attributed = key != UNATTRIBUTED_PROJECT
         name = key if attributed else UNATTRIBUTED_PROJECT_LABEL
         result.append({
@@ -944,6 +972,8 @@ def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
             "sessions": stats["sessions"],
             "tokens": stats["tokens"],
             "tokens_label": compact_int(int(stats["tokens"])),
+            "tokens_scope": token_scope["scope"],
+            "tokens_scope_label": token_scope["label"],
             "api_value_usd": round(float(stats["api_value_usd"]), 6),
             "api_value_label": money(float(stats["api_value_usd"])),
             "calls": stats["calls"],
@@ -2599,6 +2629,7 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
         project,
     )
     stats = summarize(rows)
+    token_scope = aggregate_token_scope(rows)
     sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     return {
         "project": display_project,
@@ -2613,6 +2644,8 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
             "sessions": stats["sessions"],
             "api_value": money(float(stats["api_value_usd"])),
             "tokens": compact_int(int(stats["tokens"])),
+            "tokens_scope": token_scope["scope"],
+            "tokens_scope_label": token_scope["label"],
             "calls": stats["calls"],
             "tool_calls": stats["tool_calls"],
         },
@@ -4485,24 +4518,12 @@ def _build_intervention_receipts(
                     "reason": reason,
                 }
         if actual_reliable and original:
-            def avoided(metric: str, observed: float) -> float | None:
-                values = original.get(metric)
-                if not isinstance(values, list) or len(values) != 2:
-                    return None
-                midpoint = (float(values[0]) + float(values[1])) / 2
-                return max(0.0, midpoint - observed)
-
-            inferred_tokens = avoided("tokens", float(actual["tokens"]))
-            inferred_calls = avoided("model_calls", float(actual["model_calls"]))
-            inferred_tools = avoided("tool_calls", float(actual["tool_calls"]))
-            inferred_cost = avoided("api_value_usd", float(actual["api_value_usd"]))
             inferred = {
-                "tokens_label": compact_int(int(inferred_tokens)) if inferred_tokens is not None else None,
-                "model_calls": int(inferred_calls) if inferred_calls is not None else None,
-                "tool_calls": int(inferred_tools) if inferred_tools is not None else None,
-                "api_value_label": money(inferred_cost) if inferred_cost is not None else None,
-                "label": "Observed below historical baseline",
-                "disclaimer": "An inferred comparison, not a guaranteed counterfactual saving.",
+                "label": "No causal savings claimed",
+                "disclaimer": (
+                    "Observed usage and the pre-run heuristic are shown separately. "
+                    "AIWatcher does not subtract one from the other or treat the difference as savings."
+                ),
             }
         outcome = outcomes.get(session_id) if session_id else None
         receipts.append({
@@ -6049,6 +6070,7 @@ def build_summary(
 
     stats = summarize(rows)
     month_stats = summarize(month_rows)
+    token_scope = aggregate_token_scope(rows)
     split = token_split(rows)
     day_of_month = max(1, now.day)
     projected_month = float(month_stats["api_value_usd"]) / day_of_month * 30
@@ -6246,6 +6268,8 @@ def build_summary(
             "api_value_label": money(float(stats["api_value_usd"])),
             "projected_month_label": money(projected_month),
             "tokens_label": compact_int(int(stats["tokens"])),
+            "tokens_scope": token_scope["scope"],
+            "tokens_scope_label": token_scope["label"],
             # A single token total is misleading once cache reads are counted:
             # replayed history is the same content billed again on every turn,
             # so the combined figure runs into the billions and says nothing
@@ -9988,14 +10012,34 @@ def restart_local_server(_requested_port: int) -> int | None:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode != 0:
-                return None
+                if is_port_available(str(server["host"]), port):
+                    return port
+                raise OSError(
+                    f"Could not terminate the verified AIWatcher dashboard on port {port}; "
+                    "refusing to start a second dashboard."
+                )
         else:
             os.kill(pid, signal.SIGTERM)
-    except (OSError, OverflowError, ValueError):
-        return None
+    except ProcessLookupError:
+        if is_port_available(str(server["host"]), port):
+            return port
+        raise OSError(
+            f"The recorded AIWatcher process {pid} no longer exists, but port {port} is still occupied; "
+            "refusing to start a second dashboard."
+        )
+    except (OSError, OverflowError, ValueError) as exc:
+        raise OSError(
+            f"Could not terminate the verified AIWatcher dashboard on port {port}; "
+            "refusing to start a second dashboard."
+        ) from exc
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and not is_port_available(str(server["host"]), port):
         time.sleep(0.05)
+    if not is_port_available(str(server["host"]), port):
+        raise OSError(
+            f"Verified AIWatcher dashboard on port {port} did not stop within 3 seconds; "
+            "refusing to start a second dashboard."
+        )
     return port
 
 
