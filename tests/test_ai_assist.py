@@ -377,8 +377,58 @@ class AiAssistTests(unittest.TestCase):
 
         self.assertIn("Working tree: state unknown", text)
         self.assertIn("junit-results.xml | result unknown", text)
-        self.assertIn("No completed verification was observed", text)
+        self.assertIn("No authoritative session-bound verification", text)
         self.assertNotIn("Full suite passed", text)
+
+    def test_fresh_start_only_accepts_explicit_authoritative_verification(self) -> None:
+        historical = {
+            "summary": "passed | historical: starting Git state unavailable | pytest",
+            "status": "passed", "completion_state": "completed", "authoritative": False,
+        }
+        authoritative = {
+            "summary": "passed | current for this Git state | pytest",
+            "status": "passed", "completion_state": "completed", "authoritative": True,
+        }
+        base = {
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "checkout": {"path": "/repo/ai", "dirty": False},
+        }
+
+        historical_text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({**base, "evidence": {"tests": [historical]}}),
+        )
+        authoritative_text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({**base, "evidence": {"tests": [authoritative]}}),
+        )
+
+        self.assertIn("No authoritative session-bound verification", historical_text)
+        self.assertNotIn("No authoritative session-bound verification", authoritative_text)
+
+    def test_fresh_start_uses_authoritative_sixth_verification_without_duplication(self) -> None:
+        rows = [
+            {
+                "summary": f"historical check {index}",
+                "status": "passed", "completion_state": "completed", "authoritative": False,
+            }
+            for index in range(5)
+        ]
+        rows.append({
+            "summary": "authoritative sixth check",
+            "status": "passed", "completion_state": "completed", "authoritative": True,
+        })
+        text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {"tests": rows},
+            }),
+        )
+
+        self.assertNotIn("No authoritative session-bound verification", text)
+        self.assertEqual(text.count("authoritative sixth check"), 1)
 
     def test_fresh_start_word_cap_resists_model_ellipsis_prefixes(self) -> None:
         long_item = "...and " + ("discretionary model prose " * 120)

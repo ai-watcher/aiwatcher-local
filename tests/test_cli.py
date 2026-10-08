@@ -44,6 +44,42 @@ class VerificationRunnerTests(unittest.TestCase):
     def test_does_not_store_arbitrary_shell_commands_as_verification(self) -> None:
         self.assertIsNone(cli._verification_runner(["bash", "-lc", "cat .env && pytest"]))
         self.assertIsNone(cli._verification_runner(["git", "status"]))
+
+    def test_verification_binding_requires_complete_unchanged_git_state(self) -> None:
+        stable = {"checkout_id": "checkout", "head": "abc", "dirty_fingerprint": "clean"}
+        self.assertEqual(cli._verification_state_binding(stable, dict(stable)), "git_state")
+        self.assertEqual(
+            cli._verification_state_binding(stable, {**stable, "head": "def"}),
+            "git_state_changed",
+        )
+        self.assertEqual(
+            cli._verification_state_binding(stable, {**stable, "dirty_fingerprint": None}),
+            "historical",
+        )
+
+    def test_command_run_records_both_git_states_without_changing_exit_code(self) -> None:
+        before = {
+            "checkout": "/repo", "checkout_id": "checkout", "repository_id": "repo",
+            "repository_lineage_id": "lineage", "head": "abc", "dirty_fingerprint": "clean",
+        }
+        after = {**before, "head": "def"}
+        receipt = Mock()
+        with (
+            patch.object(cli, "_verification_runner", return_value="pytest"),
+            patch.object(cli, "_verification_git_fingerprint", side_effect=[before, after]),
+            patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess(["pytest"], 7)),
+            patch.object(cli, "record_verification_receipt", receipt),
+            patch.object(cli, "environment_session_identity", return_value=("session", "codex")),
+            patch.object(cli, "scan_all", return_value=[]),
+        ):
+            result = cli.command_run(SimpleNamespace(command=["pytest"]))
+
+        self.assertEqual(result, 7)
+        saved = receipt.call_args.kwargs
+        self.assertEqual(saved["started_checkout_id"], "checkout")
+        self.assertEqual(saved["started_head"], "abc")
+        self.assertEqual(saved["head"], "def")
+        self.assertEqual(saved["state_binding"], "git_state_changed")
 from aiwatcher_cli.processes import RuntimeProcess
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 

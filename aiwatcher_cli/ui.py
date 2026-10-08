@@ -1634,22 +1634,37 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
         sha = str(item.get("sha") or "").strip()
         subject = str(item.get("subject") or "").strip()
         commits.append(f"{sha}: {subject}".strip(": "))
-    tests = []
+    tests: list[dict[str, object]] = []
     for item in (raw_evidence.get("tests") or [])[:6]:
         if isinstance(item, dict):
             parts = [str(item.get("status") or "observed").strip()]
             if item.get("current") is True:
                 parts.append("current for this Git state")
             elif item.get("current") is False:
-                parts.append("stale after Git state changed")
+                if item.get("state_binding") == "git_state_changed":
+                    parts.append("stale: Git state changed during verification")
+                elif item.get("state_binding") == "historical":
+                    parts.append("historical: starting Git state unavailable")
+                else:
+                    parts.append("stale: current Git state differs")
             parts.extend(
                 str(item.get(key) or "").strip()
                 for key in ("name", "path", "artifact")
                 if item.get(key)
             )
-            tests.append(" | ".join(parts))
+            tests.append({
+                "summary": " | ".join(parts),
+                "status": str(item.get("status") or "observed").strip()[:40],
+                "completion_state": str(item.get("completion_state") or "unknown").strip()[:40],
+                "authoritative": item.get("authoritative") is True,
+            })
         else:
-            tests.append(str(item))
+            tests.append({
+                "summary": str(item)[:320],
+                "status": "observed",
+                "completion_state": "unknown",
+                "authoritative": False,
+            })
     logged_decisions = []
     for item in (capsule.get("decisions") or [])[:5]:
         if not isinstance(item, dict):
@@ -1708,7 +1723,7 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
         "evidence": {
             "commits": commits,
             "changed_files": [str(item) for item in (raw_evidence.get("changed_files") or [])[:12]],
-            "tests": [item for item in tests if item][:6],
+            "tests": [item for item in tests if item.get("summary")][:6],
             "confidence": raw_evidence.get("confidence"),
         },
         "warnings": [str(item) for item in (capsule.get("warnings") or [])[:6]],
