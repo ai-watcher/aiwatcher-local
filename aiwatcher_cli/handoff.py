@@ -760,7 +760,7 @@ def build_handoff_capsule(
             "- Ask the user to confirm the repository/path before editing.",
         ])
     completed_verification = any(
-        item.get("attribution") == "session_bound"
+        item.get("authoritative") is True
         and item.get("completion_state") == "completed"
         and item.get("status") in {"passed", "failed"}
         for item in evidence.tests
@@ -841,7 +841,7 @@ def build_handoff_capsule(
             [
                 f"- {item.get('artifact') or item.get('name')}: "
                 f"{item.get('status') or item.get('updated_at') or 'observed'}"
-                f"{' (current for this Git state)' if item.get('current') is True else ' (stale; Git state changed)' if item.get('current') is False else ''}"
+                f"{' (current for this Git state)' if item.get('current') is True else ' (stale; Git state changed during verification)' if item.get('state_binding') == 'git_state_changed' else ' (historical; starting Git state unavailable)' if item.get('state_binding') == 'historical' else ' (stale; current Git state differs)' if item.get('current') is False else ''}"
                 f"{' [session-bound]' if item.get('attribution') == 'session_bound' else ' [time-window candidate; may belong to another session]' if item.get('attribution') == 'inferred_time_window' else ''}"
                 for item in evidence.tests[:6]
             ]

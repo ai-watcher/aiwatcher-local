@@ -32,6 +32,7 @@ class HandoffTests(unittest.TestCase):
             checkout_path="/repo", tests=[{
                 "name": "pytest", "status": "passed", "completion_state": "completed",
                 "attribution": "session_bound", "source": "Session-bound terminal receipt",
+                "authoritative": True,
             }],
         )
         with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
@@ -39,6 +40,45 @@ class HandoffTests(unittest.TestCase):
 
         self.assertIn("pytest: passed", brief)
         self.assertNotIn("No session-bound completed verification was observed", brief)
+
+    def test_changed_state_verification_does_not_suppress_unverified_warning(self) -> None:
+        session = LocalSession(
+            session_id="changed", tool="codex-cli", project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = OutcomeEvidence(
+            session_id="changed", project_path="/repo", repo_root="/repo",
+            checkout_path="/repo", tests=[{
+                "name": "pytest", "status": "passed", "completion_state": "completed",
+                "attribution": "session_bound", "current": False,
+                "state_binding": "git_state_changed",
+            }],
+        )
+        with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
+            brief = build_handoff_capsule(session, [])["next_brief"]
+
+        self.assertIn("pytest: passed", brief)
+        self.assertIn("stale; Git state changed during verification", brief)
+        self.assertIn("No session-bound completed verification was observed", brief)
+
+    def test_historical_verification_explains_missing_start_state(self) -> None:
+        session = LocalSession(
+            session_id="historical", tool="codex-cli", project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = OutcomeEvidence(
+            session_id="historical", project_path="/repo", repo_root="/repo",
+            checkout_path="/repo", tests=[{
+                "name": "pytest", "status": "passed", "completion_state": "completed",
+                "attribution": "session_bound", "current": False,
+                "state_binding": "historical",
+            }],
+        )
+        with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
+            brief = build_handoff_capsule(session, [])["next_brief"]
+
+        self.assertIn("historical; starting Git state unavailable", brief)
+        self.assertNotIn("stale; Git state changed)", brief)
 
     def test_time_window_verification_is_labeled_and_not_treated_as_session_bound(self) -> None:
         session = LocalSession(

@@ -722,6 +722,36 @@ def _packet_list(packet: dict[str, object], key: str, *, limit: int = 8) -> list
     return [_clean_line(item, limit=320) for item in value[:limit] if _clean_line(item, limit=320)]
 
 
+def _packet_verification(evidence: dict[str, object], *, limit: int = 5) -> list[dict[str, object]]:
+    value = evidence.get("tests")
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for item in value[:limit]:
+        if isinstance(item, dict):
+            summary = _clean_line(item.get("summary"), limit=320)
+            if not summary:
+                continue
+            rows.append({
+                "summary": summary,
+                "status": _clean_line(item.get("status"), limit=40).lower(),
+                "completion_state": _clean_line(item.get("completion_state"), limit=40).lower(),
+                "authoritative": item.get("authoritative") is True,
+            })
+        else:
+            summary = _clean_line(item, limit=320)
+            if summary:
+                # Old packet shapes remain readable, but a string can never
+                # prove session attribution or exact Git-state authority.
+                rows.append({
+                    "summary": summary,
+                    "status": "unknown",
+                    "completion_state": "unknown",
+                    "authoritative": False,
+                })
+    return rows
+
+
 def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -> str:
     packet = _handoff_packet(packet_text)
     source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
@@ -739,14 +769,19 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     next_steps = _clean_list(parsed.get("next_steps"), limit=6)
     uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
     acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
-    packet_verification = _packet_list(evidence, "tests", limit=5)
+    verification_rows = _packet_verification(evidence, limit=6)
+    packet_verification = [str(item["summary"]) for item in verification_rows]
     completed_verification = any(
-        re.search(r"\b(?:passed|failed)\b", item.lower()) and "result unknown" not in item.lower()
-        for item in packet_verification
+        item.get("authoritative") is True
+        and item.get("completion_state") == "completed"
+        and item.get("status") in {"passed", "failed"}
+        for item in verification_rows
     )
     verification = [
         *packet_verification,
-        *([] if completed_verification else ["No completed verification was observed; do not claim the prior work is verified."]),
+        *([] if completed_verification else [
+            "No authoritative session-bound verification for the exact Git state was observed; do not claim the prior work is verified."
+        ]),
     ]
     objective_status = _clean_line(parsed.get("objective_status"), limit=180)
 
@@ -790,7 +825,6 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     evidence_lines = [
         *_packet_list(evidence, "commits", limit=4),
         *_packet_list(evidence, "changed_files", limit=8),
-        *_packet_list(evidence, "tests", limit=5),
         *_packet_list(packet, "logged_decisions", limit=5),
     ]
 

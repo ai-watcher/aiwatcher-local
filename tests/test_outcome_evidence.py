@@ -8,10 +8,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from aiwatcher_cli import local_state
+from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.git_identity import resolve_git_identity
+from aiwatcher_cli.handoff import build_handoff_capsule
 from aiwatcher_cli.outcome_evidence import (
     OutcomeEvidence,
     _checkout_root,
@@ -293,6 +295,86 @@ class OutcomeEvidenceTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
 
+    def test_dirty_fingerprint_changes_when_dirty_submodule_content_changes(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            child = Path(temp_dir, "child")
+            parent = Path(temp_dir, "parent")
+            child.mkdir()
+            parent.mkdir()
+            init_repo(str(child))
+            commit_file(str(child), "nested.py", "base\n", "child base", when=now)
+            init_repo(str(parent))
+            run(
+                ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(child), "nested"],
+                str(parent),
+            )
+            run(["git", "commit", "-m", "add submodule"], str(parent))
+            nested = parent / "nested" / "nested.py"
+            nested.write_text("first edit\n", encoding="utf-8")
+            first = _checkout_state(str(parent))["dirty_fingerprint"]
+            nested.write_text("different edit\n", encoding="utf-8")
+            second = _checkout_state(str(parent))["dirty_fingerprint"]
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
+    def test_dirty_fingerprint_ignores_submodule_dirty_display_policy(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            child = Path(temp_dir, "child")
+            parent = Path(temp_dir, "parent")
+            child.mkdir()
+            parent.mkdir()
+            init_repo(str(child))
+            commit_file(str(child), "nested.py", "base\n", "child base", when=now)
+            init_repo(str(parent))
+            run(
+                ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(child), "nested"],
+                str(parent),
+            )
+            run(["git", "commit", "-m", "add submodule"], str(parent))
+            run(["git", "config", "submodule.nested.ignore", "dirty"], str(parent))
+            nested = parent / "nested" / "nested.py"
+            nested.write_text("first hidden edit\n", encoding="utf-8")
+            first = _checkout_state(str(parent))["dirty_fingerprint"]
+            nested.write_text("different hidden edit\n", encoding="utf-8")
+            second = _checkout_state(str(parent))["dirty_fingerprint"]
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
+    def test_dirty_fingerprint_tracks_submodule_head_when_parent_ignores_all(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            child = Path(temp_dir, "child")
+            parent = Path(temp_dir, "parent")
+            child.mkdir()
+            parent.mkdir()
+            init_repo(str(child))
+            commit_file(str(child), "nested.py", "base\n", "child base", when=now)
+            init_repo(str(parent))
+            run(
+                ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(child), "nested"],
+                str(parent),
+            )
+            run(["git", "commit", "-m", "add submodule"], str(parent))
+            run(["git", "config", "submodule.nested.ignore", "all"], str(parent))
+            nested_repo = parent / "nested"
+            run(["git", "config", "user.email", "test@example.com"], str(nested_repo))
+            run(["git", "config", "user.name", "AIWatcher Test"], str(nested_repo))
+            first = _checkout_state(str(parent))["dirty_fingerprint"]
+            commit_file(
+                str(nested_repo), "nested.py", "new committed state\n", "child update", when=now,
+            )
+            second = _checkout_state(str(parent))["dirty_fingerprint"]
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux permits undecodable byte filenames")
     def test_dirty_fingerprint_handles_non_utf8_untracked_filename(self) -> None:
         now = datetime.now(timezone.utc)
@@ -362,6 +444,9 @@ class OutcomeEvidenceTests(unittest.TestCase):
                     checkout_path=repo,
                     repository_id=identity.repository_id,
                     repository_lineage_id=identity.repository_lineage_id,
+                    started_checkout_id=identity.checkout_id,
+                    started_head=head,
+                    started_dirty_fingerprint="e3b0c44298fc1c149afbf4c8",
                     checkout_id=identity.checkout_id,
                     head=head,
                     dirty_fingerprint="e3b0c44298fc1c149afbf4c8",
@@ -397,6 +482,8 @@ class OutcomeEvidenceTests(unittest.TestCase):
                     runner="pytest", checkout_path=repo,
                     repository_id=identity.repository_id,
                     repository_lineage_id=identity.repository_lineage_id,
+                    started_checkout_id=identity.checkout_id,
+                    started_head=head, started_dirty_fingerprint=fingerprint,
                     checkout_id=identity.checkout_id,
                     head=head, dirty_fingerprint=fingerprint,
                     started_at=now.isoformat(), finished_at=(now + timedelta(seconds=30)).isoformat(),
@@ -430,6 +517,8 @@ class OutcomeEvidenceTests(unittest.TestCase):
                         runner="pytest", checkout_path=repo,
                         repository_id=identity.repository_id,
                         repository_lineage_id=identity.repository_lineage_id,
+                        started_checkout_id=identity.checkout_id,
+                        started_head=head, started_dirty_fingerprint=fingerprint,
                         checkout_id=identity.checkout_id,
                         head=head, dirty_fingerprint=fingerprint,
                         started_at=(now + timedelta(minutes=offset)).isoformat(),
@@ -448,6 +537,104 @@ class OutcomeEvidenceTests(unittest.TestCase):
         self.assertNotIn("authoritative", evidence.tests[1])
         self.assertEqual(evidence.confidence, "low")
         self.assertFalse(any("passing verification" in reason for reason in evidence.reasons))
+
+    def test_changed_or_legacy_git_basis_is_visible_but_never_authoritative(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = os.path.join(temp_dir, "repo")
+            os.mkdir(repo)
+            init_repo(repo)
+            head = commit_file(repo, "app.py", "base\n", "base", when=now)
+            fingerprint = _checkout_state(repo)["dirty_fingerprint"]
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                identity = resolve_git_identity(repo)
+                assert identity is not None
+                common = {
+                    "runner": "pytest", "checkout_path": repo,
+                    "repository_id": identity.repository_id,
+                    "repository_lineage_id": identity.repository_lineage_id,
+                    "checkout_id": identity.checkout_id, "head": head,
+                    "dirty_fingerprint": fingerprint,
+                    "started_at": now.isoformat(), "exit_code": 0,
+                    "session_id": "basis",
+                }
+                local_state.record_verification_receipt(
+                    **common, finished_at=(now + timedelta(seconds=30)).isoformat(),
+                    started_checkout_id=identity.checkout_id,
+                    started_head="different", started_dirty_fingerprint=fingerprint,
+                    state_binding="git_state_changed",
+                )
+                local_state.record_verification_receipt(
+                    **common, finished_at=(now + timedelta(seconds=20)).isoformat(),
+                    state_binding="git_state",
+                )
+                legacy = dict(common)
+                legacy.pop("checkout_id")
+                legacy["repository_id"] = head[:16]
+                local_state.record_verification_receipt(
+                    **legacy, finished_at=(now + timedelta(seconds=10)).isoformat(),
+                    state_binding="historical",
+                )
+                evidence = build_outcome_evidence(LocalSession(
+                    session_id="basis", tool="codex-cli", project_path=repo,
+                    started_at=now, updated_at=now + timedelta(minutes=1),
+                ))
+
+        self.assertEqual(len(evidence.tests), 3)
+        self.assertTrue(all(item["current"] is False for item in evidence.tests))
+        self.assertTrue(all("authoritative" not in item for item in evidence.tests))
+
+    def test_mutating_run_is_visible_but_does_not_suppress_fresh_start_warning(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir, "repo")
+            repo.mkdir()
+            init_repo(str(repo))
+            commit_file(str(repo), "tracked.txt", "base\n", "base", when=now)
+            test_path = repo / "test_mutating.py"
+            test_path.write_text(
+                "import pathlib\nimport unittest\n\n"
+                "class MutatingTest(unittest.TestCase):\n"
+                "    def test_mutates_tracked_file(self):\n"
+                "        pathlib.Path('tracked.txt').write_text('changed\\n')\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", "test_mutating.py"], str(repo))
+            run(["git", "commit", "-m", "add mutating test"], str(repo))
+            state_file = os.path.join(temp_dir, "state.json")
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(repo)
+                with (
+                    patch.dict(os.environ, {
+                        "AIWATCHER_STATE_FILE": state_file,
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    }),
+                    patch.object(cli, "_verification_runner", return_value="python -m unittest"),
+                    patch.object(cli, "environment_session_identity", return_value=("mutating", "codex")),
+                    patch.object(cli, "scan_all", return_value=[]),
+                ):
+                    exit_code = cli.command_run(SimpleNamespace(
+                        command=[sys.executable, "-m", "unittest", "test_mutating.py"]
+                    ))
+                    session = LocalSession(
+                        session_id="mutating", tool="codex-cli", project_path=str(repo),
+                        started_at=now, updated_at=datetime.now(timezone.utc),
+                    )
+                    evidence = build_outcome_evidence(session)
+                    brief = build_handoff_capsule(session, [])["next_brief"]
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(exit_code, 0)
+        receipt = next(item for item in evidence.tests if item.get("name") == "python -m unittest")
+        self.assertEqual(receipt["status"], "passed")
+        self.assertEqual(receipt["state_binding"], "git_state_changed")
+        self.assertFalse(receipt["current"])
+        self.assertNotIn("authoritative", receipt)
+        self.assertIn("stale; Git state changed during verification", brief)
+        self.assertIn("No session-bound completed verification was observed", brief)
 
     def test_uses_observed_linked_worktree_and_reports_unpushed_state(self) -> None:
         now = datetime.now(timezone.utc)

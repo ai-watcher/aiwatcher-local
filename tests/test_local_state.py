@@ -85,6 +85,9 @@ class LocalStateTests(unittest.TestCase):
                     checkout_path="/repo/review",
                     repository_id="repo-1",
                     repository_lineage_id="lineage-1",
+                    started_checkout_id="checkout-1",
+                    started_head="abc123",
+                    started_dirty_fingerprint="clean",
                     checkout_id="checkout-1",
                     head="abc123",
                     dirty_fingerprint="clean",
@@ -98,6 +101,9 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(rows[0]["runner"], "pytest")
         self.assertEqual(rows[0]["checkout_id"], "checkout-1")
         self.assertEqual(rows[0]["repository_lineage_id"], "lineage-1")
+        self.assertEqual(rows[0]["started_checkout_id"], "checkout-1")
+        self.assertEqual(rows[0]["started_head"], "abc123")
+        self.assertEqual(rows[0]["started_dirty_fingerprint"], "clean")
         self.assertNotIn("output", rows[0])
         self.assertNotIn("command", rows[0])
 
