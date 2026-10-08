@@ -502,6 +502,8 @@
     @media (max-width: 560px) {
       .ambient { padding: 16px; }
       .ambient-hero { font-size: var(--fs-6); }
+      .ambient-top { flex-direction: column; align-items: flex-start; gap: var(--sp-1); }
+      .freshness { white-space: normal; overflow-wrap: anywhere; }
       /* No deeper reservation here. An earlier draft of this change also named
          the charted session in that row, which needed a third line at this
          width; without it the longest running row measures 28px against the
@@ -1598,6 +1600,9 @@
     .detail-section:last-child { border-bottom: 0; }
     .session-review-shell {
       position: relative;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       border: 1px solid var(--drawer-line-strong);
       border-radius: var(--r-2);
       background:
@@ -1629,9 +1634,10 @@
         linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent);
       padding: 22px;
       margin: 0;
+      min-width: 0;
     }
     .session-hero h2 { margin-bottom: 5px; font-size: var(--fs-5); line-height: 1.2; overflow-wrap: anywhere; }
-    .session-hero .session-meta { margin-bottom: 12px; }
+    .session-hero .session-meta { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; }
     .session-identity-card {
       display: grid;
       gap: var(--sp-1);
@@ -2358,8 +2364,26 @@
       .agent-tree ul > li::before { left: -14px; width: 12px; }
       .agent-node { grid-template-columns: 10px minmax(0, 1fr); }
       .agent-node .agent-status { grid-column: 2; justify-self: start; }
+      .session-identity-row { align-items: flex-start; flex-wrap: wrap; }
+      .session-id-chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+      .session-hero { padding: 16px; }
+      .session-review-shell > .detail-section { padding-left: 16px; padding-right: 16px; }
+      .sessions-table-wrap { overflow: visible; }
+      .sessions-table { min-width: 0; }
+      .sessions-table thead { display: none; }
+      .sessions-table, .sessions-table tbody, .sessions-table tr, .sessions-table td { display: block; width: 100%; }
+      .sessions-table tr { padding: 12px 0; border-top: 1px solid var(--line); }
+      .sessions-table td { border: 0; padding: 5px 0; text-align: left; white-space: normal; }
+      .sessions-table td::before { content: attr(data-label); display: block; color: var(--faint); font-size: var(--fs-1); }
+      .sessions-table td:first-child::before { content: 'Chat'; }
+      .sessions-table td:nth-child(2)::before { content: 'Project'; }
+      .sessions-table td:nth-child(3)::before { content: 'Model'; }
+      .sessions-table .session-row-action { padding-top: 10px; }
+      .sessions-table .row-action { width: 100%; }
       table { min-width: 620px; }
+      .sessions-table { min-width: 0; }
       .table-wrap { overflow-x: auto; }
+      .sessions-table-wrap { overflow: visible; }
     }
 
     /* Rows that contain an action have to answer the pointer. There were 15

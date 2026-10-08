@@ -637,6 +637,98 @@ class DashboardServeTests(unittest.TestCase):
             cwd=str(cwd_path.resolve()),
         )
 
+    def test_restart_reuses_verified_dashboard_fallback_port(self) -> None:
+        cwd_path = Path("/repo/work")
+        with (
+            patch.object(ui, "restart_local_server", return_value=8799) as restart,
+            patch.object(ui, "find_available_port", return_value=8799) as find_port,
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+            patch.object(ui, "install_identity", return_value={}),
+            patch.object(ui.Path, "cwd", return_value=cwd_path),
+            patch.object(ui, "record_ui_server"),
+        ):
+            server_cls.return_value.serve_forever.side_effect = KeyboardInterrupt
+            ui.serve(host="127.0.0.1", port=8765, auto_port=True, restart=True)
+
+        restart.assert_called_once_with(8765)
+        find_port.assert_called_once_with("127.0.0.1", 8799, 20)
+        server_cls.assert_called_once_with(("127.0.0.1", 8799), ui.UIHandler)
+
+    def test_restart_refuses_unverified_port_occupant(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value=None),
+            patch.object(ui.os, "kill") as kill,
+        ):
+            self.assertIsNone(ui.restart_local_server(8765))
+
+        kill.assert_not_called()
+
+    def test_restart_reports_failure_when_verified_process_does_not_release_port(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.os, "name", "posix"),
+            patch.object(ui.os, "kill"),
+            patch.object(ui, "is_port_available", return_value=False),
+            patch.object(ui.time, "monotonic", side_effect=[10.0, 14.0]),
+            patch.object(ui.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(OSError, "refusing to start a second dashboard"):
+                ui.restart_local_server(8765)
+
+    def test_restart_reports_failure_when_verified_process_cannot_be_signaled(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.os, "name", "posix"),
+            patch.object(ui.os, "kill", side_effect=PermissionError("denied")),
+        ):
+            with self.assertRaisesRegex(OSError, "refusing to start a second dashboard"):
+                ui.restart_local_server(8765)
+
+    def test_windows_taskkill_failure_does_not_start_a_second_dashboard(self) -> None:
+        taskkill = Mock(returncode=1)
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.os, "name", "nt"),
+            patch.object(ui.subprocess, "run", return_value=taskkill) as run,
+            patch.object(ui, "is_port_available", return_value=False),
+        ):
+            with self.assertRaisesRegex(OSError, "refusing to start a second dashboard"):
+                ui.restart_local_server(8765)
+
+        run.assert_called_once()
+
+    def test_serve_does_not_bind_when_verified_restart_fails(self) -> None:
+        with (
+            patch.object(ui, "restart_local_server", side_effect=OSError("termination failed")),
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+        ):
+            with self.assertRaisesRegex(OSError, "termination failed"):
+                ui.serve(host="127.0.0.1", port=8765, auto_port=True, restart=True)
+
+        server_cls.assert_not_called()
+
+    def test_recorded_dashboard_requires_matching_health_pid(self) -> None:
+        response = Mock()
+        response.read.return_value = json.dumps({
+            "service": "aiwatcher-local",
+            "pid": 778,
+        }).encode("utf-8")
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with (
+            patch.object(ui, "get_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8799, "pid": 777,
+            }),
+            patch.object(ui.urlrequest, "urlopen", return_value=response),
+        ):
+            self.assertIsNone(ui._verified_recorded_ui_server())
+
     def test_companion_skip_and_receipt_view_posts_are_routable(self) -> None:
         server, thread, base = self._serve_one()
         payload = json.dumps({"state": "proof_pending"}).encode("utf-8")
@@ -961,8 +1053,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("restart: !!options.restart", ui.HTML)
         self.assertIn("scheduleHeaderUpdateCheck", ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
-        self.assertIn("const requestedView = new URLSearchParams(location.search).get('view')", ui.HTML)
-        self.assertIn("showView(requestedView)", ui.HTML)
+        self.assertIn("const requestedViewParam = new URLSearchParams(location.search).get('view')", ui.HTML)
+        self.assertIn("showView(requestedView, false)", ui.HTML)
         self.assertIn("document.getElementById('promptInput').focus()", ui.HTML)
         self.assertIn('class="outcome-button useful', ui.HTML)
         self.assertIn('class="outcome-button rework', ui.HTML)
@@ -5919,7 +6011,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(receipt["risk_points_reduced"], 6)
         self.assertEqual(receipt["actual"]["tokens"], 1_200)
         self.assertEqual(receipt["outcome"], "useful")
-        self.assertIsNotNone(receipt["inferred"])
+        self.assertEqual(set(receipt["inferred"]), {"label", "disclaimer"})
+        self.assertEqual(receipt["inferred"]["label"], "No causal savings claimed")
 
     def test_receipt_uses_post_intervention_events_for_existing_thread(self) -> None:
         now = datetime.now(timezone.utc)
@@ -6011,6 +6104,18 @@ class DashboardWindowTests(unittest.TestCase):
         titles = {item["title"] for item in summary["insights"]}
         self.assertNotIn("Large-context session", titles)
         self.assertNotIn("Possible iterative loop", titles)
+        self.assertEqual(
+            summary["totals"]["tokens_scope_label"],
+            "Cumulative thread totals; not bounded to this window",
+        )
+        with patch.object(ui, "rows_for_window", return_value=[cumulative]):
+            detail = ui.build_project_detail("/repo", days=1)
+        self.assertEqual(
+            detail["totals"]["tokens_scope_label"],
+            "Cumulative thread totals; not bounded to this window",
+        )
+        self.assertEqual(detail["health"]["status"], "limited")
+        self.assertEqual(detail["health"]["label"], "Cumulative totals only")
 
 
 class WeeklyDigestTests(unittest.TestCase):
@@ -6244,6 +6349,22 @@ class SessionSearchTests(unittest.TestCase):
             updated_at=now - timedelta(hours=hours_ago),
             cost_usd=cost_usd,
         )
+
+    def test_session_rows_preserve_cumulative_token_provenance(self) -> None:
+        cumulative = self._session("codex-thread")
+        cumulative.tool = "codex-cli"
+        cumulative.tokens_in = 403_800_000
+        cumulative.notes = ["tokens_used is Codex's cumulative thread total"]
+        session = self._session("claude-session")
+        session.tokens_in = 12_000
+
+        cumulative_json = ui._session_row_json(cumulative, {}, {})
+        session_json = ui._session_row_json(session, {}, {})
+
+        self.assertEqual(cumulative_json["tokens_scope"], "cumulative_thread")
+        self.assertEqual(cumulative_json["tokens_scope_label"], "Cumulative thread total")
+        self.assertEqual(session_json["tokens_scope"], "session")
+        self.assertEqual(session_json["tokens_scope_label"], "Session total")
 
     def test_session_search_filters_by_text_and_outcome(self) -> None:
         rows = [

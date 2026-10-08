@@ -48,13 +48,8 @@ function riskFlow(receipt) {
 }
 function predictedStats(receipt) {
   const p = receipt.predicted || {};
-  if (!p.available) return `<div class="empty">Savings estimate unavailable. ${esc(p.basis || 'More comparable local history is required.')}</div>`;
-  return `<div class="mini-grid">
-    <div class="mini"><span class="label">Predicted token savings</span><strong>${esc(p.tokens_label || '—')}</strong></div>
-    <div class="mini"><span class="label">Model calls avoided</span><strong>${esc(p.model_calls_label || '—')}</strong></div>
-    <div class="mini"><span class="label">Tool calls avoided</span><strong>${esc(p.tool_calls_label || '—')}</strong></div>
-    <div class="mini"><span class="label">API-equivalent savings</span><strong>${esc(p.api_value_label || '—')}</strong></div>
-  </div><p class="receipt-note">${esc(p.confidence || 'unknown')} confidence · ${esc(p.basis || '')}</p>`;
+  if (!p.available) return `<div class="empty">Scenario comparison unavailable. ${esc(p.basis || 'More comparable local history is required.')}</div>`;
+  return `<div class="empty"><strong>Directional heuristic only.</strong> A scoped prompt is modeled to use less execution pressure than the broad prompt. Magnitude is not shown because there is no linked before/after outcome evidence.</div><p class="receipt-note">Basis: ${esc(p.basis || 'local history')}. Not measured savings or a billing forecast.</p>`;
 }
 function actionRow(item) {
   const meta = (item.meta || []).map(value => `<span class="pill">${esc(value)}</span>`).join('');
@@ -128,12 +123,7 @@ function openReceipt(receiptId) {
     : `<section class="detail-section"><h3>Observed session</h3><div class="empty">Waiting for a matching local session. Refresh after the agent finishes.</div></section>`;
   const inferred = receipt.inferred
     ? `<section class="detail-section"><h3>${esc(receipt.inferred.label)}</h3>
-       <div class="mini-grid">
-         <div class="mini"><span class="label">Tokens below baseline</span><strong>${esc(receipt.inferred.tokens_label || '—')}</strong></div>
-         <div class="mini"><span class="label">Model calls</span><strong>${esc(receipt.inferred.model_calls ?? '—')}</strong></div>
-         <div class="mini"><span class="label">Tool calls</span><strong>${esc(receipt.inferred.tool_calls ?? '—')}</strong></div>
-         <div class="mini"><span class="label">API-equivalent</span><strong>${esc(receipt.inferred.api_value_label || '—')}</strong></div>
-       </div><p>${esc(receipt.inferred.disclaimer)}</p></section>`
+       <p>${esc(receipt.inferred.disclaimer)}</p></section>`
     : '';
   setDrawerContent(`<section class="detail-section">
     <h2>${esc(receipt.decision_label)}</h2>
@@ -4044,9 +4034,14 @@ function miniStats(totals) {
   return `<div class="mini-grid">
     <div class="mini"><span class="label">Sessions</span><strong>${esc(totals.sessions)}</strong></div>
     <div class="mini"><span class="label">API value</span><strong>${esc(totals.api_value)}</strong></div>
-    <div class="mini"><span class="label">Tokens</span><strong>${esc(totals.tokens)}</strong></div>
+    <div class="mini"><span class="label">Tokens</span><strong>${esc(totals.tokens)}</strong><span class="mini-note">${esc(totals.tokens_scope_label || 'Session totals')}</span></div>
     <div class="mini"><span class="label">Tool calls</span><strong>${esc(totals.tool_calls)}</strong></div>
   </div>`;
+}
+function renderProjectSessionRow(s) {
+  return `<tr class="clickable" onclick="selectSession('${s.session_id}')">
+    <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td title="${esc(s.tokens_scope_label || 'Session total')}">${esc(s.tokens_label)}<span class="match-note">${esc(s.tokens_scope_label || 'Session total')}</span></td><td><button class="row-action">Review</button></td>
+  </tr>`;
 }
 async function selectProject(project) {
   const token = openDrawer('Project detail');
@@ -4068,9 +4063,7 @@ async function selectProject(project) {
     ${bars(data.tools, "api_value_label", "tool")}
     </section><section class="detail-section"><h3>Recent sessions</h3>
     <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Status</th><th>Tokens</th><th></th></tr></thead>
-      <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-        <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
-      </tr>`).join('')}</tbody></table></div></section>`);
+      <tbody>${data.sessions.map(renderProjectSessionRow).join('')}</tbody></table></div></section>`);
 }
 function renderSessionHero(s) {
   const actions = s.actions || [];
@@ -4088,7 +4081,7 @@ function renderSessionHero(s) {
     <p class="session-meta">${s.title ? `${esc(s.project_short || s.project || 'unknown project')} · ` : ''}${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
     <div class="session-hero-pressure">
-      <span>Tokens</span><strong>${esc(s.tokens_label || '—')}</strong>
+      <span>${esc(s.tokens_scope_label || 'Session total')}</span><strong>${esc(s.tokens_label || '—')}</strong>
       <em>${esc(s.api_value || '—')} API-equivalent</em>
     </div>
     <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
@@ -4950,9 +4943,10 @@ function renderProveClaim(unbanked, survival) {
   return parts.join('');
 }
 function renderInsightHeadline(totals) {
+  const tokenScope = esc(totals.tokens_scope_label || 'Session totals');
   const split = totals.replayed_tokens_label && totals.replayed_share_pct
-    ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%)</span>`
-    : `<span class="pill">${esc(totals.tokens_label)} tokens</span>`;
+    ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%) &middot; ${tokenScope}</span>`
+    : `<span class="pill">${esc(totals.tokens_label)} tokens &middot; ${tokenScope}</span>`;
   return `<div class="headline">
     <span class="headline-figure">${esc(totals.api_value_label)}</span>
     <span class="headline-sub">${esc(totals.window_label)} &middot; ${esc(totals.sessions)} sessions</span>
@@ -5609,7 +5603,7 @@ function handleSessionsTabKey(event) {
   setSessionsView(next === 1 ? 'agents' : 'list');
   target.focus();
 }
-function showView(view) {
+function showView(view, updateUrl = true) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
   });
@@ -5635,6 +5629,15 @@ function showView(view) {
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
   });
+  if (updateUrl) {
+    const url = new URL(location.href);
+    const viewParam = view === 'today' ? 'home' : view;
+    const previousParam = url.searchParams.get('view') || 'home';
+    url.searchParams.set('view', viewParam);
+    url.hash = '';
+    if (previousParam !== viewParam) history.pushState({ view }, '', url);
+    else history.replaceState({ view }, '', url);
+  }
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
   if (view === 'sessions') setSessionsView(sessionsViewMode, false);
@@ -6060,8 +6063,8 @@ function renderSessionRows(rows, filtered) {
         <td><span class="session-chat-name" title="${esc(chatName(s))}">${esc(chatName(s))}</span>${sharedNames.has(chatName(s)) ? `<span class="match-note">${esc(chatDisambiguation(s))}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td title="${esc(projectTitle(s))}">${esc(projectName(s))}<span class="match-note">${esc(s.tool)}</span>${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}</td>
         <td>${esc(s.model)}</td>
-        <td class="mono num">${esc(s.tokens_value === null || s.tokens_value === undefined ? s.tokens : tokens(s.tokens_value))}</td>
-        <td><button class="row-action" aria-label="Review ${esc(chatName(s))}">Review</button></td>
+        <td class="mono num" data-label="Tokens" title="${esc(s.tokens_scope_label || 'Session total')}">${esc(s.tokens_value === null || s.tokens_value === undefined ? s.tokens : tokens(s.tokens_value))}<span class="match-note">${esc(s.tokens_scope_label || 'Session total')}</span></td>
+        <td class="session-row-action" data-label="Action"><button class="row-action" aria-label="Review ${esc(chatName(s))}">Review</button></td>
       </tr>`).join('')
     : `<tr><td colspan="5"><div class="empty">${filtered
         ? 'No sessions match those filters. Try clearing the search or choosing a different session state.'
@@ -6321,7 +6324,9 @@ function ambientQuiet(data) {
   return {
     state: 'idle',
     hero: last ? esc(last.tokens) : esc(totals.tokens_label || '-'),
-    heroUnit: last ? 'tokens in the last session' : 'tokens this window',
+    heroUnit: last
+      ? (last.tokens_scope === 'cumulative_thread' ? 'cumulative thread tokens' : 'tokens in the last session')
+      : esc(totals.tokens_scope_label || 'Session totals'),
     // "no session running" was asserted from the absence of a *chartable*
     // session, not from the absence of a session. A Codex thread exposes a
     // running total and no per-turn numbers, so it is live and unplottable at
@@ -6345,7 +6350,7 @@ function ambientQuiet(data) {
       // it a third time. One labelled statement of a number per screen.
       // The hero is the last session's tokens; this is every session in the
       // window. Two token totals 200px apart, and only one of them was scoped.
-      totals.tokens_label ? ['tokens this window', totals.tokens_label] : null,
+      totals.tokens_label ? [totals.tokens_scope_label || 'session totals', totals.tokens_label] : null,
       totals.useful_outcomes ? ['useful', String(totals.useful_outcomes)] : null,
       // Frozen across every range because it is a rate, not a window total.
       totals.projected_month_label ? ['projected month', totals.projected_month_label] : null,
@@ -6721,7 +6726,7 @@ async function loadOnce(resetDetail, forceRefresh) {
         <td title="${esc(p.name || '')}"><button class="row-open" onclick="selectProject(decodeURIComponent(this.closest('tr').dataset.id))">${esc(projectName({ project_full: p.name || p.short_name }))}</button></td>
         <td>${healthPill(p.health)}</td>
         <td class="mono">${esc(p.sessions)}</td>
-        <td class="mono">${esc(p.tokens_label)}</td>
+        <td class="mono" title="${esc(p.tokens_scope_label || 'Session totals')}">${esc(p.tokens_label)}<span class="match-note">${esc(p.tokens_scope_label || 'Session totals')}</span></td>
         <td class="mono">${esc(p.calls)}</td>
         <td class="mono">${esc(p.api_value_label)}</td>
       </tr>`).join('')
@@ -6794,6 +6799,22 @@ async function load(resetDetail = true, forceRefresh = false) {
   }
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
+function applyHashTarget(requestedView) {
+  const hashTarget = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  if (!hashTarget) return null;
+  const owner = hashTarget.closest('.view');
+  const ownerView = owner ? owner.id.replace(/^view-/, '') : '';
+  if (owner && (!requestedView || ownerView === requestedView)) {
+    showView(ownerView, false);
+    return hashTarget;
+  }
+  if (owner && requestedView && ownerView !== requestedView) {
+    const url = new URL(location.href);
+    url.hash = '';
+    history.replaceState({ view: requestedView }, '', url);
+  }
+  return null;
+}
 (async () => {
   startLiveRefresh();
   // The attribute is already set by the inline bootstrap; this syncs the
@@ -6802,12 +6823,13 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   applyTheme(currentTheme());
   await load();
   scheduleHeaderUpdateCheck();
-  const requestedView = new URLSearchParams(location.search).get('view');
+  const requestedViewParam = new URLSearchParams(location.search).get('view');
+  const requestedView = requestedViewParam === 'home' ? 'today' : requestedViewParam;
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so
   // adding a section cannot quietly leave it unreachable by link.
   if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
-    showView(requestedView);
+    showView(requestedView, false);
     if (requestedView === 'setup') {
       const requestedPanel = new URLSearchParams(location.search).get('settings') || 'general';
       if (['general','ai','trust','setup'].includes(requestedPanel)) showSettingsPanel(requestedPanel);
@@ -6830,10 +6852,8 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // cards have moved. This also replaces the hand-written #optimizeWorkspace
   // branch, which was the only target that ever worked because it was the only
   // one someone had written a special case for.
-  const hashTarget = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  const hashTarget = applyHashTarget(requestedView);
   if (hashTarget) {
-    const owner = hashTarget.closest('.view');
-    if (owner) showView(owner.id.replace(/^view-/, ''));
     // After the view is visible, or there is nothing laid out to scroll to.
     window.setTimeout(() => hashTarget.scrollIntoView({ block: 'start' }), 50);
   }
@@ -6845,3 +6865,10 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   const deepLinkSession = new URLSearchParams(location.search).get('session');
   if (deepLinkSession) selectSession(deepLinkSession);
 })();
+window.addEventListener('popstate', () => {
+  const requestedParam = new URLSearchParams(location.search).get('view') || 'home';
+  const requested = requestedParam === 'home' ? 'today' : requestedParam;
+  if (['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requested)) {
+    showView(requested, false);
+  }
+});

@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
@@ -76,6 +79,7 @@ from .local_state import (
     evidence_snapshots_for_sessions,
     fresh_start_followup_evidence,
     get_outcome,
+    get_ui_server,
     get_watcher_status,
     outcome_counts,
     outcomes_for_sessions,
@@ -806,6 +810,24 @@ def has_cumulative_totals(session: LocalSession) -> bool:
     return any("cumulative" in note.lower() for note in session.notes)
 
 
+def aggregate_token_scope(rows: list[LocalSession]) -> dict[str, str]:
+    cumulative_count = sum(1 for row in rows if has_cumulative_totals(row))
+    if rows and cumulative_count == len(rows):
+        return {
+            "scope": "cumulative_only",
+            "label": "Cumulative thread totals; not bounded to this window",
+        }
+    if cumulative_count:
+        return {
+            "scope": "mixed",
+            "label": (
+                f"Mixed scope; includes {cumulative_count} cumulative thread total"
+                f"{'' if cumulative_count == 1 else 's'}"
+            ),
+        }
+    return {"scope": "session", "label": "Session totals"}
+
+
 def group_rows(rows: list[LocalSession], key_fn) -> list[dict[str, object]]:
     grouped: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
@@ -866,19 +888,28 @@ def _append_detected_tool_rows(
 
 
 def _project_health(items: list[LocalSession]) -> dict[str, object]:
-    stats = summarize(items)
+    bounded_items = [item for item in items if not has_cumulative_totals(item)]
+    stats = summarize(bounded_items)
     tokens = int(stats["tokens"])
     calls = int(stats["calls"])
     tool_calls = int(stats["tool_calls"])
     api_value = float(stats["api_value_usd"])
-    plan_limited = token_split(items)["plan_limited"]
-    sessions = int(stats["sessions"])
+    plan_limited = token_split(bounded_items)["plan_limited"]
+    sessions = len(items)
     if sessions <= 0:
         return {
             "status": "limited",
             "label": "Limited data",
             "tone": "limited",
             "reason": "No recent local sessions were found.",
+            "action_label": "Review",
+        }
+    if not bounded_items:
+        return {
+            "status": "limited",
+            "label": "Cumulative totals only",
+            "tone": "limited",
+            "reason": "These lifetime thread totals are not bounded to the reporting window.",
             "action_label": "Review",
         }
     if tool_calls >= 1_000 or calls >= 1_000 or tokens >= 50_000_000:
@@ -927,6 +958,7 @@ def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
             UNATTRIBUTED_PROJECT,
         )
         stats = summarize(items)
+        token_scope = aggregate_token_scope(items)
         attributed = key != UNATTRIBUTED_PROJECT
         name = key if attributed else UNATTRIBUTED_PROJECT_LABEL
         result.append({
@@ -940,6 +972,8 @@ def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
             "sessions": stats["sessions"],
             "tokens": stats["tokens"],
             "tokens_label": compact_int(int(stats["tokens"])),
+            "tokens_scope": token_scope["scope"],
+            "tokens_scope_label": token_scope["label"],
             "api_value_usd": round(float(stats["api_value_usd"]), 6),
             "api_value_label": money(float(stats["api_value_usd"])),
             "calls": stats["calls"],
@@ -2251,6 +2285,7 @@ def _session_row_json(
 ) -> dict[str, object]:
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=[])
+    cumulative_tokens = has_cumulative_totals(row)
     return {
         "tool": row.tool,
         "session_id": row.session_id,
@@ -2262,6 +2297,8 @@ def _session_row_json(
         "model": display_model_name(row.model),
         "tokens": compact_int(row.tokens_in + row.tokens_out),
         "tokens_value": row.tokens_in + row.tokens_out,
+        "tokens_scope": "cumulative_thread" if cumulative_tokens else "session",
+        "tokens_scope_label": "Cumulative thread total" if cumulative_tokens else "Session total",
         "api_value": money(row.cost_usd),
         "api_value_usd": round(row.cost_usd, 6),
         "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
@@ -2414,6 +2451,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
     evidence = build_outcome_evidence(row, survival=_survival_for_session(row.session_id))
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    cumulative_tokens = has_cumulative_totals(row)
     return {
         "session_id": row.session_id,
         "tool": row.tool,
@@ -2423,6 +2461,8 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+        "tokens_scope": "cumulative_thread" if cumulative_tokens else "session",
+        "tokens_scope_label": "Cumulative thread total" if cumulative_tokens else "Session total",
         "tokens_in_label": compact_int(row.tokens_in),
         "tokens_out_label": compact_int(row.tokens_out),
         "api_value_usd": round(row.cost_usd, 6),
@@ -2451,6 +2491,7 @@ def recent_session_json(
     evidence_by_session = evidence_by_session or {}
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=[])
+    cumulative_tokens = has_cumulative_totals(row)
     return {
         "tool": row.tool,
         "session_id": row.session_id,
@@ -2463,6 +2504,8 @@ def recent_session_json(
         "tokens": compact_int(row.tokens_in + row.tokens_out),
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
         "tokens_value": row.tokens_in + row.tokens_out,
+        "tokens_scope": "cumulative_thread" if cumulative_tokens else "session",
+        "tokens_scope_label": "Cumulative thread total" if cumulative_tokens else "Session total",
         "api_value": money(row.cost_usd),
         "api_value_usd": round(row.cost_usd, 6),
         "calls": row.agent_calls,
@@ -2586,6 +2629,7 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
         project,
     )
     stats = summarize(rows)
+    token_scope = aggregate_token_scope(rows)
     sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     return {
         "project": display_project,
@@ -2600,6 +2644,8 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
             "sessions": stats["sessions"],
             "api_value": money(float(stats["api_value_usd"])),
             "tokens": compact_int(int(stats["tokens"])),
+            "tokens_scope": token_scope["scope"],
+            "tokens_scope_label": token_scope["label"],
             "calls": stats["calls"],
             "tool_calls": stats["tool_calls"],
         },
@@ -4092,19 +4138,16 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         summary = {}
     handoff_bubble = summary.get("handoff_bubble") if isinstance(summary, dict) else None
     impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
-    impact_label = "AIWatcher needs local history before it can estimate savings."
+    impact_label = "AIWatcher needs local history before it can model a scenario comparison."
     if impact:
         if impact.get("available"):
             savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
             api_value = savings.get("api_value_usd", []) if isinstance(savings, dict) else []
             tokens = savings.get("tokens", []) if isinstance(savings, dict) else []
             if len(api_value) == 2 and len(tokens) == 2:
-                impact_label = (
-                    f"Possible avoidable pressure: {compact_int(int(tokens[0]))}-{compact_int(int(tokens[1]))} tokens "
-                    f"and {money(float(api_value[0]))}-{money(float(api_value[1]))} API-equivalent."
-                )
+                impact_label = "Heuristic scenario: the scoped prompt is modeled to use less execution pressure; magnitude is not measured."
             else:
-                impact_label = "Comparable local sessions found, but savings could not be summarized."
+                impact_label = "Comparable local sessions found, but the modeled difference could not be summarized."
         else:
             impact_label = str(impact.get("direction") or impact.get("basis") or impact_label)
     return {
@@ -4475,24 +4518,12 @@ def _build_intervention_receipts(
                     "reason": reason,
                 }
         if actual_reliable and original:
-            def avoided(metric: str, observed: float) -> float | None:
-                values = original.get(metric)
-                if not isinstance(values, list) or len(values) != 2:
-                    return None
-                midpoint = (float(values[0]) + float(values[1])) / 2
-                return max(0.0, midpoint - observed)
-
-            inferred_tokens = avoided("tokens", float(actual["tokens"]))
-            inferred_calls = avoided("model_calls", float(actual["model_calls"]))
-            inferred_tools = avoided("tool_calls", float(actual["tool_calls"]))
-            inferred_cost = avoided("api_value_usd", float(actual["api_value_usd"]))
             inferred = {
-                "tokens_label": compact_int(int(inferred_tokens)) if inferred_tokens is not None else None,
-                "model_calls": int(inferred_calls) if inferred_calls is not None else None,
-                "tool_calls": int(inferred_tools) if inferred_tools is not None else None,
-                "api_value_label": money(inferred_cost) if inferred_cost is not None else None,
-                "label": "Observed below historical baseline",
-                "disclaimer": "An inferred comparison, not a guaranteed counterfactual saving.",
+                "label": "No causal savings claimed",
+                "disclaimer": (
+                    "Observed usage and the pre-run heuristic are shown separately. "
+                    "AIWatcher does not subtract one from the other or treat the difference as savings."
+                ),
             }
         outcome = outcomes.get(session_id) if session_id else None
         receipts.append({
@@ -6039,6 +6070,7 @@ def build_summary(
 
     stats = summarize(rows)
     month_stats = summarize(month_rows)
+    token_scope = aggregate_token_scope(rows)
     split = token_split(rows)
     day_of_month = max(1, now.day)
     projected_month = float(month_stats["api_value_usd"]) / day_of_month * 30
@@ -6236,6 +6268,8 @@ def build_summary(
             "api_value_label": money(float(stats["api_value_usd"])),
             "projected_month_label": money(projected_month),
             "tokens_label": compact_int(int(stats["tokens"])),
+            "tokens_scope": token_scope["scope"],
+            "tokens_scope_label": token_scope["label"],
             # A single token total is misleading once cache reads are counted:
             # replayed history is the same content billed again on every turn,
             # so the combined figure runs into the billions and says nothing
@@ -9927,65 +9961,86 @@ def find_available_port(host: str, preferred_port: int, attempts: int = 20) -> i
     raise OSError(f"No available port found from {preferred_port} to {preferred_port + max(1, attempts) - 1}.")
 
 
-def _pids_for_port(port: int) -> list[str]:
-    if os.name == "nt":
-        try:
+def _verified_recorded_ui_server(timeout: float = 0.6) -> dict[str, object] | None:
+    """Return the recorded dashboard only when its health endpoint proves identity."""
+    server = get_ui_server()
+    if not server:
+        return None
+    host = str(server.get("host") or "127.0.0.1")
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    try:
+        port = int(server.get("port") or 0)
+        recorded_pid = int(server.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < port <= 65535 and recorded_pid > 0):
+        return None
+    try:
+        url_host = f"[{host}]" if ":" in host else host
+        with urlrequest.urlopen(f"http://{url_host}:{port}/api/health", timeout=timeout) as response:
+            health = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError, urlerror.URLError):
+        return None
+    if not isinstance(health, dict) or health.get("service") != "aiwatcher-local":
+        return None
+    try:
+        health_pid = int(health.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if health_pid != recorded_pid:
+        return None
+    return {**server, "host": host, "port": port, "pid": recorded_pid}
+
+
+def restart_local_server(_requested_port: int) -> int | None:
+    """Stop only the dashboard identified by its recorded PID and health data."""
+    server = _verified_recorded_ui_server()
+    if not server:
+        return None
+    pid = int(server["pid"])
+    port = int(server["port"])
+    try:
+        if os.name == "nt":
             result = subprocess.run(
-                ["netstat", "-ano", "-p", "tcp"],
+                ["taskkill", "/PID", str(pid), "/F"],
                 check=False,
                 capture_output=True,
                 text=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except OSError:
-            return []
-
-        pids: set[str] = set()
-        suffix = f":{port}"
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 5:
-                continue
-            local_address, state, pid = parts[1], parts[3], parts[-1]
-            if local_address.endswith(suffix) and state.upper() == "LISTENING" and pid.isdigit():
-                pids.add(pid)
-        return sorted(pids)
-
-    try:
-        result = subprocess.run(
-            ["lsof", "-ti", f"tcp:{port}"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return []
-
-    return [pid.strip() for pid in result.stdout.splitlines() if pid.strip()]
-
-
-def restart_local_server(port: int) -> bool:
-    pids = _pids_for_port(port)
-    if not pids:
-        return False
-
-    stopped = False
-    for pid in pids:
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", pid, "/F"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            if result.returncode != 0:
+                if is_port_available(str(server["host"]), port):
+                    return port
+                raise OSError(
+                    f"Could not terminate the verified AIWatcher dashboard on port {port}; "
+                    "refusing to start a second dashboard."
                 )
-            else:
-                subprocess.run(["kill", pid], check=False, capture_output=True, text=True)
-            stopped = True
-        except OSError:
-            continue
-    return stopped
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        if is_port_available(str(server["host"]), port):
+            return port
+        raise OSError(
+            f"The recorded AIWatcher process {pid} no longer exists, but port {port} is still occupied; "
+            "refusing to start a second dashboard."
+        )
+    except (OSError, OverflowError, ValueError) as exc:
+        raise OSError(
+            f"Could not terminate the verified AIWatcher dashboard on port {port}; "
+            "refusing to start a second dashboard."
+        ) from exc
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not is_port_available(str(server["host"]), port):
+        time.sleep(0.05)
+    if not is_port_available(str(server["host"]), port):
+        raise OSError(
+            f"Verified AIWatcher dashboard on port {port} did not stop within 3 seconds; "
+            "refusing to start a second dashboard."
+        )
+    return port
 
 
 def serve(
@@ -9998,9 +10053,10 @@ def serve(
     on_started: Callable[[str, int], Any] | None = None,
 ) -> None:
     if restart:
-        stopped = restart_local_server(port)
-        if stopped:
-            print(f"Stopped existing process on port {port}.")
+        stopped_port = restart_local_server(port)
+        if stopped_port is not None:
+            port = stopped_port
+            print(f"Stopped verified AIWatcher dashboard on port {port}.")
 
     selected_port = port
     if auto_port:
