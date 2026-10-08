@@ -153,6 +153,7 @@ from .scanner import (
     display_model_name,
     extract_opening_prompt,
     model_usage_totals,
+    populate_session_identities,
     scan_all,
     scan_all_events,
     current_prompt_segment,
@@ -686,7 +687,8 @@ def _cached_events_for_session(session_id: str) -> list[LocalEvent] | None:
 
 
 def _session_index_payload(rows: list[LocalSession]) -> list[dict[str, object]]:
-    return [row.to_json() for row in rows]
+    populate_session_identities(rows)
+    return [row.to_json(resolve_identity=False) for row in rows]
 
 
 def _index_sessions_from_summary(summary: dict[str, object]) -> None:

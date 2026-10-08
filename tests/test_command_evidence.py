@@ -59,6 +59,15 @@ class CommandEvidenceTests(unittest.TestCase):
 
         self.assertEqual(rows, [{"id": "valid"}])
 
+    def test_json_lines_skips_invalid_utf8_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir, "invalid-utf8.jsonl")
+            path.write_bytes(b'{"id":"bad-\xff"}\n{"id":"valid"}\n')
+
+            rows = list(_json_lines(str(path)))
+
+        self.assertEqual(rows, [{"id": "valid"}])
+
     def test_runner_labels_are_fixed_and_argument_free(self) -> None:
         self.assertEqual(verification_runner(["python3", "-m", "pytest", "secret-test-name"]), "python -m pytest")
         self.assertEqual(verification_runner(["npm", "run", "check", "--", "private"]), "npm run check")

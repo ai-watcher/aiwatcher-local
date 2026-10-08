@@ -232,7 +232,7 @@ def _json_lines(path: str):
                     continue
                 try:
                     row = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
                     continue
                 if isinstance(row, dict):
                     yield row

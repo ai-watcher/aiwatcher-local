@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .git_identity import identity_for_session
+from .git_identity import GitIdentity, identities_for_sessions, identity_for_session
 from .local_state import recent_hook_events
 from .pricing import (
     CACHE_READ_MULTIPLIER,
@@ -266,21 +266,24 @@ class LocalSession:
             return 0
         return max(0, int((self.updated_at - self.started_at).total_seconds()))
 
-    def to_json(self) -> dict[str, Any]:
-        if not self.checkout_id:
-            identity = identity_for_session(self.project_path, self.raw_cwd)
-            if identity is not None:
-                self.identity_source = identity.identity_source
-                if identity.identity_source == "identity_conflict":
-                    self.repository_id = None
-                    self.repository_lineage_id = None
-                    self.checkout_id = None
-                    self.checkout_path = None
-                else:
-                    self.repository_id = identity.repository_id
-                    self.repository_lineage_id = identity.repository_lineage_id
-                    self.checkout_id = identity.checkout_id
-                    self.checkout_path = identity.checkout_path
+    def apply_git_identity(self, identity: GitIdentity | None) -> None:
+        if identity is None:
+            return
+        self.identity_source = identity.identity_source
+        if identity.identity_source == "identity_conflict":
+            self.repository_id = None
+            self.repository_lineage_id = None
+            self.checkout_id = None
+            self.checkout_path = None
+        else:
+            self.repository_id = identity.repository_id
+            self.repository_lineage_id = identity.repository_lineage_id
+            self.checkout_id = identity.checkout_id
+            self.checkout_path = identity.checkout_path
+
+    def to_json(self, *, resolve_identity: bool = True) -> dict[str, Any]:
+        if resolve_identity and not self.checkout_id:
+            self.apply_git_identity(identity_for_session(self.project_path, self.raw_cwd))
         return {
             "session_id": self.session_id,
             "tool": self.tool,
@@ -308,6 +311,13 @@ class LocalSession:
             "model_breakdown": self.model_breakdown,
             "title": self.title,
         }
+
+
+def populate_session_identities(rows: list[LocalSession]) -> None:
+    unresolved = [row for row in rows if not row.checkout_id]
+    resolved = identities_for_sessions((row.project_path, row.raw_cwd) for row in unresolved)
+    for row in unresolved:
+        row.apply_git_identity(resolved.get((row.project_path, row.raw_cwd)))
 
 
 @dataclass

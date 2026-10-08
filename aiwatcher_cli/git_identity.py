@@ -16,6 +16,7 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import urlsplit
 
 from .local_state import get_or_create_identity_secret
@@ -304,10 +305,10 @@ def resolve_git_identity(path: str | None) -> GitIdentity | None:
     return identity
 
 
-def identity_for_session(project_path: str | None, raw_cwd: str | None) -> GitIdentity | None:
-    """Choose the exact worktree only when it belongs to the grouped checkout."""
-    grouped = resolve_git_identity(project_path)
-    observed = resolve_git_identity(raw_cwd)
+def _session_identity(
+    grouped: GitIdentity | None,
+    observed: GitIdentity | None,
+) -> GitIdentity | None:
     if observed is not None and grouped is not None:
         return (
             observed
@@ -317,6 +318,27 @@ def identity_for_session(project_path: str | None, raw_cwd: str | None) -> GitId
     if observed is not None:
         return observed
     return replace(grouped, identity_source="project_fallback") if grouped is not None else None
+
+
+def identity_for_session(project_path: str | None, raw_cwd: str | None) -> GitIdentity | None:
+    """Choose the exact worktree only when it belongs to the grouped checkout."""
+    return _session_identity(resolve_git_identity(project_path), resolve_git_identity(raw_cwd))
+
+
+def identities_for_sessions(
+    paths: Iterable[tuple[str | None, str | None]],
+) -> dict[tuple[str | None, str | None], GitIdentity | None]:
+    """Resolve repeated session paths once during a bulk dashboard snapshot."""
+    pairs = set(paths)
+    unique_paths = {path for pair in pairs for path in pair if path}
+    resolved = {
+        path: resolve_git_identity(path)
+        for path in unique_paths
+    }
+    return {
+        pair: _session_identity(resolved.get(pair[0]), resolved.get(pair[1]))
+        for pair in pairs
+    }
 
 
 def repository_identity(path: str | None) -> str | None:
