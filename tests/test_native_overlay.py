@@ -111,7 +111,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
     def test_macos_overlay_records_handoff_only_for_critical_context_copy(self) -> None:
         self.assertIn('if signalKind == "critical_context"', native_overlay.MACOS_SWIFT_OVERLAY)
-        self.assertIn("/api/handoff-basic", native_overlay.MACOS_SWIFT_OVERLAY)
+        self.assertIn("/api/handoff?id=", native_overlay.MACOS_SWIFT_OVERLAY)
+        self.assertNotIn("/api/handoff-basic", native_overlay.MACOS_SWIFT_OVERLAY)
         self.assertIn('postDecision("copy_handoff")', native_overlay.MACOS_SWIFT_OVERLAY)
         self.assertIn('if action == "snooze"', native_overlay.MACOS_SWIFT_OVERLAY)
         self.assertNotIn('action == "dismiss" ? "dismissed" : "copy_handoff"', native_overlay.MACOS_SWIFT_OVERLAY)

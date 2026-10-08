@@ -261,7 +261,7 @@ func fetchHandoffBrief() -> String? {
         return value
     }
     guard let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-          let url = URL(string: "\(baseURL)/api/handoff-basic?id=\(encoded)&target=generic") else { return nil }
+          let url = URL(string: "\(baseURL)/api/handoff?id=\(encoded)&target=generic") else { return nil }
     let sem = DispatchSemaphore(value: 0)
     var result: String?
     URLSession.shared.dataTask(with: url) { data, _, _ in
@@ -1326,7 +1326,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         titleLabel.stringValue = "Copying brief"
         subtitleLabel.stringValue = "Preparing Fresh Start..."
         guard let encoded = primarySessionID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let briefURL = URL(string: dashboardBaseURL + "/api/handoff-basic?id=" + encoded + "&target=generic") else {
+              let briefURL = URL(string: dashboardBaseURL + "/api/handoff?id=" + encoded + "&target=generic") else {
             openURL(primaryURL)
             return
         }
@@ -3160,7 +3160,7 @@ def run_native_presence(
         subtitle_var.set("Preparing Fresh Start...")
         try:
             encoded = urllib.parse.quote(session_id)
-            with urllib.request.urlopen(f"{url.rstrip('/')}/api/handoff-basic?id={encoded}&target=generic", timeout=8.0) as response:
+            with urllib.request.urlopen(f"{url.rstrip('/')}/api/handoff?id={encoded}&target=generic", timeout=8.0) as response:
                 capsule = json.loads(response.read().decode("utf-8"))
             brief = str(capsule.get("next_brief") or "").strip() if isinstance(capsule, dict) else ""
             if not brief:

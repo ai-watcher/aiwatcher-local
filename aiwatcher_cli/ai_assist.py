@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .handoff import MAX_HANDOFF_WORDS, bound_handoff_words
+from .handoff import MAX_HANDOFF_WORDS, bound_handoff_words, verification_handoff_state
 
 
 LOCAL_PROVIDER_PORTS = {
@@ -738,6 +738,8 @@ def _packet_verification(evidence: dict[str, object], *, limit: int = 5) -> list
                 "completion_state": _clean_line(item.get("completion_state"), limit=40).lower(),
                 "authoritative": item.get("authoritative") is True,
                 "verification_scope": _clean_line(item.get("verification_scope"), limit=40).lower(),
+                "current": item.get("current") if isinstance(item.get("current"), bool) else None,
+                "state_binding": _clean_line(item.get("state_binding"), limit=40).lower(),
             })
         else:
             summary = _clean_line(item, limit=320)
@@ -759,50 +761,31 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
     evidence = packet.get("evidence") if isinstance(packet.get("evidence"), dict) else {}
     checkout = packet.get("checkout") if isinstance(packet.get("checkout"), dict) else {}
-    goal = _clean_line(parsed.get("goal"), limit=360)
+    packet_objective = _clean_line(packet.get("objective"), limit=360)
+    model_goal = _clean_line(parsed.get("goal"), limit=360)
     next_ask = _clean_line(parsed.get("next_ask"), limit=420)
-    what_done = _clean_list(parsed.get("what_is_done") or parsed.get("done"), limit=7)
-    current_state = _clean_list(parsed.get("current_state"), limit=7)
-    decisions = _clean_list(parsed.get("decisions"), limit=6)
-    context = _clean_list(parsed.get("context_to_preserve") or parsed.get("context"), limit=7)
-    risks = _clean_list(parsed.get("risks_and_constraints") or parsed.get("risks"), limit=6)
-    inspect = _clean_list(parsed.get("inspect_first"), limit=7)
-    avoid = _clean_list(parsed.get("do_not_redo") or parsed.get("avoid"), limit=5)
-    next_steps = _clean_list(parsed.get("next_steps"), limit=6)
-    uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
-    acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
+    risks = _clean_list(parsed.get("risks_and_constraints") or parsed.get("risks"), limit=4)
+    uncertainties = _clean_list(parsed.get("uncertainties"), limit=4)
+    acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=4)
     verification_rows = _packet_verification(evidence, limit=6)
-    packet_verification = [str(item["summary"]) for item in verification_rows]
-    completed_verification = any(
-        item.get("authoritative") is True
-        and item.get("completion_state") == "completed"
-        and item.get("status") in {"passed", "failed"}
-        for item in verification_rows
-    )
-    broad_verification = any(
-        item.get("authoritative") is True
-        and item.get("completion_state") == "completed"
-        and item.get("status") in {"passed", "failed"}
-        and item.get("verification_scope") == "project_default"
-        for item in verification_rows
-    )
-    verification = [
-        *packet_verification,
-        *([] if completed_verification else [
-            "No authoritative session-bound verification for the exact Git state was observed; do not claim the prior work is verified."
-        ]),
-        *(
-            ["Verification was targeted or its scope is unknown; do not infer project-wide coverage."]
-            if completed_verification and not broad_verification else []
-        ),
+    verification_state = verification_handoff_state(verification_rows)
+    prioritized_verification = [
+        *verification_state["failures"],
+        *[item for item in verification_state["current"] if item not in verification_state["failures"]],
+        *[item for item in verification_rows if item not in verification_state["current"]],
     ]
-    objective_status = _clean_line(parsed.get("objective_status"), limit=180)
+    verification = [str(item["summary"]) for item in prioritized_verification]
+    if not verification_state["current"]:
+        verification.append(
+            "No authoritative session-bound verification for the exact Git state was observed; do not claim the prior work is verified."
+        )
+    elif not verification_state["broad"]:
+        verification.append("Verification was targeted or its scope is unknown; do not infer project-wide coverage.")
 
     source_lines = [
         f"Project: {_clean_line(source.get('project'), limit=420)}",
         f"Session: {_clean_line(source.get('session_id'), limit=180)}",
         f"Tool/model: {_clean_line(source.get('tool'), limit=100)} / {_clean_line(source.get('model'), limit=120)}",
-        f"Last activity: {_clean_line(source.get('updated_at'), limit=100)}",
     ]
     source_lines = [line for line in source_lines if not line.endswith(": ") and not line.endswith("/ ")]
     checkout_lines: list[str] = []
@@ -835,46 +818,49 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
                 f"{label}: {_clean_line(item.get('sha'), limit=40)} "
                 f"{_clean_line(item.get('subject'), limit=240)}"
             )
-    evidence_lines = [
-        *_packet_list(evidence, "commits", limit=4),
+    session_bound_commits = evidence.get("commit_attribution") == "session_bound"
+    commit_label = "Commit" if session_bound_commits else "Candidate commit"
+    committed_file_label = "Committed file" if session_bound_commits else "Candidate committed file"
+    changed_lines = [
+        *[f"{commit_label}: {item}" for item in _packet_list(evidence, "commits", limit=4)],
+        *[f"{committed_file_label}: {item}" for item in _packet_list(evidence, "committed_files", limit=8)],
         *_packet_list(evidence, "changed_files", limit=8),
         *_packet_list(packet, "logged_decisions", limit=5),
     ]
+    remaining = [
+        *[str(item) for item in verification_state["remaining"]],
+        *_packet_list(packet, "current_state", limit=4),
+        *_packet_list(packet, "constraints", limit=4),
+        *risks,
+        *uncertainties,
+    ]
+    if not remaining:
+        remaining = ["No additional blocker was captured; preserve unrelated changes and verify before broadening scope."]
+
+    if verification_state["next_action"]:
+        first_action = str(verification_state["next_action"])
+    elif not packet_objective:
+        first_action = (
+            "Inspect the checkout and evidence above, then ask one focused question to confirm the intended outcome before editing."
+        )
+    else:
+        first_action = next_ask or "Inspect the listed evidence and continue the smallest verified checkpoint."
 
     lines = [
         "AIWatcher AI-assisted Fresh Start brief",
-        "",
-        "You are starting a fresh AI work session from an AIWatcher handoff.",
-        "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
-        "Continue from the repository/workspace state and AIWatcher evidence below.",
-        *_section("Source context", source_lines),
-        *_section("Working checkout", checkout_lines),
-        "",
         "Objective",
-        f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
-        f"- Status: {objective_status or ('Confirmed from supplied context.' if packet.get('objective') else 'Not captured; confirm the desired outcome before editing.')}",
-        *_section("Completed work", what_done or ["No completed work was established by the model; verify the evidence below before editing."]),
-        *_section("Current state", current_state or _packet_list(packet, "current_state", limit=6)),
-        *_section("Decisions already made", decisions or _packet_list(packet, "logged_decisions", limit=5)),
-        *_section("Context to preserve", context or ["Preserve the source workspace, constraints, and small next checkpoint rather than replaying the whole prior chat."]),
-        *_section("Risks and constraints", risks or _packet_list(packet, "constraints", limit=6)),
-        *_section("Inspect first", inspect or ["Run `git status --short` and inspect the changed files or source-of-truth docs listed in the handoff evidence."]),
-        *_section("Do not redo", avoid or ["Do not repeat broad discovery from the bloated session unless the evidence is insufficient."]),
-        *_section("Next steps", next_steps),
-        "",
-        "First action",
-        f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
-        *_section("Acceptance criteria", acceptance or _packet_list(packet, "acceptance_criteria", limit=5)),
-        *_section("Verification and test signals", verification),
-        *_section("Open questions and uncertainty", uncertainties),
-        *_section("Evidence carried forward", evidence_lines or ["No commit, file, test, or decision evidence was available."]),
-        "",
-        "Guardrails",
-        "- Preserve unrelated changes.",
-        "- Do not expose secrets.",
-        "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
+        f"- {model_goal if packet_objective and model_goal else packet_objective or 'Objective not captured; confirmation is required before editing.'}",
+        *_section("Where", [*source_lines, *checkout_lines]),
+        *_section("What changed", changed_lines or ["No commit, file, or decision evidence was available."]),
+        *_section("Verification", verification),
+        *_section("What remains", remaining),
+        *_section("Next action", [
+            first_action,
+            *(acceptance or _packet_list(packet, "acceptance_criteria", limit=3)),
+            "Preserve unrelated changes; stop before destructive, production, or unrelated work.",
+        ]),
     ]
-    return bound_handoff_words("\n".join(lines).strip(), max_words=MAX_HANDOFF_WORDS)
+    return bound_handoff_words("\n".join(lines).strip(), max_words=300)
 
 
 def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str) -> bool:
