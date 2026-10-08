@@ -388,6 +388,7 @@ class AiAssistTests(unittest.TestCase):
         authoritative = {
             "summary": "passed | current for this Git state | pytest",
             "status": "passed", "completion_state": "completed", "authoritative": True,
+            "verification_scope": "project_default",
         }
         base = {
             "source": {"session_id": "session-1", "project": "/repo/ai"},
@@ -417,6 +418,7 @@ class AiAssistTests(unittest.TestCase):
         rows.append({
             "summary": "authoritative sixth check",
             "status": "passed", "completion_state": "completed", "authoritative": True,
+            "verification_scope": "named_check",
         })
         text = ai_assist._structured_handoff_text(
             {"goal": "Continue carefully."},
@@ -429,6 +431,24 @@ class AiAssistTests(unittest.TestCase):
 
         self.assertNotIn("No authoritative session-bound verification", text)
         self.assertEqual(text.count("authoritative sixth check"), 1)
+        self.assertIn("do not infer project-wide coverage", text)
+
+    def test_fresh_start_warns_that_targeted_verification_is_limited(self) -> None:
+        text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {"tests": [{
+                    "summary": "passed | targeted scope | pytest",
+                    "status": "passed", "completion_state": "completed",
+                    "authoritative": True, "verification_scope": "targeted",
+                }]},
+            }),
+        )
+
+        self.assertNotIn("No authoritative session-bound verification", text)
+        self.assertIn("do not infer project-wide coverage", text)
 
     def test_fresh_start_word_cap_resists_model_ellipsis_prefixes(self) -> None:
         long_item = "...and " + ("discretionary model prose " * 120)

@@ -94,6 +94,7 @@ class LocalStateTests(unittest.TestCase):
                     started_at="2026-09-27T01:00:00+00:00",
                     finished_at="2026-09-27T01:01:00+00:00",
                     exit_code=0,
+                    verification_scope="named_check",
                 )
                 rows = local_state.recent_verification_receipts(repository_id="repo-1")
 
@@ -104,6 +105,7 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(rows[0]["started_checkout_id"], "checkout-1")
         self.assertEqual(rows[0]["started_head"], "abc123")
         self.assertEqual(rows[0]["started_dirty_fingerprint"], "clean")
+        self.assertEqual(rows[0]["verification_scope"], "named_check")
         self.assertNotIn("output", rows[0])
         self.assertNotIn("command", rows[0])
 

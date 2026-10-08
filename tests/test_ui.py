@@ -5176,10 +5176,12 @@ class DashboardWindowTests(unittest.TestCase):
                 {
                     "name": "pytest", "status": "passed", "current": False,
                     "state_binding": "git_state_changed",
+                    "verification_scope": "targeted",
                 },
                 {
                     "name": "npm test", "status": "passed", "current": False,
                     "state_binding": "historical",
+                    "verification_scope": "named_check",
                 },
             ]},
         }))
@@ -5187,6 +5189,13 @@ class DashboardWindowTests(unittest.TestCase):
         tests = packet["evidence"]["tests"]
         self.assertIn("stale: Git state changed during verification", tests[0]["summary"])
         self.assertIn("historical: starting Git state unavailable", tests[1]["summary"])
+        self.assertIn("targeted or parameterized scope; target details not stored", tests[0]["summary"])
+        self.assertIn("named check", tests[1]["summary"])
+        self.assertEqual(
+            tests[0]["summary"],
+            "passed | stale: Git state changed during verification | "
+            "targeted or parameterized scope; target details not stored | pytest",
+        )
         self.assertFalse(tests[0]["authoritative"])
         self.assertFalse(tests[1]["authoritative"])
 

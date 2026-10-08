@@ -498,6 +498,43 @@ class OutcomeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.tests[0]["attribution"], "inferred_time_window")
         self.assertNotIn("authoritative", evidence.tests[0])
 
+    def test_targeted_pass_does_not_upgrade_commit_to_medium_confidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        for scope, expected_confidence in (
+            ("targeted", "low"),
+            ("named_check", "medium"),
+            ("project_default", "medium"),
+        ):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as temp_dir:
+                repo = os.path.join(temp_dir, "repo")
+                os.mkdir(repo)
+                init_repo(repo)
+                head = commit_file(repo, "app.py", "base\n", "base", when=now)
+                fingerprint = _checkout_state(repo)["dirty_fingerprint"]
+                state_file = os.path.join(temp_dir, "state.json")
+                with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                    identity = resolve_git_identity(repo)
+                    assert identity is not None
+                    local_state.record_verification_receipt(
+                        runner="pytest", checkout_path=repo,
+                        repository_id=identity.repository_id,
+                        repository_lineage_id=identity.repository_lineage_id,
+                        started_checkout_id=identity.checkout_id, started_head=head,
+                        started_dirty_fingerprint=fingerprint,
+                        checkout_id=identity.checkout_id, head=head,
+                        dirty_fingerprint=fingerprint,
+                        started_at=now.isoformat(),
+                        finished_at=(now + timedelta(seconds=30)).isoformat(),
+                        exit_code=0, session_id=f"scope-{scope}",
+                        verification_scope=scope,
+                    )
+                    evidence = build_outcome_evidence(LocalSession(
+                        session_id=f"scope-{scope}", tool="codex-cli", project_path=repo,
+                        started_at=now, updated_at=now + timedelta(minutes=1),
+                    ))
+
+                self.assertEqual(evidence.confidence, expected_confidence)
+
     def test_newest_current_verification_failure_supersedes_older_pass(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -611,7 +648,7 @@ class OutcomeEvidenceTests(unittest.TestCase):
                         "AIWATCHER_STATE_FILE": state_file,
                         "PYTHONDONTWRITEBYTECODE": "1",
                     }),
-                    patch.object(cli, "_verification_runner", return_value="python -m unittest"),
+                    patch.object(cli, "_verification_classification", return_value=("python -m unittest", "project_default")),
                     patch.object(cli, "environment_session_identity", return_value=("mutating", "codex")),
                     patch.object(cli, "scan_all", return_value=[]),
                 ):
@@ -631,6 +668,7 @@ class OutcomeEvidenceTests(unittest.TestCase):
         receipt = next(item for item in evidence.tests if item.get("name") == "python -m unittest")
         self.assertEqual(receipt["status"], "passed")
         self.assertEqual(receipt["state_binding"], "git_state_changed")
+        self.assertEqual(receipt["verification_scope"], "project_default")
         self.assertFalse(receipt["current"])
         self.assertNotIn("authoritative", receipt)
         self.assertIn("stale; Git state changed during verification", brief)

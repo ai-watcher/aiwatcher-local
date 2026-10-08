@@ -737,6 +737,7 @@ def _packet_verification(evidence: dict[str, object], *, limit: int = 5) -> list
                 "status": _clean_line(item.get("status"), limit=40).lower(),
                 "completion_state": _clean_line(item.get("completion_state"), limit=40).lower(),
                 "authoritative": item.get("authoritative") is True,
+                "verification_scope": _clean_line(item.get("verification_scope"), limit=40).lower(),
             })
         else:
             summary = _clean_line(item, limit=320)
@@ -748,6 +749,7 @@ def _packet_verification(evidence: dict[str, object], *, limit: int = 5) -> list
                     "status": "unknown",
                     "completion_state": "unknown",
                     "authoritative": False,
+                    "verification_scope": "unknown",
                 })
     return rows
 
@@ -777,11 +779,22 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         and item.get("status") in {"passed", "failed"}
         for item in verification_rows
     )
+    broad_verification = any(
+        item.get("authoritative") is True
+        and item.get("completion_state") == "completed"
+        and item.get("status") in {"passed", "failed"}
+        and item.get("verification_scope") == "project_default"
+        for item in verification_rows
+    )
     verification = [
         *packet_verification,
         *([] if completed_verification else [
             "No authoritative session-bound verification for the exact Git state was observed; do not claim the prior work is verified."
         ]),
+        *(
+            ["Verification was targeted or its scope is unknown; do not infer project-wide coverage."]
+            if completed_verification and not broad_verification else []
+        ),
     ]
     objective_status = _clean_line(parsed.get("objective_status"), limit=180)
 
