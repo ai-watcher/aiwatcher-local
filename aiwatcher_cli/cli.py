@@ -8276,7 +8276,7 @@ def _cli_command_for_current_file() -> str:
     if installed:
         if os.name == "nt":
             installed = installed.replace("\\", "/")
-        return shlex.quote(os.path.abspath(installed))
+        return shlex.quote(installed)
     executable = sys.executable
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     if os.name == "nt":
