@@ -49,6 +49,13 @@ from .cli import (
 )
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .command_evidence import verification_scope_label
+from .delivery_review import (
+    DeliveryReviewUnavailable,
+    build_work_receipt,
+    format_work_receipt,
+    hydrate_persisted_receipt,
+)
+from .delivery import ObjectiveClaim
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .git_identity import identity_for_session, repository_identity
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, bound_handoff_words, build_handoff_capsule
@@ -88,11 +95,14 @@ from .local_state import (
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
+    recent_delivery_events,
     recent_optimize_decisions,
+    recent_work_receipts,
     get_ambient_intervention,
     mark_active_command_gate_seen,
     mark_active_prompt_gate_seen,
     mark_recent_handoff_receipts_viewed,
+    mark_work_receipt_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
     record_ai_assist_cache,
@@ -265,6 +275,9 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/ai-assist-config",
     "/api/handoff-ai-assist",
     "/api/optimize-ai-assist",
+    "/api/delivery-review",
+    "/api/delivery-reviews",
+    "/api/delivery-review-viewed",
 })
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
@@ -3475,6 +3488,156 @@ def _handoff_options_from_payload(payload: dict[str, object], *, default_type: s
         "constraints": _payload_items(payload, "constraints"),
         "acceptance_criteria": _payload_items(payload, "acceptance_criteria"),
     }
+
+
+def build_delivery_reviews(*, limit: int = 20) -> dict[str, object]:
+    """Return recent Local receipts with transient Git paths rehydrated."""
+    events = {
+        str(row.get("event_id")): row
+        for row in recent_delivery_events(limit=500)
+        if isinstance(row, dict) and row.get("event_id")
+    }
+    stored_reviews = recent_work_receipts(limit=max(1, min(100, limit)))
+    confirmed_states = {
+        (
+            str((row.get("event") or {}).get("checkout_id") or ""),
+            str((row.get("event") or {}).get("head_sha") or ""),
+        )
+        for row in stored_reviews
+        if isinstance(row, dict)
+        and isinstance(row.get("event"), dict)
+        and (row.get("event") or {}).get("status") == "confirmed"
+    }
+    reviews: list[dict[str, object]] = []
+    for stored in stored_reviews:
+        event = stored.get("event") if isinstance(stored.get("event"), dict) else {}
+        event_state = (str(event.get("checkout_id") or ""), str(event.get("head_sha") or ""))
+        if event.get("status") == "candidate" and event_state in confirmed_states:
+            continue
+        payload = hydrate_persisted_receipt(stored, events.get(str(event.get("event_id") or "")))
+        objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
+        if not objective.get("text"):
+            contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
+            for contribution in contributions:
+                if not isinstance(contribution, dict):
+                    continue
+                session = _find_session_row(str(contribution.get("session_id") or ""))
+                if session is None:
+                    continue
+                segments = segment_session_by_prompt(session.source_path, max_chars=500)
+                prompt = next((
+                    str(segment.get("prompt") or "").strip()
+                    for segment in segments
+                    if not segment.get("compact_summary") and str(segment.get("prompt") or "").strip()
+                ), "")
+                if not prompt:
+                    continue
+                objective = ObjectiveClaim(
+                    provenance="inferred", confidence="low", text=prompt,
+                ).to_json()
+                payload["objective"] = objective
+                break
+        payload["objective_retained"] = bool(objective.get("text"))
+        payload["objective_label"] = (
+            "Objective inferred from a linked session; confirm before sharing"
+            if objective.get("provenance") == "inferred"
+            else (
+                "Objective confirmed; text is not retained"
+                if objective.get("provenance") == "user_confirmed"
+                else "Objective unavailable"
+            )
+        )
+        payload["ready"] = bool(
+            event.get("status") == "confirmed"
+            and not payload.get("viewed_at")
+            and not payload.get("superseded_by")
+        )
+        payload["summary_text"] = format_work_receipt(payload)
+        reviews.append(payload)
+    ready = [row for row in reviews if row.get("ready")]
+    return {
+        "reviews": reviews,
+        "ready_count": len(ready),
+        "latest_ready": ready[0] if ready else None,
+        "privacy": (
+            "Objective text and changed-file paths are not retained in work receipts. "
+            "The matching delivery event retains the local checkout path so exact Git evidence can be reconstructed."
+        ),
+        "automatic_coverage": (
+            "Automatic command capture currently supports Claude structured Bash and legacy structured Codex shell results. "
+            "Use aiwatcher push for current Codex opaque exec, Cursor, and ordinary terminals."
+        ),
+    }
+
+
+def _latest_ready_delivery_receipt() -> dict[str, object] | None:
+    """Return unread confirmed delivery evidence without touching the checkout."""
+    for receipt in recent_work_receipts(limit=20):
+        if not isinstance(receipt, dict):
+            continue
+        event = receipt.get("event") if isinstance(receipt.get("event"), dict) else {}
+        if (
+            event.get("status") == "confirmed"
+            and not receipt.get("viewed_at")
+            and not receipt.get("superseded_by")
+        ):
+            return receipt
+    return None
+
+
+def build_explicit_delivery_review(payload: dict[str, object]) -> dict[str, object]:
+    checkout = str(payload.get("project_path") or payload.get("repo") or "").strip()
+    if not checkout:
+        return {"error": "project_path is required"}
+    objective = str(payload.get("objective") or "").strip()[:2_000] or None
+    session_id = str(payload.get("session_id") or "").strip()[:120] or None
+    try:
+        receipt = build_work_receipt(
+            checkout,
+            objective_text=objective,
+            event_kind="explicit_review",
+            event_status="candidate",
+            event_source="dashboard_explicit_review",
+            session_id=session_id,
+        )
+    except DeliveryReviewUnavailable as exc:
+        return {"error": str(exc)}
+    confirmed = next((
+        row for row in recent_work_receipts(checkout_id=receipt.snapshot.checkout_id, limit=50)
+        if isinstance(row, dict)
+        and isinstance(row.get("event"), dict)
+        and (row.get("event") or {}).get("status") == "confirmed"
+        and (row.get("event") or {}).get("head_sha") == receipt.snapshot.head_sha
+        and not row.get("superseded_by")
+    ), None)
+    if confirmed is not None:
+        events = {
+            str(row.get("event_id")): row
+            for row in recent_delivery_events(checkout_id=receipt.snapshot.checkout_id, limit=100)
+            if isinstance(row, dict) and row.get("event_id")
+        }
+        confirmed_event = confirmed.get("event") if isinstance(confirmed.get("event"), dict) else {}
+        result = hydrate_persisted_receipt(
+            confirmed, events.get(str(confirmed_event.get("event_id") or "")),
+        )
+        result["objective"] = receipt.objective.to_json()
+        result["ready"] = bool(not result.get("viewed_at") and not result.get("superseded_by"))
+        result["objective_retained"] = False
+        result["objective_label"] = (
+            objective or "Objective unavailable; enter it before copying the PR summary."
+        )
+        result["transient_objective"] = bool(objective)
+        result["summary_text"] = format_work_receipt(result)
+        return result
+    result = receipt.to_json()
+    result["ready"] = False
+    result["objective_retained"] = False
+    result["objective_label"] = (
+        objective
+        if objective else "Objective unavailable"
+    )
+    result["summary_text"] = format_work_receipt(receipt)
+    return result
 
 
 def build_report(days: int = 7) -> dict[str, object]:
@@ -8553,6 +8716,33 @@ def build_companion_state() -> dict[str, object]:
     if isinstance(compact, dict) and compact.get("sessions"):
         return _compact_companion_state(base, compact)
 
+    delivery_receipt = _latest_ready_delivery_receipt()
+    if delivery_receipt is not None:
+        event = delivery_receipt.get("event") if isinstance(delivery_receipt.get("event"), dict) else {}
+        snapshot = delivery_receipt.get("snapshot") if isinstance(delivery_receipt.get("snapshot"), dict) else {}
+        receipt_id = str(delivery_receipt.get("receipt_id") or "")
+        branch = str(snapshot.get("branch") or "detached HEAD")
+        commit_count = len(snapshot.get("commit_shas") or [])
+        kind = str(event.get("kind") or "delivery")
+        destination = "pull request" if kind == "pull_request" else "push"
+        review_url = f"/?view=receipts&delivery={quote(receipt_id, safe='')}"
+        return {
+            **base,
+            "state": "delivery_review_ready",
+            "label": "Delivery review ready",
+            "title": "Delivery review ready",
+            "subtitle": f"{branch} · {commit_count} commit{'s' if commit_count != 1 else ''} · {destination} confirmed",
+            "primary_label": "Review evidence",
+            "primary_action": "open_url",
+            "primary_url": review_url,
+            "badge": {
+                "count": 1,
+                "tone": "info",
+                "label": "1 delivery review ready",
+            },
+            "detail": "The remote event and delivered Git state were observed locally. Review evidence gaps before copying the PR summary.",
+        }
+
     # Below a blocked session -- blocked outranks done -- and below live work:
     # the takeover only happens while nothing is working. Field report: with
     # one session running and another freshly finished, the finished headline
@@ -9043,6 +9233,13 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/delivery-reviews" and self._is_cross_origin():
+            self._send(
+                403,
+                json.dumps({"error": "Delivery evidence answers only the dashboard's own origin"}),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/":
             self._send(200, HTML, "text/html; charset=utf-8")
             return
@@ -9235,6 +9432,14 @@ class UIHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
             return
+        if parsed.path == "/api/delivery-reviews":
+            params = parse_qs(parsed.query)
+            try:
+                limit = max(1, min(100, int(params.get("limit", ["20"])[0])))
+            except ValueError:
+                limit = 20
+            self._send(200, json.dumps(build_delivery_reviews(limit=limit)), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/report":
             params = parse_qs(parsed.query)
             try:
@@ -9324,6 +9529,8 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/session-resume",
             "/api/update-apply",
             "/api/update-auto-check",
+            "/api/delivery-review",
+            "/api/delivery-review-viewed",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -9351,6 +9558,28 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/delivery-review":
+            if not isinstance(payload, dict):
+                self._send(400, json.dumps({"error": "Expected a JSON object"}), "application/json; charset=utf-8")
+                return
+            response = build_explicit_delivery_review(payload)
+            self._send(400 if response.get("error") else 200, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/delivery-review-viewed":
+            receipt_id = str(payload.get("receipt_id") or "").strip()
+            if not receipt_id:
+                self._send(400, json.dumps({"error": "receipt_id is required"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = mark_work_receipt_viewed(receipt_id)
+            except (OSError, ValueError) as exc:
+                self._send(500, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            if record is None:
+                self._send(404, json.dumps({"error": "delivery review not found"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps({"ok": True, "receipt": record}), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/update-apply":
             fetch = not bool(payload.get("no_fetch"))

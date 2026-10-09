@@ -23,6 +23,7 @@ from .command_evidence import (
 )
 from .git_identity import identity_for_session, repository_identity, resolve_git_identity
 from .local_state import (
+    recent_delivery_events,
     recent_commit_receipts,
     recent_verification_receipts,
     record_commit_receipt,
@@ -439,6 +440,7 @@ def _commit_details(repo: str, value: object) -> dict[str, Any] | None:
 def _ingest_session_command_evidence(
     observed_commands: list[CommandEvidence],
     checkout_id: str | None,
+    session: LocalSession | None = None,
 ) -> None:
     """Persist bounded facts from structured tool-call/result pairs."""
     for observed in observed_commands:
@@ -502,6 +504,101 @@ def _ingest_session_command_evidence(
                     "source_id": observed.source_id,
                 })
             except (OSError, ValueError):
+                continue
+        elif (
+            observed.command_kind == "git_push"
+            and observed.completion_state == "completed"
+            and observed.exit_code == 0
+            and (observed.delivery_head_sha or observed.delivery_ref_confirmed)
+        ):
+            head = (
+                _git_text(identity.checkout_path, ["rev-parse", f"{observed.delivery_head_sha}^{{commit}}"])
+                if observed.delivery_head_sha else None
+            )
+            if (
+                not head
+                and observed.delivery_ref_confirmed
+                and observed.remote
+                and observed.remote_ref
+            ):
+                head = _git_text(
+                    identity.checkout_path,
+                    ["rev-parse", f"refs/remotes/{observed.remote}/{observed.remote_ref}^{{commit}}"],
+                )
+            base = (
+                _git_text(identity.checkout_path, ["rev-parse", f"{observed.delivery_base_sha}^{{commit}}"])
+                if observed.delivery_base_sha else None
+            )
+            if not head:
+                continue
+            current_head = _git_text(identity.checkout_path, ["rev-parse", "HEAD"])
+            current_branch = _git_text(identity.checkout_path, ["branch", "--show-current"])
+            source_ref = str(observed.delivery_source_ref or "").removeprefix("refs/heads/")
+            if (
+                head != current_head
+                or not current_branch
+                or source_ref not in {current_branch, "HEAD", "@"}
+            ):
+                continue
+            try:
+                from .delivery_review import DeliveryReviewUnavailable, build_work_receipt
+
+                build_work_receipt(
+                    identity.checkout_path,
+                    event_kind="push",
+                    event_status="confirmed",
+                    event_source="transcript_tool_result",
+                    event_source_id=observed.source_id,
+                    event_observed_at=observed.finished_at,
+                    event_head_sha=head,
+                    event_base_sha=base,
+                    session_id=observed.session_id,
+                    remote=observed.remote,
+                    remote_ref=observed.remote_ref,
+                    sessions=[session] if session is not None else [],
+                )
+            except (DeliveryReviewUnavailable, OSError, ValueError):
+                continue
+        elif (
+            observed.command_kind == "gh_pr_create"
+            and observed.completion_state == "completed"
+            and observed.exit_code == 0
+            and observed.pull_request_url
+        ):
+            head = _git_text(identity.checkout_path, ["rev-parse", "HEAD"])
+            if not head:
+                continue
+            prior_push = next((
+                event for event in recent_delivery_events(
+                    repository_id=identity.repository_id,
+                    checkout_id=identity.checkout_id,
+                    limit=20,
+                )
+                if event.get("kind") == "push"
+                and event.get("status") == "confirmed"
+                and event.get("head_sha") == head
+            ), None)
+            if prior_push is None:
+                continue
+            try:
+                from .delivery_review import DeliveryReviewUnavailable, build_work_receipt
+
+                build_work_receipt(
+                    identity.checkout_path,
+                    event_kind="pull_request",
+                    event_status="confirmed",
+                    event_source="transcript_tool_result",
+                    event_source_id=observed.source_id,
+                    event_observed_at=observed.finished_at,
+                    event_head_sha=head,
+                    event_base_sha=str(prior_push.get("base_sha") or "") or None,
+                    session_id=observed.session_id,
+                    remote=prior_push.get("remote"),
+                    remote_ref=prior_push.get("remote_ref"),
+                    pull_request_url=observed.pull_request_url,
+                    sessions=[session] if session is not None else [],
+                )
+            except (DeliveryReviewUnavailable, OSError, ValueError):
                 continue
 
 
@@ -943,7 +1040,7 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
     evidence.dirty = state["dirty"]
     evidence.unpushed_commits = state["unpushed_commits"]
     evidence.command_evidence_coverage = command_evidence_coverage(session)
-    _ingest_session_command_evidence(observed_commands, evidence.checkout_id)
+    _ingest_session_command_evidence(observed_commands, evidence.checkout_id, session)
     evidence.commit_receipts = _session_commit_receipts(
         session, evidence.repository_id, repo, evidence.checkout_id,
     )

@@ -5919,6 +5919,64 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(len(updated["hooks"]["UserPromptSubmit"]), 1)
         self.assertIn("Stop", updated["hooks"])
 
+    def test_codex_hook_replacement_preserves_sibling_command_and_handler_metadata(self) -> None:
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "matcher": "trusted",
+                    "hooks": [
+                        {"type": "command", "command": "other-check"},
+                        {"type": "command", "command": "old-aiwatcher codex-hook --gate"},
+                    ],
+                }],
+                "Stop": [{"hooks": [{"type": "command", "command": "finish"}]}],
+            }
+        }
+
+        merged = cli._merge_codex_hook(settings, "/durable/aiwatcher", gate=True)
+        self.assertEqual(len(merged["hooks"]["UserPromptSubmit"]), 2)
+        self.assertEqual(merged["hooks"]["UserPromptSubmit"][0]["matcher"], "trusted")
+        self.assertEqual(
+            merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "other-check",
+        )
+        installed = merged["hooks"]["UserPromptSubmit"][1]["hooks"][0]
+        self.assertEqual(installed["command"], "/durable/aiwatcher codex-hook --gate")
+        self.assertEqual(installed["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+
+        updated, removed = cli._remove_codex_hook(merged)
+        self.assertTrue(removed)
+        self.assertEqual(updated["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "other-check")
+        self.assertIn("Stop", updated["hooks"])
+
+    def test_hook_health_distinguishes_missing_source_executable_and_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_source = os.path.join(temp_dir, "gone")
+            issues = cli._hook_command_health_issues(
+                f"PYTHONPATH={missing_source}:${{PYTHONPATH:-}} python3 -m aiwatcher_cli codex-hook"
+            )
+            self.assertTrue(any("PYTHONPATH directory no longer exists" in issue for issue in issues))
+
+            with patch.object(cli.shutil, "which", return_value=None):
+                issues = cli._hook_command_health_issues("missing-aiwatcher codex-hook")
+            self.assertTrue(any("executable is missing" in issue for issue in issues))
+
+            failed = subprocess.CompletedProcess(["python"], 1, "", "No module named aiwatcher_cli")
+            with (
+                patch.object(cli.shutil, "which", return_value="/usr/bin/python3"),
+                patch.object(cli.subprocess, "run", return_value=failed),
+            ):
+                issues = cli._hook_command_health_issues("python3 -m aiwatcher_cli codex-hook")
+            self.assertTrue(any("cannot load AIWatcher" in issue for issue in issues))
+
+    def test_doctor_hook_label_reports_unhealthy_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "hooks.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"command": "PYTHONPATH=/definitely/gone python3 -m aiwatcher_cli codex-hook"}, handle)
+            label = cli._hook_file_health_label(path, "codex-hook")
+        self.assertIn("unhealthy", label)
+        self.assertIn("PYTHONPATH directory no longer exists", label)
+
     def test_read_stdin_text_decodes_utf8_regardless_of_platform_default(self) -> None:
         payload = json.dumps({"prompt": "Scan macro signals — short–term and long–term effect"})
         stdin = SimpleNamespace(buffer=io.BytesIO(payload.encode("utf-8")))
@@ -6488,8 +6546,15 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("scoped execution brief", output["user_message"].lower())
         self.assertIn("Task\nRefactor the entire codebase", output["user_message"])
 
-    def test_public_hook_command_uses_module_entrypoint(self) -> None:
-        command = cli._cli_command_for_current_file()
+    def test_public_hook_command_prefers_durable_console_entrypoint(self) -> None:
+        with patch.object(cli.shutil, "which", return_value="/home/me/.local/bin/aiwatcher"):
+            command = cli._cli_command_for_current_file()
+        self.assertEqual(command, "/home/me/.local/bin/aiwatcher")
+        self.assertNotIn("PYTHONPATH=", command)
+
+    def test_public_hook_command_falls_back_to_module_entrypoint(self) -> None:
+        with patch.object(cli.shutil, "which", return_value=None):
+            command = cli._cli_command_for_current_file()
         self.assertIn("-m aiwatcher_cli", command)
         self.assertIn("PYTHONPATH=", command)
         self.assertNotIn("collector/cli.py", command)
@@ -6502,6 +6567,7 @@ class IntegrationConfigTests(unittest.TestCase):
         with (
             patch.object(cli.sys, "executable", r"C:\Users\example\Python\python.exe"),
             patch.object(cli.os, "name", "nt"),
+            patch.object(cli.shutil, "which", return_value=None),
         ):
             command = cli._cli_command_for_current_file()
         self.assertNotIn("\\", command)
@@ -6511,6 +6577,7 @@ class IntegrationConfigTests(unittest.TestCase):
         with (
             patch.object(cli.sys, "executable", r"C:\Program Files\Python\python.exe"),
             patch.object(cli.os, "name", "nt"),
+            patch.object(cli.shutil, "which", return_value=None),
         ):
             command = cli._cli_command_for_current_file()
         self.assertIn("'C:/Program Files/Python/python.exe'", command)
@@ -6741,8 +6808,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 warnings = cli._configured_aiwatcher_source_warnings()
 
         self.assertEqual(len(warnings), 1)
-        self.assertIn("different AIWatcher checkout", warnings[0])
-        self.assertIn("Reinstall it from this repo", warnings[0])
+        self.assertIn("PYTHONPATH directory no longer exists", warnings[0])
         self.assertIn("install-codex-hook", warnings[0])
 
     def test_hook_status_warns_when_command_gate_points_at_different_checkout(self) -> None:
