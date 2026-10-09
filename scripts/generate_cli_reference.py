@@ -45,7 +45,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
         "Daily loop",
         "What ran today, what it cost, and whether it was worth it.",
         ["today", "last", "timeline", "journal", "sessions", "changes", "commit-receipt",
-         "outcome", "report", "tools", "projects"],
+         "delivery-review", "push", "outcome", "report", "tools", "projects"],
     ),
     (
         "Prompt review and launch",

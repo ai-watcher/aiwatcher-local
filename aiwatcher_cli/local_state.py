@@ -26,7 +26,7 @@ else:
     import fcntl
 
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 
 AI_ASSIST_MODES = {"off", "local", "cloud"}
@@ -374,6 +374,8 @@ def _empty_state() -> dict[str, Any]:
         "evidence_snapshots": [],
         "commit_receipts": [],
         "verification_receipts": [],
+        "delivery_events": [],
+        "work_receipts": [],
         "decisions": [],
         "baselines": {},
         "survival_summary": {},
@@ -475,6 +477,8 @@ def _load() -> dict[str, Any]:
     data.setdefault("evidence_snapshots", [])
     data.setdefault("commit_receipts", [])
     data.setdefault("verification_receipts", [])
+    data.setdefault("delivery_events", [])
+    data.setdefault("work_receipts", [])
     data.setdefault("decisions", [])
     data.setdefault("baselines", {})
     data.setdefault("survival_summary", {})
@@ -2788,6 +2792,268 @@ def recent_verification_receipts(
             or (include_unbound and not row.get("session_id"))
         )
     ]
+    return list(reversed(filtered[-max(0, limit):]))
+
+
+MAX_DELIVERY_EVENTS_STORED = 500
+MAX_WORK_RECEIPTS_STORED = 300
+
+
+def _delivery_value(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    clean = " ".join(value.strip().split())
+    return clean[:limit] or None
+
+
+def record_delivery_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Persist one bounded observation that may justify a delivery review.
+
+    Command text and output are intentionally absent. ``source_id`` is the
+    durable link back to the structured tool result that established the fact.
+    """
+    record = {
+        "event_id": _delivery_value(event.get("event_id"), 160),
+        "kind": _delivery_value(event.get("kind"), 40),
+        "status": _delivery_value(event.get("status"), 40),
+        "observed_at": _delivery_value(event.get("observed_at"), 80),
+        "repository_id": _delivery_value(event.get("repository_id"), 160),
+        "repository_lineage_id": _delivery_value(event.get("repository_lineage_id"), 160),
+        "checkout_id": _delivery_value(event.get("checkout_id"), 160),
+        "checkout_path": _delivery_value(event.get("checkout_path"), 1_000),
+        "head_sha": _delivery_value(event.get("head_sha"), 64),
+        "base_sha": _delivery_value(event.get("base_sha"), 64),
+        "source": _delivery_value(event.get("source"), 80),
+        "source_id": _delivery_value(event.get("source_id"), 160),
+        "session_id": _delivery_value(event.get("session_id"), 120),
+        "remote": _delivery_value(event.get("remote"), 160),
+        "remote_ref": _delivery_value(event.get("remote_ref"), 300),
+        "pull_request_url": _delivery_value(event.get("pull_request_url"), 1_000),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if not all(record.get(key) for key in (
+        "event_id", "kind", "status", "observed_at", "repository_id",
+        "checkout_id", "checkout_path", "head_sha", "source",
+    )):
+        raise ValueError("delivery event is missing required evidence identity")
+    with _locked_state():
+        data = _load()
+        existing = next((
+            row for row in reversed(data["delivery_events"])
+            if isinstance(row, dict) and row.get("event_id") == record["event_id"]
+        ), None)
+        if existing and existing.get("recorded_at"):
+            record["recorded_at"] = existing["recorded_at"]
+        data["delivery_events"] = [
+            row for row in data["delivery_events"]
+            if not (isinstance(row, dict) and row.get("event_id") == record["event_id"])
+        ]
+        data["delivery_events"].append(record)
+        data["delivery_events"] = data["delivery_events"][-MAX_DELIVERY_EVENTS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_delivery_events(
+    *,
+    repository_id: str | None = None,
+    checkout_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            rows = list(_load().get("delivery_events", []))
+    except OSError:
+        return []
+    filtered = [
+        dict(row) for row in rows
+        if isinstance(row, dict)
+        and (not repository_id or row.get("repository_id") == repository_id)
+        and (not checkout_id or row.get("checkout_id") == checkout_id)
+    ]
+    return list(reversed(filtered[-max(0, limit):]))
+
+
+def _privacy_safe_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the persisted receipt from an allowlist, never caller trust."""
+    event = receipt.get("event") if isinstance(receipt.get("event"), dict) else {}
+    snapshot = receipt.get("snapshot") if isinstance(receipt.get("snapshot"), dict) else {}
+    objective = receipt.get("objective") if isinstance(receipt.get("objective"), dict) else {}
+    verifications = receipt.get("verifications") if isinstance(receipt.get("verifications"), list) else []
+    contributions = receipt.get("contributions") if isinstance(receipt.get("contributions"), list) else []
+    workflow = receipt.get("workflow") if isinstance(receipt.get("workflow"), dict) else {}
+    return {
+        "schema_version": 1,
+        "receipt_id": _delivery_value(receipt.get("receipt_id"), 160),
+        "created_at": _delivery_value(receipt.get("created_at"), 80),
+        "event": {
+            key: event.get(key)
+            for key in (
+                "event_id", "kind", "status", "observed_at", "repository_id",
+                "checkout_id", "head_sha", "source", "session_id", "source_id",
+                "remote", "remote_ref", "pull_request_url",
+            )
+        },
+        "snapshot": {
+            "repository_id": snapshot.get("repository_id"),
+            "checkout_id": snapshot.get("checkout_id"),
+            "branch": snapshot.get("branch"),
+            "base_sha": snapshot.get("base_sha"),
+            "head_sha": snapshot.get("head_sha"),
+            "upstream": snapshot.get("upstream"),
+            "clean": snapshot.get("clean") if isinstance(snapshot.get("clean"), bool) else None,
+            "commit_shas": [str(value)[:64] for value in snapshot.get("commit_shas", []) if isinstance(value, str)][:200],
+            "changed_files": [],
+            "changed_file_hashes": [],
+            "changed_file_count": max(0, int(snapshot.get("changed_file_count") or 0)),
+            "lines_added": max(0, int(snapshot.get("lines_added") or 0)) if snapshot.get("lines_added") is not None else None,
+            "lines_removed": max(0, int(snapshot.get("lines_removed") or 0)) if snapshot.get("lines_removed") is not None else None,
+        },
+        "objective": {
+            "provenance": objective.get("provenance"),
+            "confidence": objective.get("confidence"),
+            "text": None,
+            "source_hash": _delivery_value(objective.get("source_hash"), 128),
+            "confirmed_at": _delivery_value(objective.get("confirmed_at"), 80),
+        },
+        "verifications": [
+            {
+                key: item.get(key)
+                for key in ("runner", "status", "scope", "provenance", "exact_state", "finished_at", "source_id")
+            }
+            for item in verifications[:100] if isinstance(item, dict)
+        ],
+        "contributions": [
+            {
+                "session_id": item.get("session_id"),
+                "commit_shas": [str(value)[:64] for value in item.get("commit_shas", []) if isinstance(value, str)][:200],
+                "strength": item.get("strength"),
+                "provenance": item.get("provenance"),
+                "source_id": item.get("source_id"),
+            }
+            for item in contributions[:200] if isinstance(item, dict)
+        ],
+        "workflow": {
+            "session_count": max(0, int(workflow.get("session_count") or 0)),
+            "user_turns": max(0, int(workflow.get("user_turns") or 0)),
+            "model_calls": max(0, int(workflow.get("model_calls") or 0)),
+            "tool_calls": max(0, int(workflow.get("tool_calls") or 0)),
+            "observed_request_seconds": workflow.get("observed_request_seconds")
+            if isinstance(workflow.get("observed_request_seconds"), (int, float)) else None,
+            "longest_observed_request_seconds": workflow.get("longest_observed_request_seconds")
+            if isinstance(workflow.get("longest_observed_request_seconds"), (int, float)) else None,
+            "observed_idle_gap_seconds": workflow.get("observed_idle_gap_seconds")
+            if isinstance(workflow.get("observed_idle_gap_seconds"), (int, float)) else None,
+            "coverage": _delivery_value(workflow.get("coverage"), 160) or "unavailable",
+        },
+        "attention": [
+            str(value).strip()[:500]
+            for value in receipt.get("attention", []) if isinstance(value, str) and value.strip()
+        ][:20],
+    }
+
+
+def record_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    record = _privacy_safe_work_receipt(receipt)
+    receipt_id = record.get("receipt_id")
+    event_id = (record.get("event") or {}).get("event_id")
+    if not receipt_id or not record.get("created_at") or not event_id:
+        raise ValueError("work receipt requires receipt, event, and timestamp identity")
+    with _locked_state():
+        data = _load()
+        existing = next((
+            row for row in reversed(data["work_receipts"])
+            if isinstance(row, dict) and row.get("receipt_id") == receipt_id
+        ), None)
+        if existing:
+            for key in ("viewed_at", "superseded_by", "superseded_at"):
+                if existing.get(key):
+                    record[key] = existing[key]
+        new_event = record.get("event") if isinstance(record.get("event"), dict) else {}
+        new_snapshot = record.get("snapshot") if isinstance(record.get("snapshot"), dict) else {}
+        new_order = (
+            str(new_event.get("observed_at") or record.get("created_at") or ""),
+            str(record.get("created_at") or ""),
+            str(receipt_id),
+        )
+        for row in data["work_receipts"]:
+            if not isinstance(row, dict) or row.get("receipt_id") == receipt_id:
+                continue
+            old_event = row.get("event") if isinstance(row.get("event"), dict) else {}
+            old_snapshot = row.get("snapshot") if isinstance(row.get("snapshot"), dict) else {}
+            same_destination = (
+                bool(new_event.get("pull_request_url"))
+                and new_event.get("pull_request_url") == old_event.get("pull_request_url")
+            ) or (
+                new_event.get("remote") == old_event.get("remote")
+                and new_event.get("remote_ref") == old_event.get("remote_ref")
+                and bool(new_event.get("remote_ref"))
+            )
+            if not same_destination or new_snapshot.get("checkout_id") != old_snapshot.get("checkout_id"):
+                continue
+            old_order = (
+                str(old_event.get("observed_at") or row.get("created_at") or ""),
+                str(row.get("created_at") or ""),
+                str(row.get("receipt_id") or ""),
+            )
+            if record.get("superseded_by"):
+                continue
+            if not row.get("superseded_by") and old_order <= new_order:
+                row["superseded_by"] = receipt_id
+                row["superseded_at"] = datetime.now(timezone.utc).isoformat()
+            elif old_order > new_order:
+                record["superseded_by"] = row.get("receipt_id")
+                record["superseded_at"] = datetime.now(timezone.utc).isoformat()
+        data["work_receipts"] = [
+            row for row in data["work_receipts"]
+            if not (
+                isinstance(row, dict)
+                and (row.get("receipt_id") == receipt_id or (row.get("event") or {}).get("event_id") == event_id)
+            )
+        ]
+        data["work_receipts"].append(record)
+        data["work_receipts"] = data["work_receipts"][-MAX_WORK_RECEIPTS_STORED:]
+        _save(data)
+    return record
+
+
+def mark_work_receipt_viewed(receipt_id: str) -> dict[str, Any] | None:
+    receipt_id = receipt_id.strip()[:160]
+    if not receipt_id:
+        raise ValueError("receipt_id is required")
+    with _locked_state():
+        data = _load()
+        for row in reversed(data.get("work_receipts", [])):
+            if not isinstance(row, dict) or row.get("receipt_id") != receipt_id:
+                continue
+            if not row.get("viewed_at"):
+                row["viewed_at"] = datetime.now(timezone.utc).isoformat()
+                _save(data)
+            return dict(row)
+    return None
+
+
+def recent_work_receipts(
+    *,
+    repository_id: str | None = None,
+    checkout_id: str | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            rows = list(_load().get("work_receipts", []))
+    except OSError:
+        return []
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        snapshot = row.get("snapshot") if isinstance(row.get("snapshot"), dict) else {}
+        if repository_id and snapshot.get("repository_id") != repository_id:
+            continue
+        if checkout_id and snapshot.get("checkout_id") != checkout_id:
+            continue
+        filtered.append(dict(row))
     return list(reversed(filtered[-max(0, limit):]))
 
 

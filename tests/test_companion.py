@@ -362,7 +362,7 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             "kind": "permission",
         }}
 
-    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False, prefs=None):
+    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False, prefs=None, delivery_receipts=()):
         companion_prefs = {
             "blocked_sessions": True,
             "fresh_start_context": True,
@@ -376,12 +376,40 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             patch.object(ui, "active_prompt_gate", return_value=gate),
             patch.object(ui, "_cached_session_rows", return_value=list(sessions)),
             patch.object(ui, "session_waiting_signals", return_value=signals or {}),
+            patch.object(ui, "recent_work_receipts", return_value=list(delivery_receipts)),
             # Pinned rather than classified: the real helper reads the live
             # process table, and whether a test machine happens to have a
             # matching window must not decide what these tests assert.
             patch.object(ui, "_waiting_row_return_available", return_value=return_available),
         ):
             return ui.build_companion_state()
+
+    def _delivery_receipt(self, status="confirmed"):
+        return {
+            "receipt_id": "receipt-1",
+            "event": {"status": status, "kind": "push"},
+            "snapshot": {"branch": "feature", "commit_shas": ["a" * 40, "b" * 40]},
+        }
+
+    def test_confirmed_delivery_review_owns_an_advisory_companion_state(self):
+        state = self._state(self._summary(), delivery_receipts=[self._delivery_receipt()])
+        self.assertEqual(state["state"], "delivery_review_ready")
+        self.assertEqual(state["label"], "Delivery review ready")
+        self.assertIn("2 commits", state["subtitle"])
+        self.assertIn("receipt-1", state["primary_url"])
+
+    def test_candidate_delivery_review_never_interrupts(self):
+        state = self._state(
+            self._summary(), delivery_receipts=[self._delivery_receipt(status="candidate")],
+        )
+        self.assertNotEqual(state["state"], "delivery_review_ready")
+
+    def test_waiting_session_outranks_delivery_news(self):
+        state = self._state(
+            self._summary(), sessions=[self._session()], signals=self._signal(),
+            delivery_receipts=[self._delivery_receipt()],
+        )
+        self.assertEqual(state["state"], "session_waiting")
 
     def test_a_waiting_session_takes_over_the_companion(self):
         # It used to read "Watching quietly - 7 days: 3 sessions" while a

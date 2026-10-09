@@ -421,6 +421,24 @@ Session evidence keeps attribution and code-state authority separate:
   opaque sessions, instead of parsing JavaScript or claiming it observed nested
   terminal commands.
 
+Delivery reviews close this evidence loop at the remote boundary:
+
+- `aiwatcher delivery-review` and the Prove checkout control create a local
+  candidate. They never claim a push or pull request happened.
+- `aiwatcher push -- [git push args]` creates a ready review only after the
+  command succeeds and the configured upstream resolves to the unchanged local
+  HEAD. Supported structured transcripts can provide the same paired evidence.
+- Verification is shown as exact only when its receipt matches repository,
+  checkout, HEAD, and dirty-tree fingerprint. Older or ambiguous runs are not
+  promoted to proof.
+- Persisted receipts retain objective hashes and changed-file counts, not
+  objective text, changed-file paths, or hashes of changed-file paths. The
+  delivery event retains the local checkout path so paths can be reconstructed
+  from the immutable Git range when the Prove view is opened. A confirmed
+  objective can be applied transiently in Prove before copying the summary.
+- Request timing is labelled as observed agent/request time. It is not presented
+  as developer productivity or time saved.
+
 ## How To Validate Locally
 
 Use this as the first test script:

@@ -42,6 +42,155 @@ def _mp_hold_ai_assist_cloud_lock(state_file: str, entered, release) -> None:
 
 
 class LocalStateTests(unittest.TestCase):
+    def test_delivery_receipts_are_deduplicated_and_privacy_filtered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(Path(tmp) / "state.json")}):
+                event = local_state.record_delivery_event({
+                    "event_id": "push-1",
+                    "kind": "push",
+                    "status": "confirmed",
+                    "observed_at": "2026-10-09T16:00:00+00:00",
+                    "repository_id": "repo-1",
+                    "checkout_id": "checkout-1",
+                    "checkout_path": "/private/worktree",
+                    "head_sha": "a" * 40,
+                    "source": "transcript_tool_result",
+                    "source_id": "tool-call-1",
+                })
+                local_state.record_delivery_event({**event, "status": "confirmed"})
+                self.assertEqual(len(local_state.recent_delivery_events()), 1)
+
+                receipt = {
+                    "schema_version": 1,
+                    "receipt_id": "receipt-1",
+                    "created_at": "2026-10-09T16:01:00+00:00",
+                    "event": event,
+                    "snapshot": {
+                        "repository_id": "repo-1",
+                        "checkout_id": "checkout-1",
+                        "branch": "feature",
+                        "base_sha": "b" * 40,
+                        "head_sha": "a" * 40,
+                        "upstream": "origin/feature",
+                        "clean": True,
+                        "commit_shas": ["a" * 40],
+                        "changed_files": ["customers/acme/private.py"],
+                        "changed_file_hashes": ["c" * 64],
+                        "changed_file_count": 1,
+                        "lines_added": 10,
+                        "lines_removed": 2,
+                    },
+                    "objective": {
+                        "provenance": "user_confirmed",
+                        "confidence": "high",
+                        "text": "Customer secret objective",
+                        "source_hash": "d" * 64,
+                    },
+                    "verifications": [],
+                    "contributions": [],
+                    "attention": ["PR metadata was not checked."],
+                }
+                local_state.record_work_receipt(receipt)
+                local_state.record_work_receipt({**receipt, "attention": ["Updated"]})
+                rows = local_state.recent_work_receipts(repository_id="repo-1")
+
+        self.assertEqual(len(rows), 1)
+        encoded = json.dumps(rows[0], sort_keys=True)
+        self.assertNotIn("Customer secret objective", encoded)
+        self.assertNotIn("customers/acme/private.py", encoded)
+        self.assertEqual(rows[0]["snapshot"]["changed_file_hashes"], [])
+        self.assertEqual(rows[0]["attention"], ["Updated"])
+
+    def test_delivery_receipt_view_and_supersede_lifecycle_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(Path(tmp) / "state.json")}):
+                def receipt(receipt_id: str, head: str) -> dict:
+                    return {
+                        "receipt_id": receipt_id,
+                        "created_at": "2026-10-09T16:01:00+00:00",
+                        "event": {
+                            "event_id": f"event-{receipt_id}", "kind": "push", "status": "confirmed",
+                            "observed_at": "2026-10-09T16:00:00+00:00", "repository_id": "repo-1",
+                            "checkout_id": "checkout-1", "head_sha": head, "source": "test",
+                            "remote": "origin", "remote_ref": "feature",
+                        },
+                        "snapshot": {
+                            "repository_id": "repo-1", "checkout_id": "checkout-1", "head_sha": head,
+                            "commit_shas": [head], "changed_file_count": 1,
+                        },
+                        "objective": {}, "verifications": [], "contributions": [], "workflow": {}, "attention": [],
+                    }
+
+                local_state.record_work_receipt(receipt("one", "a" * 40))
+                first = local_state.mark_work_receipt_viewed("one")
+                second = local_state.mark_work_receipt_viewed("one")
+                local_state.record_work_receipt(receipt("two", "b" * 40))
+                rows = local_state.recent_work_receipts()
+
+        self.assertEqual(first["viewed_at"], second["viewed_at"])
+        older = next(row for row in rows if row["receipt_id"] == "one")
+        self.assertEqual(older["superseded_by"], "two")
+        self.assertIsNotNone(older["superseded_at"])
+
+    def test_replaying_an_older_delivery_cannot_resurrect_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(Path(tmp) / "state.json")}):
+                def receipt(receipt_id: str, head: str, observed_at: str) -> dict:
+                    return {
+                        "receipt_id": receipt_id, "created_at": observed_at,
+                        "event": {
+                            "event_id": f"event-{receipt_id}", "kind": "push", "status": "confirmed",
+                            "observed_at": observed_at, "repository_id": "repo-1",
+                            "checkout_id": "checkout-1", "head_sha": head, "source": "test",
+                            "remote": "origin", "remote_ref": "feature",
+                        },
+                        "snapshot": {
+                            "repository_id": "repo-1", "checkout_id": "checkout-1", "head_sha": head,
+                            "commit_shas": [head], "changed_file_count": 1,
+                        },
+                        "objective": {}, "verifications": [], "contributions": [], "workflow": {}, "attention": [],
+                    }
+
+                old = receipt("old", "a" * 40, "2026-10-09T16:00:00+00:00")
+                new = receipt("new", "b" * 40, "2026-10-09T17:00:00+00:00")
+                local_state.record_work_receipt(old)
+                local_state.record_work_receipt(new)
+                local_state.record_work_receipt(old)
+                rows = local_state.recent_work_receipts()
+
+        replayed = next(row for row in rows if row["receipt_id"] == "old")
+        current = next(row for row in rows if row["receipt_id"] == "new")
+        self.assertEqual(replayed["superseded_by"], "new")
+        self.assertNotIn("superseded_by", current)
+
+    def test_same_head_delivery_events_leave_only_the_latest_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(Path(tmp) / "state.json")}):
+                def receipt(receipt_id: str, kind: str, observed_at: str) -> dict:
+                    return {
+                        "receipt_id": receipt_id, "created_at": observed_at,
+                        "event": {
+                            "event_id": f"event-{receipt_id}", "kind": kind, "status": "confirmed",
+                            "observed_at": observed_at, "repository_id": "repo-1",
+                            "checkout_id": "checkout-1", "head_sha": "a" * 40, "source": "test",
+                            "remote": "origin", "remote_ref": "feature",
+                            "pull_request_url": "https://github.com/o/r/pull/1" if kind == "pull_request" else None,
+                        },
+                        "snapshot": {
+                            "repository_id": "repo-1", "checkout_id": "checkout-1", "head_sha": "a" * 40,
+                            "commit_shas": ["a" * 40], "changed_file_count": 1,
+                        },
+                        "objective": {}, "verifications": [], "contributions": [], "workflow": {}, "attention": [],
+                    }
+
+                local_state.record_work_receipt(receipt("push-one", "push", "2026-10-09T16:00:00+00:00"))
+                local_state.record_work_receipt(receipt("push-two", "push", "2026-10-09T16:01:00+00:00"))
+                local_state.record_work_receipt(receipt("pr", "pull_request", "2026-10-09T16:02:00+00:00"))
+                rows = local_state.recent_work_receipts()
+
+        current = [row for row in rows if not row.get("superseded_by")]
+        self.assertEqual([row["receipt_id"] for row in current], ["pr"])
+
     def test_commit_receipts_are_durable_and_replace_same_checkout_sha(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -236,7 +385,7 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(len(first), 32)
-        self.assertEqual(stored["version"], 3)
+        self.assertEqual(stored["version"], 4)
         self.assertEqual(len(stored["identity_secret"]), 64)
 
     def test_malformed_identity_secret_is_replaced(self) -> None:
