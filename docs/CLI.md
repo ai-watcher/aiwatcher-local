@@ -19,7 +19,7 @@ explicitly. See [Privacy](../README.md#privacy) for the full contract.
 ## Contents
 
 - [Getting started](#getting-started) -- `start`, `setup`, `update`, `status`, `doctor`
-- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
+- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `delivery-review`, `push`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
@@ -249,6 +249,43 @@ aiwatcher commit-receipt --repo ../my-service --json
 | `--json` | flag |  | Emit the receipt as JSON |
 | `--quiet-if-empty` | flag |  | Print nothing when there is no receipt to show; used by the git hook |
 | `--session-id` | text |  | Bind the commit receipt to an explicitly known AI session |
+
+### `aiwatcher delivery-review`
+
+Preview an evidence-backed local delivery candidate without claiming it was pushed
+
+```sh
+aiwatcher delivery-review [--repo REPO] [--session-id SESSION_ID]
+                          [--objective OBJECTIVE] [--json]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--repo` | text |  | Git checkout to review; defaults to the working directory |
+| `--session-id` | text |  | Bind the review to an explicitly known AI session |
+| `--objective` | text |  | Objective to include transiently; only its hash is retained |
+| `--json` | flag |  | Emit the transient review as JSON |
+
+### `aiwatcher push`
+
+Run git push and create a ready review only when the delivered current HEAD is confirmed
+
+```sh
+aiwatcher push [--repo REPO] [--session-id SESSION_ID]
+               [--objective OBJECTIVE] [--json]
+               ...
+```
+
+| Argument | Accepts | Description |
+| --- | --- | --- |
+| `push_args` | everything after `--` | Arguments for git push, after `--`; for example `-- --set-upstream origin feature` |
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--repo` | text |  | Git checkout to push; defaults to the working directory |
+| `--session-id` | text |  | Bind the delivery to an explicitly known AI session |
+| `--objective` | text |  | Objective to include transiently; only its hash is retained |
+| `--json` | flag |  | Emit the transient review as JSON after a confirmed push |
 
 ### `aiwatcher outcome`
 

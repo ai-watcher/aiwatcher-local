@@ -40,8 +40,8 @@ AI coding work:
   context.
 - **During the run:** notice loops, context pressure, idle sessions, and work
   waiting on you.
-- **After the run:** connect AI sessions to commits, outcomes, receipts, and
-  improvement signals.
+- **After the run:** connect AI sessions to commits, exact-state checks, and a
+  confirmed push or pull request without guessing that local work was delivered.
 
 No signup is required, and the default install keeps data on your machine.
 
@@ -63,6 +63,9 @@ context:
   for continuing work in a new session.
 - **Prove what was worth it:** connect local AI sessions to commits, outcomes,
   receipts, and API-equivalent usage.
+- **Review delivered work:** after an observed push or pull request, get a
+  concise evidence review of the Git range, exact-state checks, linked sessions,
+  and unresolved gaps.
 - **Keep trust visible:** label what is automatic, what is inferred, and what
   the current tool surface cannot prove.
 
@@ -194,6 +197,37 @@ aiwatcher install-claude-command-gate --write --scope user
 Normal package upgrades do not require reinstalling unchanged hook files. Do
 restart the Console and Companion after an upgrade, and reload the AI client if
 hook configuration changed or `hook-status` does not show the test invocation.
+
+Hook installers prefer the durable `aiwatcher` executable on your `PATH`.
+`aiwatcher doctor` reports a hook as unhealthy when its executable or embedded
+source checkout has disappeared; reinstall the hook with the same gated command
+to repair it without disabling Prompt Gate.
+
+## Review A Delivery
+
+Capture verification against the exact Git state, then push through AIWatcher:
+
+```console
+aiwatcher run -- python -m unittest
+aiwatcher push -- --set-upstream origin feature/my-change
+```
+
+After a confirmed push, Home and Companion show **Delivery review ready**. Open
+**Prove** to inspect the delivered commit range, checks tied to that exact HEAD
+and dirty-tree fingerprint, sessions linked by commit receipts, and anything
+that still needs confirmation. Enter or confirm the objective there before
+copying the bounded PR summary. The objective text stays in that browser preview
+only; refresh and AIWatcher asks for it again rather than retaining prompt text.
+When an exact commit receipt links a delivery to a local session, Prove may
+re-read the first user prompt and show it as **inferred**; it remains explicitly
+unconfirmed until the developer accepts or replaces it.
+
+The Prove view can also review a checkout before it is pushed. That result is
+labelled **Local candidate** and never triggers a delivery-ready signal. The
+objective is used for that preview only; AIWatcher retains its hash, not the
+text. Ordinary successful `git push` or `gh pr create` commands observed in a
+supported structured terminal transcript can also produce confirmed evidence.
+Failed, backgrounded, opaque, or ambiguous commands cannot.
 
 ## Other Install Methods
 
@@ -428,6 +462,8 @@ aiwatcher companion stop
 | `aiwatcher preflight "..."` | Review a prompt manually |
 | `aiwatcher sessions` | Review recent local AI sessions |
 | `aiwatcher changes --days 30` | See AI-attributed commit evidence |
+| `aiwatcher delivery-review` | Preview a local checkout without claiming delivery |
+| `aiwatcher push -- [git push args]` | Push and create a review only when the remote HEAD is confirmed |
 | `aiwatcher outcome useful` | Mark the latest session outcome |
 | `aiwatcher update` | Check the running source or package installation for updates |
 

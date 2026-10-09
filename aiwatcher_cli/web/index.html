@@ -157,6 +157,7 @@
       <div class="card metric-card metric-blue" id="presenceTile" hidden></div>
       <div class="card metric-card metric-neutral" id="checkpoint" hidden></div>
       <div class="card metric-card metric-neutral" id="wasteTile" hidden></div>
+      <div class="card metric-card metric-green" id="deliveryReviewTile" hidden></div>
     </section>
   </section>
 
@@ -396,6 +397,14 @@
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <section id="deliveryReviews" class="delivery-reviews" hidden>
+      <div class="delivery-review-head">
+        <div><h2>Delivery review</h2><p>What the delivered Git range proves, what was verified, and what still needs confirmation.</p></div>
+        <span class="note-chip local">Local evidence</span>
+      </div>
+      <div id="deliveryReviewBody"><div class="empty">Loading delivery evidence...</div></div>
+    </section>
+
     <!-- The claim, above the numbers that back it and the receipts that
          evidence those. This surface answers "was any of this worth it", and a
          reader arriving at two tables of decisions has to assemble the answer

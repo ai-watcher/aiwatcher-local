@@ -26,6 +26,7 @@ jobs:
           node --test tests/test-session-search.cjs
           node --test tests/test-watcher-status.cjs
           node --test tests/test-product-honesty.cjs
+          node --test tests/test-delivery-review.cjs
           node --test tests/test-mobile-layout.cjs
       - name: Validate VS Code adapter
         run: node --check vscode-extension/extension.js

@@ -634,6 +634,7 @@ class TrimmedHomeTest(unittest.TestCase):
             "aiAssistSetupTitle", "aiAssistSourceAccess", "aiAssistWorking",
             "companionBatchFinished", "companionBlockedSessions", "companionFinishedExpanded",
             "companionFreshStartContext",
+            "deliveryReviewCreateButton", "deliveryReviewObjective", "deliveryReviewProject",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",

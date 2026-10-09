@@ -166,6 +166,10 @@ never returns secret values and never calls a model.
 `/api/companion-preferences` returns local Companion notification preferences
 for Settings, including whether advisory Fresh Start context reviews appear in
 the Companion and whether completed runs stay quiet or expand the bar.
+`/api/delivery-reviews` returns recent privacy-safe delivery receipts. Changed
+paths are reconstructed only while the exact local Git range remains available;
+objective text is never rehydrated from AIWatcher state. A receipt is `ready`
+only when its remote event is confirmed, unread, and not superseded.
 
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
@@ -231,6 +235,12 @@ seen so it does not return (no body; the timestamp is the server's),
 `/api/update-auto-check` stores the Settings switch for automatic GitHub update
 checks (`{"enabled": bool}`, off by default),
 `/api/optimize-decision` records a workspace cleanup decision.
+`/api/delivery-review` creates an explicit local candidate for one checkout. It
+accepts `project_path`, optional `session_id`, and optional transient
+`objective`; the persisted receipt retains the objective hash but not its text.
+It never confirms a remote push or pull request. `/api/delivery-review-viewed`
+marks one confirmed receipt as reviewed by `receipt_id`. Both routes are
+same-origin only.
 `/api/improve-decision` records local feedback on a current Improve evidence key
 (`{"insight_key": "...", "days": 7, "decision": "reviewed" | "later" | "expected" | "helpful" | "not_helpful"}`).
 It is same-origin only, validates the key against current server evidence, and

@@ -22,6 +22,14 @@ _SHELL_PUNCTUATION = {"&", "&&", "|", "||", ";", "<", ">", "(", ")"}
 _CODEX_EXIT = re.compile(r"(?:Process exited with code\s+|Exit code:\s*)(-?\d+)", re.IGNORECASE)
 _CODEX_RUNNING = re.compile(r"Process running with session ID\s+(\d+)", re.IGNORECASE)
 _GIT_COMMIT_SHA = re.compile(r"^\[[^\]\r\n]+\s+([0-9a-f]{7,40})\]", re.MULTILINE)
+_GIT_PUSH_RANGE = re.compile(
+    r"(?P<base>[0-9a-f]{7,40})\.{2,3}(?P<head>[0-9a-f]{7,40})\s+(?P<source>\S+)\s+->\s+(?P<ref>\S+)",
+    re.MULTILINE,
+)
+_GIT_NEW_BRANCH = re.compile(
+    r"\[new branch\]\s+(?P<source>\S+)\s+->\s+(?P<ref>\S+)", re.IGNORECASE,
+)
+_GITHUB_PR_URL = re.compile(r"https://github\.com/[^\s/]+/[^\s/]+/pull/\d+(?:\b|/)", re.IGNORECASE)
 VERIFICATION_SCOPES = {"project_default", "named_check", "targeted", "unknown"}
 VERIFICATION_SCOPE_LABELS = {
     "project_default": "default project scope",
@@ -45,6 +53,13 @@ class CommandEvidence:
     exit_code: int | None
     verification_scope: str = "unknown"
     commit_sha: str | None = None
+    delivery_base_sha: str | None = None
+    delivery_head_sha: str | None = None
+    remote: str | None = None
+    remote_ref: str | None = None
+    delivery_source_ref: str | None = None
+    pull_request_url: str | None = None
+    delivery_ref_confirmed: bool = False
     truncated: bool = False
 
     @property
@@ -178,6 +193,85 @@ def _is_git_add(argv: list[str]) -> bool:
     )
 
 
+def _git_subcommand_index(argv: list[str], subcommand: str) -> int | None:
+    if not argv or Path(argv[0]).name.lower() not in {"git", "git.exe"}:
+        return None
+    index = 1
+    options_with_value = {"-c", "--git-dir", "--work-tree", "--namespace"}
+    while index < len(argv):
+        value = argv[index]
+        if value == subcommand:
+            return index
+        if value == "-C" or value.startswith("-C"):
+            return None
+        if value in options_with_value:
+            index += 2
+            continue
+        if value.startswith("--git-dir=") or value.startswith("--work-tree=") or value in {"--no-pager", "--bare"}:
+            index += 1
+            continue
+        if value.startswith("-"):
+            index += 1
+            continue
+        return None
+    return None
+
+
+def _is_git_push(argv: list[str]) -> bool:
+    return _git_subcommand_index(argv, "push") is not None
+
+
+def _is_gh_pr_create(argv: list[str]) -> bool:
+    if not argv or Path(argv[0]).name.lower() not in {"gh", "gh.exe"}:
+        return False
+    values = [value for value in argv[1:] if not value.startswith("-")]
+    return len(values) >= 2 and values[0:2] == ["pr", "create"]
+
+
+def _gh_pr_create_uses_current_checkout(argv: list[str]) -> bool:
+    """Reject provider commands that explicitly select another head or repo."""
+    if not _is_gh_pr_create(argv):
+        return False
+    unsafe = {"--head", "-H", "--repo", "-R"}
+    return not any(
+        value in unsafe or value.startswith("--head=") or value.startswith("--repo=")
+        or (value.startswith("-H") and value != "-H")
+        or (value.startswith("-R") and value != "-R")
+        for value in argv
+    )
+
+
+def _delivery_command_metadata(command: object, command_kind: str | None) -> dict[str, str | None]:
+    commands = _simple_commands(command)
+    if not commands or len(commands) != 1:
+        return {}
+    argv = commands[0][0]
+    if command_kind == "git_push":
+        index = _git_subcommand_index(argv, "push")
+        if index is None:
+            return {}
+        positional: list[str] = []
+        options_with_value = {
+            "--repo", "--receive-pack", "--exec", "-o", "--push-option",
+        }
+        skip = False
+        for value in argv[index + 1:]:
+            if skip:
+                skip = False
+                continue
+            if value in options_with_value:
+                skip = True
+                continue
+            if value.startswith("-"):
+                continue
+            positional.append(value)
+        remote = positional[0] if positional else None
+        refspec = positional[1] if len(positional) > 1 else None
+        remote_ref = refspec.rsplit(":", 1)[-1].removeprefix("refs/heads/") if refspec else None
+        return {"remote": remote, "remote_ref": remote_ref}
+    return {}
+
+
 def _command_classification(command: object) -> tuple[str | None, str | None, str]:
     commands = _simple_commands(command)
     if not commands:
@@ -192,6 +286,10 @@ def _command_classification(command: object) -> tuple[str | None, str | None, st
             matches.append(("verification", runner, scope))
         elif _is_git_commit(argv):
             matches.append(("git_commit", None, "unknown"))
+        elif _is_git_push(argv) and not parameterized_by_environment:
+            matches.append(("git_push", None, "unknown"))
+        elif _gh_pr_create_uses_current_checkout(argv) and not parameterized_by_environment:
+            matches.append(("gh_pr_create", None, "unknown"))
         else:
             unmatched.append(argv)
     if unmatched:
@@ -230,6 +328,32 @@ def _commit_sha(output: object) -> str | None:
     return match.group(1) if match else None
 
 
+def _push_facts(output: object) -> tuple[str | None, str | None, str | None, str | None, bool]:
+    if not isinstance(output, str):
+        return None, None, None, None, False
+    match = _GIT_PUSH_RANGE.search(output[:32_768])
+    if match:
+        return (
+            match.group("base"), match.group("head"),
+            match.group("ref").removeprefix("refs/heads/"),
+            match.group("source").removeprefix("refs/heads/"), True,
+        )
+    new_branch = _GIT_NEW_BRANCH.search(output[:32_768])
+    if new_branch:
+        return (
+            None, None, new_branch.group("ref").removeprefix("refs/heads/"),
+            new_branch.group("source").removeprefix("refs/heads/"), True,
+        )
+    return None, None, None, None, False
+
+
+def _pull_request_url(output: object) -> str | None:
+    if not isinstance(output, str):
+        return None
+    match = _GITHUB_PR_URL.search(output[:32_768])
+    return match.group(0).rstrip("/") if match else None
+
+
 def _evidence(
     pending: dict[str, Any],
     *,
@@ -239,6 +363,10 @@ def _evidence(
     output: object = None,
     truncated: bool = False,
 ) -> CommandEvidence:
+    delivery_base, delivery_head, output_ref, source_ref, ref_confirmed = (
+        _push_facts(output) if pending["command_kind"] == "git_push" and exit_code == 0
+        else (None, None, None, None, False)
+    )
     return CommandEvidence(
         source_id=_source_id(pending["tool"], pending["session_id"], pending["call_id"]),
         session_id=pending["session_id"],
@@ -252,6 +380,16 @@ def _evidence(
         exit_code=exit_code,
         verification_scope=str(pending.get("verification_scope") or "unknown"),
         commit_sha=_commit_sha(output) if pending["command_kind"] == "git_commit" and exit_code == 0 else None,
+        delivery_base_sha=delivery_base,
+        delivery_head_sha=delivery_head,
+        remote=pending.get("remote"),
+        remote_ref=output_ref or pending.get("remote_ref"),
+        delivery_source_ref=source_ref,
+        pull_request_url=(
+            _pull_request_url(output)
+            if pending["command_kind"] == "gh_pr_create" and exit_code == 0 else None
+        ),
+        delivery_ref_confirmed=ref_confirmed,
         truncated=truncated,
     )
 
@@ -291,6 +429,7 @@ def _claude_evidence(path: str, fallback_session_id: str) -> list[CommandEvidenc
                     continue
                 inputs = item.get("input") if isinstance(item.get("input"), dict) else {}
                 command_kind, runner, verification_scope = _command_classification(inputs.get("command"))
+                delivery_meta = _delivery_command_metadata(inputs.get("command"), command_kind)
                 call_id = str(item.get("id") or "")
                 if not call_id or not command_kind:
                     continue
@@ -303,6 +442,7 @@ def _claude_evidence(path: str, fallback_session_id: str) -> list[CommandEvidenc
                     "verification_scope": verification_scope,
                     "command_kind": command_kind,
                     "started_at": _stamp(row.get("timestamp")),
+                    **delivery_meta,
                 }
             continue
         if row.get("type") != "user":
@@ -333,7 +473,13 @@ def _claude_evidence(path: str, fallback_session_id: str) -> list[CommandEvidenc
                 state, exit_code = "completed", 1
             else:
                 state, exit_code = "result_unknown", None
-            output = outer_result.get("stdout") if isinstance(outer_result, dict) else item.get("content")
+            if isinstance(outer_result, dict):
+                output = "\n".join(
+                    str(value) for value in (outer_result.get("stdout"), outer_result.get("stderr"))
+                    if isinstance(value, str) and value
+                )
+            else:
+                output = item.get("content")
             results.append(_evidence(
                 call,
                 finished_at=_stamp(row.get("timestamp")),
@@ -393,6 +539,7 @@ def _codex_evidence(path: str, fallback_session_id: str) -> list[CommandEvidence
             if not isinstance(arguments, dict):
                 continue
             command_kind, runner, verification_scope = _command_classification(arguments.get("cmd") or arguments.get("command"))
+            delivery_meta = _delivery_command_metadata(arguments.get("cmd") or arguments.get("command"), command_kind)
             call_id = str(payload.get("call_id") or "")
             if not call_id or not command_kind:
                 continue
@@ -405,6 +552,7 @@ def _codex_evidence(path: str, fallback_session_id: str) -> list[CommandEvidence
                 "verification_scope": verification_scope,
                 "command_kind": command_kind,
                 "started_at": _stamp(row.get("timestamp")),
+                **delivery_meta,
             }
         elif payload_type == "function_call" and payload.get("name") == "write_stdin":
             try:
