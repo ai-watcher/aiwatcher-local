@@ -1132,7 +1132,8 @@ class LocalStateTests(unittest.TestCase):
                     notify=True,
                     overlay=True,
                 )
-                after = local_state.get_watcher_status()
+                with patch.object(local_state, "pid_is_running", return_value=True):
+                    after = local_state.get_watcher_status()
 
         self.assertFalse(before["running"])
         self.assertEqual(before["status"], "stopped")
@@ -1141,6 +1142,73 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(after["mode"], "watch")
         self.assertTrue(after["notify"])
         self.assertTrue(after["overlay"])
+
+    def test_watcher_freshness_respects_recorded_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_watcher_heartbeat(
+                    pid=12345, mode="companion", interval_seconds=300,
+                    notify=False, overlay=True,
+                )
+                payload = json.loads(Path(state_file).read_text(encoding="utf-8"))
+                payload["watcher_heartbeat"]["updated_at"] = (
+                    datetime.now(timezone.utc) - timedelta(seconds=150)
+                ).isoformat()
+                Path(state_file).write_text(json.dumps(payload), encoding="utf-8")
+                with patch.object(local_state, "pid_is_running", return_value=True):
+                    status = local_state.get_watcher_status()
+
+        self.assertTrue(status["running"])
+        self.assertEqual(status["freshness_seconds"], 600)
+
+    def test_watcher_freshness_is_capped_at_fifteen_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_watcher_heartbeat(
+                    pid=12345, mode="companion", interval_seconds=3600,
+                    notify=False, overlay=True,
+                )
+                payload = json.loads(Path(state_file).read_text(encoding="utf-8"))
+                payload["watcher_heartbeat"]["updated_at"] = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1000)
+                ).isoformat()
+                Path(state_file).write_text(json.dumps(payload), encoding="utf-8")
+                with patch.object(local_state, "pid_is_running", return_value=True):
+                    status = local_state.get_watcher_status(max_age_seconds=7200)
+
+        self.assertFalse(status["running"])
+        self.assertEqual(status["status"], "stale")
+        self.assertEqual(status["freshness_seconds"], 900)
+
+    def test_watcher_status_treats_unrepresentable_pid_as_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_watcher_heartbeat(
+                    pid=10**100, mode="companion", interval_seconds=30,
+                    notify=False, overlay=True,
+                )
+                status = local_state.get_watcher_status()
+
+        self.assertFalse(status["running"])
+        self.assertEqual(status["status"], "stopped")
+
+    def test_recent_heartbeat_for_dead_pid_is_not_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_watcher_heartbeat(
+                    pid=987654, mode="watch", interval_seconds=60,
+                    notify=False, overlay=False,
+                )
+                with patch.object(local_state, "pid_is_running", return_value=False):
+                    status = local_state.get_watcher_status()
+
+        self.assertFalse(status["running"])
+        self.assertEqual(status["status"], "stopped")
+        self.assertEqual(status["label"], "Watcher stopped")
 
     def test_get_watcher_status_fails_soft_when_state_lock_is_unavailable(self) -> None:
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
