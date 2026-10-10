@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .git_identity import identity_for_session
+from .git_identity import GitIdentity, identities_for_sessions, identity_for_session
 from .local_state import recent_hook_events
 from .pricing import (
     CACHE_READ_MULTIPLIER,
@@ -93,6 +93,7 @@ CODEX_ROLLOUT_REQUEST_MAX_BYTES = 64 * 1024 * 1024
 CODEX_ROLLOUT_REQUEST_MAX_FILES = 2048
 CODEX_ROLLOUT_REQUEST_MAX_RECORDS = 100_000
 CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES = 4 * 1024 * 1024
+CURRENT_PROMPT_TAIL_BYTES = 16 * 1024 * 1024
 CODEX_LIFECYCLE_CACHE_MAX_ENTRIES = 4096
 _CODEX_LIFECYCLE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
 
@@ -265,21 +266,24 @@ class LocalSession:
             return 0
         return max(0, int((self.updated_at - self.started_at).total_seconds()))
 
-    def to_json(self) -> dict[str, Any]:
-        if not self.checkout_id:
-            identity = identity_for_session(self.project_path, self.raw_cwd)
-            if identity is not None:
-                self.identity_source = identity.identity_source
-                if identity.identity_source == "identity_conflict":
-                    self.repository_id = None
-                    self.repository_lineage_id = None
-                    self.checkout_id = None
-                    self.checkout_path = None
-                else:
-                    self.repository_id = identity.repository_id
-                    self.repository_lineage_id = identity.repository_lineage_id
-                    self.checkout_id = identity.checkout_id
-                    self.checkout_path = identity.checkout_path
+    def apply_git_identity(self, identity: GitIdentity | None) -> None:
+        if identity is None:
+            return
+        self.identity_source = identity.identity_source
+        if identity.identity_source == "identity_conflict":
+            self.repository_id = None
+            self.repository_lineage_id = None
+            self.checkout_id = None
+            self.checkout_path = None
+        else:
+            self.repository_id = identity.repository_id
+            self.repository_lineage_id = identity.repository_lineage_id
+            self.checkout_id = identity.checkout_id
+            self.checkout_path = identity.checkout_path
+
+    def to_json(self, *, resolve_identity: bool = True) -> dict[str, Any]:
+        if resolve_identity and not self.checkout_id:
+            self.apply_git_identity(identity_for_session(self.project_path, self.raw_cwd))
         return {
             "session_id": self.session_id,
             "tool": self.tool,
@@ -307,6 +311,13 @@ class LocalSession:
             "model_breakdown": self.model_breakdown,
             "title": self.title,
         }
+
+
+def populate_session_identities(rows: list[LocalSession]) -> None:
+    unresolved = [row for row in rows if not row.checkout_id]
+    resolved = identities_for_sessions((row.project_path, row.raw_cwd) for row in unresolved)
+    for row in unresolved:
+        row.apply_git_identity(resolved.get((row.project_path, row.raw_cwd)))
 
 
 @dataclass
@@ -460,7 +471,33 @@ INJECTED_ROW_PREFIXES = ("<command", "<local-command", "<system-reminder>", "<ta
 _LEADING_HTML_COMMENTS = re.compile(r"^(?:\s*<!--.*?-->)+", re.S)
 
 
-def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000) -> list[dict[str, object]]:
+def _recent_transcript_lines(source_path: str, tail_bytes: int) -> Iterable[str]:
+    """Read complete JSONL rows from a bounded recent tail.
+
+    The Companion calls this whenever a live transcript grows. A long-running
+    Codex chat can be hundreds of megabytes, so replaying the whole file on
+    every poll turns a glanceable status update into a sustained CPU job.
+    """
+    path = Path(source_path)
+    try:
+        size = path.stat().st_size
+        start = max(0, size - max(1, tail_bytes))
+        with path.open("rb") as handle:
+            handle.seek(start)
+            if start > 0 and not _seek_after_partial_line(handle, start):
+                return
+            for _, raw in _bounded_binary_lines(handle, CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES):
+                yield raw.decode("utf-8", errors="replace")
+    except OSError:
+        return
+
+
+def segment_session_by_prompt(
+    source_path: str | None,
+    *,
+    max_chars: int = 2000,
+    tail_bytes: int | None = None,
+) -> list[dict[str, object]]:
     """Split a Claude Code session into prompt-bounded turns.
 
     Each real user prompt opens a turn; all following assistant/tool work (until the
@@ -494,7 +531,7 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
     if not source_path or not source_path.endswith(".jsonl"):
         return []
     if _is_codex_rollout(source_path):
-        return _segment_codex_rollout(source_path, max_chars=max_chars)
+        return _segment_codex_rollout(source_path, max_chars=max_chars, tail_bytes=tail_bytes)
     segments: list[dict[str, object]] = []
     current: dict[str, object] | None = None
     seen_rows: set[str] = set()
@@ -506,8 +543,14 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
     # break long enough to explain a re-cache depends on it.
     writes_1h = False
     try:
-        with Path(source_path).open(errors="replace") as handle:
-            for index, line in enumerate(handle):
+        if tail_bytes is None:
+            handle = Path(source_path).open(errors="replace")
+            lines: Iterable[str] = handle
+        else:
+            handle = None
+            lines = _recent_transcript_lines(source_path, tail_bytes)
+        try:
+            for index, line in enumerate(lines):
                 if not line.strip():
                     continue
                 try:
@@ -591,6 +634,9 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     writes_1h = True
                 if stamp:
                     last_request_at = stamp
+        finally:
+            if handle is not None:
+                handle.close()
     except OSError:
         return []
     return segments
@@ -661,7 +707,12 @@ def _is_codex_rollout(path: str) -> bool:
     return False
 
 
-def _segment_codex_rollout(path: str, *, max_chars: int = 2000) -> list[dict[str, object]]:
+def _segment_codex_rollout(
+    path: str,
+    *,
+    max_chars: int = 2000,
+    tail_bytes: int | None = None,
+) -> list[dict[str, object]]:
     """`segment_session_by_prompt` for a Codex rollout: the same keys, so the
     session review and the Companion treat both tools alike.
 
@@ -682,8 +733,14 @@ def _segment_codex_rollout(path: str, *, max_chars: int = 2000) -> list[dict[str
     """
     rows: list[tuple[datetime | None, str, dict[str, Any], str | None]] = []
     try:
-        with Path(path).open(errors="replace") as handle:
-            for line in handle:
+        if tail_bytes is None:
+            handle = Path(path).open(errors="replace")
+            lines: Iterable[str] = handle
+        else:
+            handle = None
+            lines = _recent_transcript_lines(path, tail_bytes)
+        try:
+            for line in lines:
                 if not line.strip():
                     continue
                 try:
@@ -695,6 +752,9 @@ def _segment_codex_rollout(path: str, *, max_chars: int = 2000) -> list[dict[str
                 row_type = str(obj.get("type") or "")
                 payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
                 rows.append((_parse_ts(obj.get("timestamp")), row_type, payload, _codex_user_prompt_text(row_type, payload)))
+        finally:
+            if handle is not None:
+                handle.close()
     except OSError:
         return []
     typed_rows = any(text and row_type != "response_item" for _, row_type, _, text in rows)

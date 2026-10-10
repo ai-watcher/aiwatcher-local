@@ -51,6 +51,22 @@ class PromptStatusBlockTests(unittest.TestCase):
         with patch.object(ui, "_current_prompt_cached", side_effect=lambda path, **_: prompts.get(path, (None, None))):
             return ui._prompt_status_block(rows, sessions)
 
+    def test_current_prompt_reader_uses_bounded_recent_tail(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".jsonl") as transcript:
+            with patch.object(
+                ui,
+                "segment_session_by_prompt",
+                return_value=[segment()],
+            ) as parse:
+                ui._PROMPT_STATUS_CACHE.clear()
+                current, _title = ui._current_prompt_cached(transcript.name, read_title=False)
+
+        self.assertIsNotNone(current)
+        parse.assert_called_once_with(
+            transcript.name,
+            tail_bytes=ui.CURRENT_PROMPT_TAIL_BYTES,
+        )
+
     def test_a_working_prompt_shows_what_it_is_costing_so_far(self) -> None:
         block = self.block([presence("s1", "working")], [session("s1")],
                            {"/tmp/s1.jsonl": (segment(), "Headroom display bug")})

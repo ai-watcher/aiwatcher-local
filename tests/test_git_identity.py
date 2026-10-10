@@ -14,6 +14,7 @@ from aiwatcher_cli.git_identity import (
     _BIRTH_CACHE,
     _filesystem_identity,
     _persistent_generation_marker,
+    identities_for_sessions,
     identity_for_session,
     resolve_git_identity,
 )
@@ -42,6 +43,15 @@ def init_repo(path: str) -> None:
 
 
 class GitIdentityTests(unittest.TestCase):
+    def test_bulk_session_identity_resolves_each_path_once(self) -> None:
+        pairs = [("/repo", "/repo"), ("/repo", "/repo"), (None, "/repo")]
+
+        with patch("aiwatcher_cli.git_identity.resolve_git_identity", return_value=None) as resolve:
+            identities = identities_for_sessions(pairs)
+
+        self.assertEqual(set(identities), {("/repo", "/repo"), (None, "/repo")})
+        resolve.assert_called_once_with("/repo")
+
     def test_identity_without_birth_time_survives_ctime_changes(self) -> None:
         before = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
         after = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=99)

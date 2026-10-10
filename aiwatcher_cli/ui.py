@@ -145,6 +145,7 @@ from .session_health import (
     gate_health_warning,
 )
 from .scanner import (
+    CURRENT_PROMPT_TAIL_BYTES,
     clip_sessions_to_window,
     LocalEvent,
     LocalSession,
@@ -152,6 +153,7 @@ from .scanner import (
     display_model_name,
     extract_opening_prompt,
     model_usage_totals,
+    populate_session_identities,
     scan_all,
     scan_all_events,
     current_prompt_segment,
@@ -427,6 +429,8 @@ def _project_path_group_key(path: str | None) -> str:
 def _session_project_group_key(row: LocalSession) -> str:
     if row.identity_source == "identity_conflict":
         return f"conflict:{row.tool}:{row.session_id}"
+    if row.repository_id:
+        return f"repository:{row.repository_id}"
     identity = identity_for_session(row.project_path, row.raw_cwd)
     if identity is not None and identity.identity_source == "identity_conflict":
         return f"conflict:{row.tool}:{row.session_id}"
@@ -683,7 +687,8 @@ def _cached_events_for_session(session_id: str) -> list[LocalEvent] | None:
 
 
 def _session_index_payload(rows: list[LocalSession]) -> list[dict[str, object]]:
-    return [row.to_json() for row in rows]
+    populate_session_identities(rows)
+    return [row.to_json(resolve_identity=False) for row in rows]
 
 
 def _index_sessions_from_summary(summary: dict[str, object]) -> None:
@@ -6038,13 +6043,15 @@ def build_summary(
     *,
     all_rows: list[LocalSession] | None = None,
     all_events: list[LocalEvent] | None = None,
+    session_index_payload: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if all_rows is None:
         all_rows = scan_all(since=now - timedelta(days=max(32, days + 2)))
-    _write_session_snapshot(all_rows)
+    if session_index_payload is None:
+        session_index_payload = _write_session_snapshot(all_rows)
     _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
@@ -6251,7 +6258,7 @@ def build_summary(
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
         "summary_complete": True,
-        "_session_index": _session_index_payload(all_rows),
+        "_session_index": session_index_payload,
         # all_rows, not the window-clipped rows: whether something is
         # running right now does not change because you switched the
         # dropdown to 24 hours. Analyst spawns are still in here and stay
@@ -6389,11 +6396,12 @@ def _read_session_snapshot() -> list[LocalSession]:
     return [row for item in items if (row := _session_from_json(item)) is not None]
 
 
-def _write_session_snapshot(rows: list[LocalSession]) -> None:
+def _write_session_snapshot(rows: list[LocalSession]) -> list[dict[str, object]]:
+    session_index_payload = _session_index_payload(rows)
     payload = {
         "schema_version": SESSION_SNAPSHOT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "sessions": _session_index_payload(rows),
+        "sessions": session_index_payload,
     }
     try:
         path = _session_snapshot_path()
@@ -6403,6 +6411,7 @@ def _write_session_snapshot(rows: list[LocalSession]) -> None:
         os.replace(tmp_path, path)
     except OSError:
         pass
+    return session_index_payload
 
 
 def _cached_session_rows() -> list[LocalSession]:
@@ -6716,7 +6725,7 @@ def _run_shared_summary_refresh(requested_days: int) -> None:
         # Publish session identity as soon as the comparatively slow transcript
         # scan finishes. Filters and detail headers do not need to wait for git,
         # outcome, or event enrichment.
-        _write_session_snapshot(all_rows)
+        session_index_payload = _write_session_snapshot(all_rows)
         _index_sessions(all_rows)
         try:
             all_events = scan_all_events(since=now - timedelta(days=scan_days))
@@ -6724,7 +6733,12 @@ def _run_shared_summary_refresh(requested_days: int) -> None:
             all_events = []
         _index_events(all_events, complete=True)
         for days in _summary_refresh_windows(requested_days):
-            summary = build_summary(days, all_rows=all_rows, all_events=all_events)
+            summary = build_summary(
+                days,
+                all_rows=all_rows,
+                all_events=all_events,
+                session_index_payload=session_index_payload,
+            )
             _store_summary_cache(days, summary, mark_refreshed=True)
         _SUMMARY_REFRESH_ERROR = None
     except Exception as exc:  # fail soft: cached local data remains usable
@@ -7953,7 +7967,10 @@ def _current_prompt_cached(path: str, *, read_title: bool = True) -> tuple[dict[
     cached = _PROMPT_STATUS_CACHE.get(path)
     if cached is not None and cached[0] == info.st_size and cached[1] == info.st_mtime:
         return cached[2], cached[3]
-    segment = current_prompt_segment(segment_session_by_prompt(path))
+    segment = current_prompt_segment(segment_session_by_prompt(
+        path,
+        tail_bytes=CURRENT_PROMPT_TAIL_BYTES,
+    ))
     # Titles come from Claude Code's transcript rows; a Codex rollout has none.
     title = statusline.read_transcript(path).get("title") if segment is not None and read_title else None
     if len(_PROMPT_STATUS_CACHE) > 32:

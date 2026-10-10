@@ -22,6 +22,8 @@ _SHELL_PUNCTUATION = {"&", "&&", "|", "||", ";", "<", ">", "(", ")"}
 _CODEX_EXIT = re.compile(r"(?:Process exited with code\s+|Exit code:\s*)(-?\d+)", re.IGNORECASE)
 _CODEX_RUNNING = re.compile(r"Process running with session ID\s+(\d+)", re.IGNORECASE)
 _GIT_COMMIT_SHA = re.compile(r"^\[[^\]\r\n]+\s+([0-9a-f]{7,40})\]", re.MULTILINE)
+COMMAND_EVIDENCE_TAIL_BYTES = 16 * 1024 * 1024
+COMMAND_EVIDENCE_MAX_LINE_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -197,20 +199,45 @@ def _evidence(
     )
 
 
-def _json_lines(path: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _json_lines(path: str):
+    """Yield recent structured rows without replaying an unbounded history.
+
+    Outcome summaries ask for command evidence once per recent session. Some
+    long-running Codex rollouts exceed 200 MB, and reading each one twice (for
+    evidence and coverage) dominated dashboard startup. Verification and
+    commit receipts are recent signals, so a bounded tail is the appropriate
+    scope for this ambient summary path.
+    """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
+        size = os.path.getsize(path)
+        start = max(0, size - COMMAND_EVIDENCE_TAIL_BYTES)
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            if start > 0:
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        return
+                    newline = chunk.find(b"\n")
+                    if newline >= 0:
+                        handle.seek(handle.tell() - len(chunk) + newline + 1)
+                        break
+            while True:
+                raw = handle.readline(COMMAND_EVIDENCE_MAX_LINE_BYTES + 1)
+                if not raw:
+                    return
+                if len(raw) > COMMAND_EVIDENCE_MAX_LINE_BYTES:
+                    while raw and not raw.endswith(b"\n"):
+                        raw = handle.readline(COMMAND_EVIDENCE_MAX_LINE_BYTES + 1)
+                    continue
                 try:
-                    row = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
+                    row = json.loads(raw)
+                except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
                     continue
                 if isinstance(row, dict):
-                    rows.append(row)
+                    yield row
     except OSError:
-        return []
-    return rows
+        return
 
 
 def _claude_evidence(path: str, fallback_session_id: str) -> list[CommandEvidence]:

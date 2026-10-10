@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiwatcher_cli.command_evidence import (
+    _json_lines,
     command_evidence_coverage,
     command_evidence_for_session,
     environment_session_identity,
@@ -21,6 +22,52 @@ def write_rows(path: Path, rows: list[dict]) -> None:
 
 
 class CommandEvidenceTests(unittest.TestCase):
+    def test_json_lines_reads_small_transcript_completely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir, "small.jsonl")
+            rows = [{"id": "first"}, {"id": "second"}]
+            write_rows(path, rows)
+
+            self.assertEqual(list(_json_lines(str(path))), rows)
+
+    def test_json_lines_limits_parsing_to_recent_complete_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir, "bounded.jsonl")
+            write_rows(path, [
+                {"id": "old", "padding": "x" * 80},
+                {"id": "recent", "padding": "y" * 20},
+            ])
+
+            with patch("aiwatcher_cli.command_evidence.COMMAND_EVIDENCE_TAIL_BYTES", 64):
+                rows = list(_json_lines(str(path)))
+
+        self.assertEqual(rows, [{"id": "recent", "padding": "y" * 20}])
+
+    def test_json_lines_skips_oversized_row_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir, "oversized.jsonl")
+            path.write_text(
+                json.dumps({"id": "large", "padding": "x" * 200})
+                + "\n"
+                + json.dumps({"id": "valid"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("aiwatcher_cli.command_evidence.COMMAND_EVIDENCE_MAX_LINE_BYTES", 64):
+                rows = list(_json_lines(str(path)))
+
+        self.assertEqual(rows, [{"id": "valid"}])
+
+    def test_json_lines_skips_invalid_utf8_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir, "invalid-utf8.jsonl")
+            path.write_bytes(b'{"id":"bad-\xff"}\n{"id":"valid"}\n')
+
+            rows = list(_json_lines(str(path)))
+
+        self.assertEqual(rows, [{"id": "valid"}])
+
     def test_runner_labels_are_fixed_and_argument_free(self) -> None:
         self.assertEqual(verification_runner(["python3", "-m", "pytest", "secret-test-name"]), "python -m pytest")
         self.assertEqual(verification_runner(["npm", "run", "check", "--", "private"]), "npm run check")
