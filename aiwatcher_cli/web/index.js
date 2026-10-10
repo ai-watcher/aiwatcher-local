@@ -5641,6 +5641,9 @@ function changeWindow() {
   agentHierarchyLoadedForDays = null;
   reportLoadedForDays = null;
   const sessionsView = document.getElementById('view-sessions');
+  if (sessionsView && !sessionsView.hidden && sessionsViewMode === 'list') {
+    loadSessions();
+  }
   if (sessionsView && !sessionsView.hidden && sessionsViewMode === 'agents') {
     agentHierarchyCache = { sessions: [] };
     agentHierarchyError = '';
@@ -5660,11 +5663,38 @@ function changeWindow() {
   load();
 }
 let sessionSearchTimer = null;
-function debounceSessionSearch() {
+let sessionSearchController = null;
+let sessionSearchToken = 0;
+const SESSION_SEARCH_TIMEOUT_MS = 15000;
+
+function cancelSessionSearch() {
   clearTimeout(sessionSearchTimer);
-  sessionSearchTimer = setTimeout(loadSessions, 250);
+  sessionSearchTimer = null;
+  sessionSearchToken += 1;
+  if (sessionSearchController) sessionSearchController.abort();
+  sessionSearchController = null;
+}
+
+function renderSessionSearchState(message, retry = false) {
+  const rows = document.getElementById('sessionRows');
+  const note = document.getElementById('sessionResultsNote');
+  sessionRowsCache = [];
+  if (note) note.textContent = message;
+  if (!rows) return;
+  rows.setAttribute('aria-busy', retry ? 'false' : 'true');
+  rows.innerHTML = `<tr><td colspan="5"><div class="empty">${esc(message)}${retry
+    ? ' <button type="button" class="row-action" onclick="loadSessions()">Retry</button> <button type="button" class="row-action" onclick="clearSessionFilters()">Clear filters</button>'
+    : ''}</div></td></tr>`;
+}
+
+function debounceSessionSearch() {
+  cancelSessionSearch();
+  const token = sessionSearchToken;
+  renderSessionSearchState('Searching local sessions...');
+  sessionSearchTimer = setTimeout(() => loadSessions(token), 250);
 }
 function clearSessionFilters() {
+  cancelSessionSearch();
   document.getElementById('sessionSearch').value = '';
   document.getElementById('sessionOutcomeFilter').value = '';
   document.getElementById('sessionStateFilter').value = '';
@@ -6020,8 +6050,12 @@ function renderSessionRows(rows, filtered) {
         ? 'No sessions match those filters. Try clearing the search or choosing a different session state.'
         : 'No local sessions found for this window.'}</div></td></tr>`;
 }
-let sessionSearchToken = 0;
-async function loadSessions() {
+async function loadSessions(expectedToken = null) {
+  clearTimeout(sessionSearchTimer);
+  sessionSearchTimer = null;
+  if (expectedToken !== null && expectedToken !== sessionSearchToken) return;
+  if (expectedToken === null) cancelSessionSearch();
+  const token = sessionSearchToken;
   const days = document.getElementById('days').value;
   const search = document.getElementById('sessionSearch').value.trim();
   const outcome = document.getElementById('sessionOutcomeFilter').value;
@@ -6030,22 +6064,42 @@ async function loadSessions() {
   if (search) params.set('search', search);
   if (outcome) params.set('outcome', outcome);
   if (state) params.set('state', state);
-  // A search that doesn't field-match every session in the window falls back
-  // to an uncached per-session git evidence lookup (filter_sessions()'s rough
-  // topic match) -- that can take several seconds, so show a visible pending
-  // state, and drop this response if a newer search has since been fired.
-  const token = ++sessionSearchToken;
-  document.getElementById('sessionResultsNote').textContent = 'Searching local sessions...';
-  const res = await fetch(`/api/sessions?${params.toString()}`);
-  const data = await res.json();
-  if (token !== sessionSearchToken) return;
-  const filtered = Boolean(search || outcome || state);
-  document.getElementById('sessionResultsNote').textContent = filtered
-    ? `${data.total_matched} matching session${data.total_matched === 1 ? '' : 's'} of ${data.total_scanned} in this window.`
-    : `${data.total_scanned} session${data.total_scanned === 1 ? '' : 's'} in this window.`;
-  sessionRowsCache = data.sessions || [];
-  renderSessionRows(sessionRowsCache, filtered);
-  sessionsLoadedForDays = days;
+  // Topic fallback can inspect per-session git evidence and take seconds. The
+  // previous rows stop being authoritative as soon as the query changes.
+  renderSessionSearchState('Searching local sessions...');
+  const controller = new AbortController();
+  sessionSearchController = controller;
+  let timedOut = false;
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, SESSION_SEARCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(`/api/sessions?${params.toString()}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    const data = await res.json();
+    if (token !== sessionSearchToken) return;
+    const filtered = Boolean(search || outcome || state);
+    document.getElementById('sessionResultsNote').textContent = filtered
+      ? `${data.total_matched} matching session${data.total_matched === 1 ? '' : 's'} of ${data.total_scanned} in this window.`
+      : `${data.total_scanned} session${data.total_scanned === 1 ? '' : 's'} in this window.`;
+    sessionRowsCache = data.sessions || [];
+    renderSessionRows(sessionRowsCache, filtered);
+    sessionsLoadedForDays = days;
+  } catch (error) {
+    if (token !== sessionSearchToken) return;
+    if (error && error.name === 'AbortError' && !timedOut) return;
+    renderSessionSearchState(timedOut
+      ? 'Session search took too long. Retry or clear the filters.'
+      : 'Session search could not be completed. Retry or clear the filters.', true);
+  } finally {
+    window.clearTimeout(timeoutId);
+    if (token === sessionSearchToken) {
+      sessionSearchController = null;
+      const rows = document.getElementById('sessionRows');
+      if (rows) rows.setAttribute('aria-busy', 'false');
+    }
+  }
 }
 async function loadReport() {
   const days = document.getElementById('days').value;
