@@ -61,7 +61,7 @@ function renderSaved(message) {
     <div class="body"><div class="actions"><button class="primary" onclick="window.close()">Close</button><a href="/">Open dashboard</a></div></div>`;
 }
 async function copyHandoff(bubble, decision) {
-  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(bubble.session_id)}&target=generic`);
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(bubble.session_id)}&target=generic`);
   const capsule = await res.json();
   if (capsule.error) {
     renderSaved(capsule.error);

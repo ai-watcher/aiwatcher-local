@@ -1947,9 +1947,12 @@ function renderHandoff(capsule) {
   const aiReady = aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
   const sourceAccess = ((aiAssist.config || {}).source_access || aiResult.source_access || 'metadata_only');
   const contextQuality = capsule.context_quality || {};
+  const awaitingEvidence = !!capsule.basic && capsule.enrichment_status === 'loading';
   setDrawerSubtitle(assisted ? `AI-assisted handoff · ${sourceAccess}` : aiReady ? `AI Assist available · ${sourceAccess}` : 'Local metadata only');
-  const enrichment = capsule.basic
-    ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
+  const enrichment = awaitingEvidence
+    ? '<div class="loading">Preview ready. Loading checkout, commit, and verification evidence before copy...</div>'
+    : capsule.basic
+      ? '<div class="verdict-card warning"><strong>Detailed evidence unavailable</strong><p>This metadata-only fallback is labeled provisional. Verify the repository state before using it.</p></div>'
     : '';
   const primaryLabel = canOpenRuntime ? 'Copy brief + open workspace' : 'Copy brief';
   const primaryHelp = canOpenRuntime
@@ -1963,16 +1966,20 @@ function renderHandoff(capsule) {
     : aiConfig.require_confirmation === false
       ? 'It runs when you click.'
       : 'It runs only after your confirmation.';
-  const actionHelp = aiReady
+  const actionHelp = awaitingEvidence
+    ? 'Checkout, commit, and verification evidence is still loading; copy actions are paused.'
+    : aiReady
     ? `AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. ${aiRunNote}`
     : primaryHelp;
-  const primaryAction = aiReady
+  const primaryAction = awaitingEvidence
+    ? '<button class="btn-primary" disabled>Loading evidence...</button>'
+    : aiReady
     ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
     : `<button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1')">${esc(primaryLabel)}</button>`;
   // With a runtime attached the primary also focuses or launches it. That is
   // the wrong move when the user is leaving that tool for another one, so the
   // "Copy brief" button under the textarea below only ever copies.
-  const secondaryCopy = aiReady
+  const secondaryCopy = aiReady && !awaitingEvidence
     ? `<button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)">Copy local fallback</button>`
     : '';
   return `<section class="detail-section">
@@ -1993,15 +2000,15 @@ function renderHandoff(capsule) {
       <div class="brief-focus-head">
         <div>
           <h3>${assisted ? 'AI-assisted prompt to paste' : 'Prompt to paste'}</h3>
-          <p>${assisted ? (aiResult.status === 'cached' ? 'This handoff was reused from the AI Assist cache for the same evidence. Review once, copy, then paste into the fresh session.' : 'This is the composed handoff. Review once, copy, then paste into the fresh session.') : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
+          <p>${awaitingEvidence ? 'This provisional preview is not copyable until detailed evidence finishes loading.' : assisted ? (aiResult.status === 'cached' ? 'This handoff was reused from the AI Assist cache for the same evidence. Review once, copy, then paste into the fresh session.' : 'This is the composed handoff. Review once, copy, then paste into the fresh session.') : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
         </div>
         <div class="pill-row">
           <span class="confidence-chip ${contextQuality.level === 'strong' ? 'observed' : 'inferred'}">${esc(contextQuality.label || 'Objective needs verification')}</span>
           <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
         </div>
       </div>
-      <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)">Copy brief</button></div>
+      <textarea id="handoffBrief" class="brief-box" ${awaitingEvidence ? 'disabled' : ''}>${esc(capsule.next_brief || '')}</textarea>
+      <div class="copy-row"><button class="btn-primary" ${awaitingEvidence ? 'disabled' : `onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)"`}>${awaitingEvidence ? 'Loading evidence...' : 'Copy brief'}</button></div>
     </div>
     <!-- The brief is the focal object. Optional shaping fields stay below it
          so a first-time reader sees the paste-ready handoff before the knobs. -->
@@ -2189,7 +2196,9 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
     if (!isCurrent()) return null;
     stage = 3;
     if (basic && !basic.error && !includePrompt) {
-      showToast('Detailed evidence is unavailable. The basic local brief is still ready to copy.', 'error');
+      basic.enrichment_status = 'unavailable';
+      setDrawerContent(renderHandoff(basic));
+      showToast('Detailed evidence is unavailable. A labeled metadata-only fallback is ready.', 'error');
       return basic;
     }
     setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);

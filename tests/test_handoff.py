@@ -63,6 +63,8 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("stale; Git state changed during verification", brief)
         self.assertIn("targeted or parameterized scope; target details not stored", brief)
         self.assertIn("No session-bound completed verification was observed", brief)
+        self.assertIn("Verification is missing, stale, historical, or not authoritative", brief)
+        self.assertIn("Run the narrowest relevant verification against the current Git state", brief)
 
     def test_authoritative_targeted_verification_warns_about_limited_scope(self) -> None:
         session = LocalSession(
@@ -82,6 +84,31 @@ class HandoffTests(unittest.TestCase):
 
         self.assertNotIn("No session-bound completed verification was observed", brief)
         self.assertIn("do not infer project-wide coverage", brief)
+
+    def test_current_failed_verification_controls_remaining_work_and_first_action(self) -> None:
+        session = LocalSession(
+            session_id="failed", tool="codex-cli", project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = OutcomeEvidence(
+            session_id="failed", project_path="/repo", repo_root="/repo",
+            checkout_path="/repo", files_touched=["src/auth.py"],
+            commit_attribution="session_bound", tests=[{
+                "name": "unit-tests", "status": "failed", "completion_state": "completed",
+                "attribution": "session_bound", "current": True, "authoritative": True,
+                "state_binding": "git_state", "verification_scope": "named_check",
+            }],
+        )
+        with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
+            brief = build_handoff_capsule(session, []) ["next_brief"]
+
+        self.assertIn("Committed file: src/auth.py", brief)
+        self.assertIn("Current verification failed: unit-tests.", brief)
+        self.assertIn("Reproduce and resolve the current failed verification", brief)
+        self.assertLess(
+            brief.index("Reproduce and resolve the current failed verification"),
+            brief.index("git status --short"),
+        )
 
     def test_historical_verification_explains_missing_start_state(self) -> None:
         session = LocalSession(

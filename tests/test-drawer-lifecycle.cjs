@@ -93,8 +93,9 @@ test('failed detail request preserves the copyable basic brief', async () => {
   h.requests.find(item => item.url === '/api/handoff').reject(new Error('offline'));
   const result = await done;
   assert.equal(result.id, 'A-basic');
+  assert.equal(result.enrichment_status, 'unavailable');
   assert.equal(h.writes.at(-1), 'brief:A-basic');
-  assert.match(h.notices.at(-1), /basic local brief/);
+  assert.match(h.notices.at(-1), /metadata-only fallback/);
 });
 
 test('include-prompt request never silently falls back to a different basic brief', async () => {

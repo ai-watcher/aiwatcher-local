@@ -39,6 +39,11 @@ _BRIEF_SECTION_PRIORITY = {
     "Working checkout": 4,
     "Verification and test signals": 4,
     "First action": 4,
+    "Where": 4,
+    "What changed": 4,
+    "Verification": 4,
+    "What remains": 4,
+    "Next action": 4,
 }
 
 
@@ -65,7 +70,16 @@ def bound_handoff_words(text: str, *, max_words: int = MAX_HANDOFF_WORDS) -> str
         entries.append({"index": index, "section": section, "heading": False, "ordinal": ordinal})
 
     def immutable(entry: dict[str, object]) -> bool:
-        return entry["section"] == "Verification and test signals" and entry["ordinal"] == 0
+        section = str(entry["section"])
+        ordinal = int(entry["ordinal"])
+        return (
+            section == "Verification and test signals" and ordinal == 0
+        ) or (
+            section in {"Objective", "Where", "What changed", "What remains", "Next action"}
+            and ordinal == 0
+        ) or (
+            section == "Verification" and ordinal < 2
+        )
 
     keep_limits = {0: 0, 1: 1, 2: 6, 4: 7}
     removable: list[tuple[int, int, int]] = []
@@ -158,6 +172,50 @@ def _compact_int(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def verification_handoff_state(
+    tests: Sequence[dict[str, object]], *, limit: int = 6,
+) -> dict[str, object]:
+    """Turn verification receipts into deterministic continuation guidance."""
+    rows = [item for item in tests[:limit] if isinstance(item, dict)]
+
+    def label(item: dict[str, object]) -> str:
+        return str(
+            item.get("summary") or item.get("artifact") or item.get("name") or "verification check"
+        ).strip()
+
+    def current_authoritative(item: dict[str, object]) -> bool:
+        binding = str(item.get("state_binding") or "").lower()
+        return (
+            item.get("authoritative") is True
+            and str(item.get("completion_state") or "").lower() == "completed"
+            and str(item.get("status") or "").lower() in {"passed", "failed"}
+            and item.get("current") is not False
+            and binding not in {"git_state_changed", "historical", "stale"}
+        )
+
+    current = [item for item in rows if current_authoritative(item)]
+    failures = [item for item in current if str(item.get("status") or "").lower() == "failed"]
+    broad = any(item.get("verification_scope") == "project_default" for item in current)
+    remaining: list[str] = []
+    next_action: str | None = None
+    if failures:
+        names = "; ".join(label(item) for item in failures[:2])
+        remaining.append(f"Current verification failed: {names}.")
+        next_action = f"Reproduce and resolve the current failed verification ({names}), then rerun it against unchanged Git state."
+    elif not current:
+        remaining.append("Verification is missing, stale, historical, or not authoritative for the current Git state.")
+        next_action = "Run the narrowest relevant verification against the current Git state before claiming completion."
+    elif not broad:
+        remaining.append("Current verification is limited in scope; project-wide coverage is not established.")
+    return {
+        "current": current,
+        "failures": failures,
+        "broad": broad,
+        "remaining": remaining,
+        "next_action": next_action,
+    }
 
 
 def _short(value: str | None, limit: int = 900) -> str | None:
@@ -484,6 +542,16 @@ def _brief_memory_summary(
             f"- {len(tests)} verification signal(s) were found"
             f" ({exact_tests} session-bound); inspect Git-state binding before claiming done."
         )
+    committed_files = getattr(evidence, "files_touched", []) or []
+    if committed_files:
+        qualifier = (
+            "Session-bound committed"
+            if getattr(evidence, "commit_attribution", "none") == "session_bound"
+            else "Candidate committed"
+        )
+        shown = ", ".join(str(item) for item in committed_files[:4])
+        extra = f" and {len(committed_files) - 4} more" if len(committed_files) > 4 else ""
+        current_state.append(f"- {qualifier} file(s): {shown}{extra}.")
     if not current_state:
         current_state.append("- No nearby commits, changed files, or test artifacts were found; reconstruct from the repository state first.")
 
@@ -760,19 +828,14 @@ def build_handoff_capsule(
             "- AIWatcher could not confidently identify the project path.",
             "- Ask the user to confirm the repository/path before editing.",
         ])
-    completed_verification = any(
-        item.get("authoritative") is True
-        and item.get("completion_state") == "completed"
-        and item.get("status") in {"passed", "failed"}
-        for item in evidence.tests
-    )
-    broad_verification = any(
-        item.get("authoritative") is True
-        and item.get("completion_state") == "completed"
-        and item.get("status") in {"passed", "failed"}
-        and item.get("verification_scope") == "project_default"
-        for item in evidence.tests
-    )
+    verification_state = verification_handoff_state(evidence.tests)
+    completed_verification = bool(verification_state["current"])
+    broad_verification = bool(verification_state["broad"])
+    local_verification_remaining = verification_state["remaining"] if evidence.tests else []
+    uncertainty_lines = [
+        *[f"- {item}" for item in local_verification_remaining],
+        *uncertainty_lines,
+    ]
 
     checkpoint_lines = [
         "- First verify that the source session identity above matches the work the user meant to continue.",
@@ -837,6 +900,11 @@ def build_handoff_capsule(
         *[f"- Commit: {item.get('sha')}: {item.get('subject')}" for item in evidence.commits[:4]],
         *([f"- ...and {len(evidence.commits) - 4} more commit(s); inspect `git log`." ] if len(evidence.commits) > 4 else []),
         *[f"- Changed file: {path}" for path in evidence.changed_files[:8]],
+        *[
+            f"- {'Committed file' if evidence.commit_attribution == 'session_bound' else 'Candidate committed file'}: {path}"
+            for path in evidence.files_touched[:8]
+            if path not in evidence.changed_files
+        ],
         *([f"- ...and {len(evidence.changed_files) - 8} more changed file(s); inspect `git status --short`." ] if len(evidence.changed_files) > 8 else []),
         *(
             ["- No nearby commit evidence was found; avoid overwriting local edits until their owner and intent are clear."]
@@ -871,7 +939,10 @@ def build_handoff_capsule(
         *uncertainty_lines[:4],
         "",
         "First action",
-        *memory_summary["open"][1:2],
+        *(
+            [f"- {verification_state['next_action']}", *memory_summary["open"][1:2]]
+            if evidence.tests and verification_state["next_action"] else memory_summary["open"][1:2]
+        ),
         *(memory_summary["files"][:5] if evidence.changed_files else []),
         *([f"- Inspect `git show {evidence.commits[0].get('sha')} --stat` before changing landed work."] if evidence.commits else []),
         *(["- Ask one focused outcome question before editing because the objective remains unknown."] if not objective_text else []),
