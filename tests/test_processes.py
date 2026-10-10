@@ -12,12 +12,24 @@ from aiwatcher_cli.processes import (
     ProcessRow,
     classify_process,
     parse_ps_line,
+    pid_is_running,
     process_record,
     seconds_label,
 )
 
 
 class RuntimeProcessTests(unittest.TestCase):
+    def test_pid_probe_rejects_unrepresentable_pid(self) -> None:
+        self.assertFalse(pid_is_running(10**100))
+
+    def test_windows_pid_probe_rejects_unrepresentable_pid_without_calling_kernel(self) -> None:
+        with (
+            patch("aiwatcher_cli.processes.sys.platform", "win32"),
+            patch("aiwatcher_cli.processes._windows_pid_is_running") as probe,
+        ):
+            self.assertFalse(pid_is_running(10**100))
+        probe.assert_not_called()
+
     def test_parse_ps_line_handles_command_with_spaces(self) -> None:
         row = parse_ps_line(
             "123 1 T 02:03:04 204800 12.5 /Applications/Codex.app/Contents/MacOS/cua_node kernel.js --session-id abc --working-dir /repo"

@@ -354,9 +354,9 @@ class AiAssistTests(unittest.TestCase):
         payload = call.call_args.args[1][1]["content"]
         self.assertLessEqual(result["input_chars"], ai_assist.MAX_FRESH_START_INPUT_CHARS)
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", result["text"])
-        self.assertIn("Completed work", result["text"])
-        self.assertIn("Settings page exists", result["text"])
-        self.assertIn("First action", result["text"])
+        self.assertIn("What changed", result["text"])
+        self.assertNotIn("Settings page exists", result["text"])
+        self.assertIn("Next action", result["text"])
         self.assertIn("aiwatcher_cli/web/index.js", result["text"])
         self.assertEqual(result["structured"]["goal"], "Finish the smallest checkpoint.")
         self.assertNotIn("sk-secret", payload)
@@ -377,8 +377,143 @@ class AiAssistTests(unittest.TestCase):
 
         self.assertIn("Working tree: state unknown", text)
         self.assertIn("junit-results.xml | result unknown", text)
-        self.assertIn("No completed verification was observed", text)
+        self.assertIn("No authoritative session-bound verification", text)
         self.assertNotIn("Full suite passed", text)
+
+    def test_fresh_start_only_accepts_explicit_authoritative_verification(self) -> None:
+        historical = {
+            "summary": "passed | historical: starting Git state unavailable | pytest",
+            "status": "passed", "completion_state": "completed", "authoritative": False,
+        }
+        authoritative = {
+            "summary": "passed | current for this Git state | pytest",
+            "status": "passed", "completion_state": "completed", "authoritative": True,
+            "verification_scope": "project_default",
+        }
+        base = {
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "checkout": {"path": "/repo/ai", "dirty": False},
+        }
+
+        historical_text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({**base, "evidence": {"tests": [historical]}}),
+        )
+        authoritative_text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({**base, "evidence": {"tests": [authoritative]}}),
+        )
+
+        self.assertIn("No authoritative session-bound verification", historical_text)
+        self.assertNotIn("No authoritative session-bound verification", authoritative_text)
+
+    def test_fresh_start_uses_authoritative_sixth_verification_without_duplication(self) -> None:
+        rows = [
+            {
+                "summary": f"historical check {index}",
+                "status": "passed", "completion_state": "completed", "authoritative": False,
+            }
+            for index in range(5)
+        ]
+        rows.append({
+            "summary": "authoritative sixth check",
+            "status": "passed", "completion_state": "completed", "authoritative": True,
+            "verification_scope": "named_check",
+        })
+        text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {"tests": rows},
+            }),
+        )
+
+        self.assertNotIn("No authoritative session-bound verification", text)
+        self.assertEqual(text.count("authoritative sixth check"), 1)
+        self.assertIn("do not infer project-wide coverage", text)
+
+    def test_fresh_start_warns_that_targeted_verification_is_limited(self) -> None:
+        text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully."},
+            json.dumps({
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {"tests": [{
+                    "summary": "passed | targeted scope | pytest",
+                    "status": "passed", "completion_state": "completed",
+                    "authoritative": True, "verification_scope": "targeted",
+                }]},
+            }),
+        )
+
+        self.assertNotIn("No authoritative session-bound verification", text)
+        self.assertIn("do not infer project-wide coverage", text)
+
+    def test_fresh_start_failed_verification_overrides_model_completion_and_deploy_claims(self) -> None:
+        text = ai_assist._structured_handoff_text(
+            {
+                "goal": "Ship the release.",
+                "what_is_done": ["Implementation is complete."],
+                "next_ask": "Deploy the release now.",
+            },
+            json.dumps({
+                "objective": "Finish the release safely.",
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {"tests": [{
+                    "summary": "failed | current for this Git state | unit-tests",
+                    "status": "failed", "completion_state": "completed",
+                    "authoritative": True, "current": True,
+                    "verification_scope": "named_check",
+                }]},
+            }),
+        )
+
+        self.assertIn("Current verification failed", text)
+        self.assertIn("Reproduce and resolve the current failed verification", text)
+        self.assertNotIn("Implementation is complete", text)
+        self.assertNotIn("Deploy the release now", text)
+
+    def test_fresh_start_carries_committed_files_and_tests_only_fallback_is_honest(self) -> None:
+        text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully.", "next_ask": "Inspect the evidence."},
+            json.dumps({
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {
+                    "commit_attribution": "session_bound",
+                    "committed_files": ["src/auth.py"],
+                    "tests": ["pytest | result unknown"],
+                },
+            }),
+        )
+
+        self.assertIn("Committed file: src/auth.py", text)
+        self.assertIn("pytest | result unknown", text)
+        self.assertNotIn("No commit, file, test, or decision evidence", text)
+        for heading in ("Objective", "Where", "What changed", "Verification", "What remains", "Next action"):
+            self.assertEqual(text.count(f"\n{heading}\n"), 1, text)
+        self.assertLessEqual(len(text.split()), 300)
+
+    def test_fresh_start_labels_nearby_commit_files_as_candidates(self) -> None:
+        text = ai_assist._structured_handoff_text(
+            {"goal": "Continue carefully.", "next_ask": "Inspect the evidence."},
+            json.dumps({
+                "source": {"session_id": "session-1", "project": "/repo/ai"},
+                "checkout": {"path": "/repo/ai", "dirty": False},
+                "evidence": {
+                    "commit_attribution": "nearby_time_window",
+                    "commits": ["abc123: nearby change"],
+                    "committed_files": ["src/auth.py"],
+                    "tests": [],
+                },
+            }),
+        )
+
+        self.assertIn("Candidate commit: abc123: nearby change", text)
+        self.assertIn("Candidate committed file: src/auth.py", text)
+        self.assertNotIn("\n- Committed file: src/auth.py", text)
 
     def test_fresh_start_word_cap_resists_model_ellipsis_prefixes(self) -> None:
         long_item = "...and " + ("discretionary model prose " * 120)
@@ -386,7 +521,17 @@ class AiAssistTests(unittest.TestCase):
             "source": {"session_id": "session-1", "project": "/repo/ai"},
             "checkout": {"path": "/repo/ai", "branch": "feature", "head": "abc123", "dirty": False},
             "objective": "Finish the continuation checkpoint.",
-            "evidence": {"tests": ["failed | current for this Git state | pytest"]},
+            "evidence": {
+                "commit_attribution": "session_bound",
+                "commits": [f"abc{index}: dense change {long_item}" for index in range(4)],
+                "changed_files": [f"src/file-{index}.py" for index in range(8)],
+                "tests": [{
+                    "summary": "failed | current for this Git state | pytest",
+                    "status": "failed", "completion_state": "completed",
+                    "authoritative": True, "current": True,
+                    "verification_scope": "named_check",
+                }],
+            },
         })
         parsed = {
             "goal": "Finish the continuation checkpoint.",
@@ -407,6 +552,9 @@ class AiAssistTests(unittest.TestCase):
 
         self.assertLessEqual(len(text.split()), ai_assist.MAX_HANDOFF_WORDS, text)
         self.assertIn("failed | current for this Git state | pytest", text)
+        self.assertIn("Reproduce and resolve the current failed verification", text)
+        for heading in ("Objective", "Where", "What changed", "Verification", "What remains", "Next action"):
+            self.assertIn(f"\n{heading}\n", text)
 
     def test_fresh_start_rejects_generic_model_output(self) -> None:
         evidence_packet = json.dumps({

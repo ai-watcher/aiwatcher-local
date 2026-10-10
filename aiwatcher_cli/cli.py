@@ -47,7 +47,12 @@ from .companion import (
     tray_status,
     uninstall_login_autostart,
 )
-from .command_evidence import environment_session_identity, verification_runner as _verification_runner
+from .command_evidence import (
+    environment_session_identity,
+    verification_classification as _verification_classification,
+    verification_runner as _verification_runner,
+    verification_scope_for_cwd,
+)
 from .evidence_capture import record_missing_evidence_snapshots
 from . import compaction, compaction_outcomes, prompt_signals
 from .local_state import (
@@ -136,11 +141,13 @@ from .outcome_evidence import (
 from .pricing import is_subscription_model
 from .processes import (
     DEFAULT_STALE_MINUTES,
+    _windows_pid_is_running as _process_windows_pid_is_running,
     cpu_label,
     discover_runtime_processes,
     platform_note,
     process_hygiene_summary,
     process_record,
+    pid_is_running as _process_pid_is_running,
     rss_label,
     seconds_label,
 )
@@ -4127,8 +4134,9 @@ def _run_companion_heartbeat(interval_seconds: int) -> int:
             )
             time_module.sleep(interval)
     except KeyboardInterrupt:
-        clear_watcher_heartbeat(pid=os.getpid())
         return 0
+    finally:
+        clear_watcher_heartbeat(pid=os.getpid())
 
 
 def command_companion(args: argparse.Namespace) -> int:
@@ -5548,34 +5556,8 @@ def _companion_tray_pid_path() -> Path:
 # Ctrl+C event. The companion daemon runs detached with no console at all, so
 # the call always failed with ERROR_INVALID_HANDLE and every live overlay
 # looked dead. Ask the kernel about the process directly instead.
-_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-_SYNCHRONIZE = 0x00100000
-_WAIT_TIMEOUT = 0x00000102
-_ERROR_ACCESS_DENIED = 5
-
-
 def _windows_pid_is_running(pid: int) -> bool:
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-    # Without explicit signatures ctypes truncates the 64-bit handle to an int.
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    handle = kernel32.OpenProcess(
-        _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid
-    )
-    if not handle:
-        # The process exists but this process cannot open it. Treat it as
-        # alive so Companion stop/start does not orphan visible overlay windows.
-        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
-    try:
-        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
-    finally:
-        kernel32.CloseHandle(handle)
+    return _process_windows_pid_is_running(pid)
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -5586,15 +5568,7 @@ def _pid_is_running(pid: int) -> bool:
             return _windows_pid_is_running(pid)
         except (OSError, AttributeError, ValueError):
             return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        # The process exists but this process cannot signal it. Treat it as
-        # alive so Companion stop/start does not orphan visible overlay windows.
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    return _process_pid_is_running(pid)
 
 
 def _existing_companion_presence_pid() -> int | None:
@@ -5622,7 +5596,7 @@ def _companion_can_own_blocking_gate() -> bool:
     if _existing_companion_presence_pid() is not None:
         return True
     try:
-        status = get_watcher_status(max_age_seconds=90)
+        status = get_watcher_status()
     except OSError:
         status = {}
     if (
@@ -6947,7 +6921,7 @@ def _select_runtime_nudge_session(
 
 def command_watch(args: argparse.Namespace) -> int:
     if not getattr(args, "once", False):
-        current = get_watcher_status(max_age_seconds=max(30, int(getattr(args, "interval", 60)) * 2))
+        current = get_watcher_status()
         current_pid = current.get("pid") if isinstance(current, dict) else None
         if current.get("running") and isinstance(current_pid, int) and current_pid != os.getpid():
             if _pid_is_running(current_pid):
@@ -7009,7 +6983,6 @@ def command_watch(args: argparse.Namespace) -> int:
             if not rows:
                 print(f"No local AI sessions detected in the last {args.days} days.")
                 if args.once:
-                    clear_watcher_heartbeat(pid=os.getpid())
                     return 0
             else:
                 all_events = events_by_session(rows, days=args.days)
@@ -7101,17 +7074,24 @@ def command_watch(args: argparse.Namespace) -> int:
                         print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
 
             if args.once:
-                clear_watcher_heartbeat(pid=os.getpid())
                 return 0
             time_module.sleep(max(2, args.interval))
     except KeyboardInterrupt:
-        clear_watcher_heartbeat(pid=os.getpid())
         print("\nStopped AIWatcher Local watch.")
         return 0
+    finally:
+        clear_watcher_heartbeat(pid=os.getpid())
 
 
 def _verification_git_fingerprint(cwd: str) -> dict[str, str | None]:
     return verification_git_fingerprint(cwd)
+
+
+def _verification_state_binding(before: dict[str, str | None], after: dict[str, str | None]) -> str:
+    keys = ("checkout_id", "head", "dirty_fingerprint")
+    if not all(before.get(key) and after.get(key) for key in keys):
+        return "historical"
+    return "git_state" if all(before[key] == after[key] for key in keys) else "git_state_changed"
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -7123,7 +7103,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     run_started = datetime.now().astimezone()
-    verification_runner = _verification_runner(command)
+    verification_runner, verification_scope = _verification_classification(command)
     verification_before = _verification_git_fingerprint(os.getcwd()) if verification_runner else {}
     print("AIWatcher Local run")
     print("Watching local AI logs while your command runs. No prompt or source content is uploaded.\n")
@@ -7147,6 +7127,9 @@ def command_run(args: argparse.Namespace) -> int:
                 checkout_path=checkout,
                 repository_id=verification_after.get("repository_id"),
                 repository_lineage_id=verification_after.get("repository_lineage_id"),
+                started_checkout_id=verification_before.get("checkout_id"),
+                started_head=verification_before.get("head"),
+                started_dirty_fingerprint=verification_before.get("dirty_fingerprint"),
                 checkout_id=verification_after.get("checkout_id"),
                 head=verification_after.get("head"),
                 dirty_fingerprint=verification_after.get("dirty_fingerprint"),
@@ -7156,7 +7139,10 @@ def command_run(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 session_source=session_source,
                 completion_state="completed",
-                state_binding="git_state",
+                state_binding=_verification_state_binding(verification_before, verification_after),
+                verification_scope=verification_scope_for_cwd(
+                    verification_scope, os.getcwd(), checkout,
+                ),
             )
         except (OSError, ValueError):
             # The wrapped command's real exit code always wins over optional

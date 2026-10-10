@@ -4466,6 +4466,29 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(marked["ai_assist"]["config"]["stored_keys"]["openai"])
         self.assertNotIn("sk-local-test", json.dumps(marked))
 
+    def test_cached_summary_rehydrates_watcher_after_start_and_stop(self) -> None:
+        running = {"running": True, "status": "running", "label": "Companion running"}
+        stopped = {
+            "running": False, "status": "stopped", "label": "Companion stopped",
+            "command": "aiwatcher companion start",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "get_watcher_status", side_effect=[running, stopped]),
+            ):
+                cached = {"summary_complete": True, "watcher": {"status": "obsolete"}}
+                after_start = ui._mark_summary_cache(
+                    cached, status="fresh", source="memory", refreshing=False,
+                )
+                after_stop = ui._mark_summary_cache(
+                    cached, status="stale", source="disk", refreshing=False,
+                )
+
+        self.assertEqual(after_start["watcher"], running)
+        self.assertEqual(after_stop["watcher"], stopped)
+
     def test_marked_cached_summary_uses_current_claims_switch_and_install_kind(self) -> None:
         # The Trust tab's claims are code, the update switch is a toggle the
         # user just set, and the install kind is a path check. None belongs
@@ -4964,7 +4987,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["session_id"], "cached-fast")
         self.assertIn("runtime_attachment", capsule)
 
-    def test_basic_handoff_detail_is_copyable_without_event_scan(self) -> None:
+    def test_basic_handoff_detail_is_bounded_provisional_preview_without_event_scan(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
             session_id="basic-fast",
@@ -4995,12 +5018,12 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(capsule["basic"])
         self.assertEqual(capsule["enrichment_status"], "loading")
         self.assertEqual(capsule["usage"]["tokens_label"], "128.0k")
-        self.assertIn("AIWatcher Fresh Start brief", capsule["next_brief"])
-        self.assertIn("How to continue", capsule["next_brief"])
-        self.assertIn("If this is a forked chat", capsule["next_brief"])
-        self.assertIn("If this is a subagent task", capsule["next_brief"])
-        self.assertIn("First response required", capsule["next_brief"])
-        self.assertIn("Detailed git, timeline, and prompt evidence is still loading", capsule["next_brief"])
+        self.assertIn("AIWatcher Fresh Start preview", capsule["next_brief"])
+        self.assertIn("provisional metadata-only fallback", capsule["next_brief"])
+        self.assertIn("Objective not captured; confirmation is required before editing", capsule["next_brief"])
+        self.assertNotIn("User objective: Continue the same user goal", capsule["next_brief"])
+        self.assertIn("Detailed checkout, commit, changed-file, and terminal verification evidence", capsule["next_brief"])
+        self.assertLessEqual(len(capsule["next_brief"].split()), 250)
 
     def test_structured_handoff_fields_shape_the_brief(self) -> None:
         now = datetime.now(timezone.utc)
@@ -5078,7 +5101,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertTrue(capsule["basic"])
         self.assertEqual(capsule["handoff_type"], "bugbash")
-        self.assertIn("Continuation type: Bug bash continuation.", capsule["next_brief"])
+        self.assertIn("Continuation: Bug bash continuation for Codex.", capsule["next_brief"])
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
 
@@ -5167,6 +5190,39 @@ class DashboardWindowTests(unittest.TestCase):
         }))
 
         self.assertIsNone(packet["checkout"]["dirty"])
+
+    def test_ai_handoff_packet_distinguishes_changed_and_historical_verification(self) -> None:
+        packet = json.loads(ui._fresh_start_ai_evidence_packet({
+            "session_id": "verification-basis",
+            "project": "/repo/app",
+            "evidence": {"tests": [
+                {
+                    "name": "pytest", "status": "passed", "current": False,
+                    "state_binding": "git_state_changed",
+                    "verification_scope": "targeted",
+                },
+                {
+                    "name": "npm test", "status": "passed", "current": False,
+                    "state_binding": "historical",
+                    "verification_scope": "named_check",
+                },
+            ]},
+        }))
+
+        tests = packet["evidence"]["tests"]
+        self.assertIn("stale: Git state changed during verification", tests[0]["summary"])
+        self.assertIn("historical: starting Git state unavailable", tests[1]["summary"])
+        self.assertIn("targeted or parameterized scope; target details not stored", tests[0]["summary"])
+        self.assertIn("named check", tests[1]["summary"])
+        self.assertEqual(
+            tests[0]["summary"],
+            "passed | stale: Git state changed during verification | "
+            "targeted or parameterized scope; target details not stored | pytest",
+        )
+        self.assertFalse(tests[0]["authoritative"])
+        self.assertFalse(tests[1]["authoritative"])
+        self.assertFalse(tests[0]["current"])
+        self.assertEqual(tests[0]["state_binding"], "git_state_changed")
 
     def test_handoff_detail_reuses_recent_authoritative_evidence(self) -> None:
         now = datetime.now(timezone.utc)

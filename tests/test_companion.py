@@ -135,11 +135,12 @@ class CompanionLifecycleTests(unittest.TestCase):
             companion,
             "get_watcher_status",
             return_value={"running": True, "mode": "companion", "pid": 123},
-        ):
-            result = companion.start_companion()
+        ) as get_status:
+            result = companion.start_companion(interval_seconds=3600)
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["already_running"])
+        get_status.assert_called_once_with()
 
     def test_legacy_watch_must_stop_before_companion_starts(self) -> None:
         with patch.object(

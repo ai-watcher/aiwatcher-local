@@ -3106,8 +3106,23 @@ class AiAssistDrawerTest(unittest.TestCase):
         # The brief-focus button under the textarea never launches anything,
         # whatever is attached; the primary in the status card is the one that
         # may open the workspace.
-        self.assertIn("copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)\">Copy brief</button>", fn)
+        self.assertIn("copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)", fn)
+        self.assertIn("awaitingEvidence ? 'Loading evidence...' : 'Copy brief'", fn)
         self.assertNotIn("${canOpenRuntime ? 'true' : 'false'}", fn)
+
+    def test_provisional_fresh_start_preview_cannot_be_copied_while_evidence_loads(self):
+        start = self.js.index("function renderHandoff(")
+        fn = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("awaitingEvidence", fn)
+        self.assertIn("Loading evidence...", fn)
+        self.assertIn("awaitingEvidence ? 'disabled'", fn)
+        self.assertIn("aiReady && !awaitingEvidence", fn)
+        self.assertIn("This provisional preview is not copyable", fn)
+
+    def test_overlay_copies_enriched_fresh_start_not_basic_preview(self):
+        overlay = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "overlay.js").read_text(encoding="utf-8")
+        self.assertIn("/api/handoff?id=", overlay)
+        self.assertNotIn("/api/handoff-basic", overlay)
 
     def test_optimize_cards_carry_one_cleanup_prompt(self):
         self.assertNotIn("item.checklist", self.js)
