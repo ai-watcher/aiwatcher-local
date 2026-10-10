@@ -65,8 +65,9 @@ class VerificationRunnerTests(unittest.TestCase):
         after = {**before, "head": "def"}
         receipt = Mock()
         with (
-            patch.object(cli, "_verification_runner", return_value="pytest"),
+            patch.object(cli, "_verification_classification", return_value=("pytest", "project_default")),
             patch.object(cli, "_verification_git_fingerprint", side_effect=[before, after]),
+            patch.object(cli.os, "getcwd", return_value="/repo"),
             patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess(["pytest"], 7)),
             patch.object(cli, "record_verification_receipt", receipt),
             patch.object(cli, "environment_session_identity", return_value=("session", "codex")),
@@ -80,6 +81,7 @@ class VerificationRunnerTests(unittest.TestCase):
         self.assertEqual(saved["started_head"], "abc")
         self.assertEqual(saved["head"], "def")
         self.assertEqual(saved["state_binding"], "git_state_changed")
+        self.assertEqual(saved["verification_scope"], "project_default")
 from aiwatcher_cli.processes import RuntimeProcess
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 

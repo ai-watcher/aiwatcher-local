@@ -2678,6 +2678,7 @@ def record_verification_receipt(
     source_id: str | None = None,
     completion_state: str = "completed",
     state_binding: str = "git_state",
+    verification_scope: str = "unknown",
     truncated: bool = False,
 ) -> dict[str, Any]:
     """Store a bounded test/check result without command output or arguments."""
@@ -2710,6 +2711,11 @@ def record_verification_receipt(
         "source_id": source_id.strip()[:160] if isinstance(source_id, str) and source_id.strip() else None,
         "completion_state": completion_state.strip()[:40],
         "state_binding": state_binding if state_binding in {"git_state", "git_state_changed", "historical"} else "historical",
+        "verification_scope": (
+            verification_scope
+            if verification_scope in {"project_default", "named_check", "targeted", "unknown"}
+            else "unknown"
+        ),
         "truncated": bool(truncated),
     }
     if not record["runner"] or not record["checkout_path"]:
