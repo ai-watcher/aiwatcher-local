@@ -5168,6 +5168,28 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertIsNone(packet["checkout"]["dirty"])
 
+    def test_ai_handoff_packet_distinguishes_changed_and_historical_verification(self) -> None:
+        packet = json.loads(ui._fresh_start_ai_evidence_packet({
+            "session_id": "verification-basis",
+            "project": "/repo/app",
+            "evidence": {"tests": [
+                {
+                    "name": "pytest", "status": "passed", "current": False,
+                    "state_binding": "git_state_changed",
+                },
+                {
+                    "name": "npm test", "status": "passed", "current": False,
+                    "state_binding": "historical",
+                },
+            ]},
+        }))
+
+        tests = packet["evidence"]["tests"]
+        self.assertIn("stale: Git state changed during verification", tests[0]["summary"])
+        self.assertIn("historical: starting Git state unavailable", tests[1]["summary"])
+        self.assertFalse(tests[0]["authoritative"])
+        self.assertFalse(tests[1]["authoritative"])
+
     def test_handoff_detail_reuses_recent_authoritative_evidence(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(

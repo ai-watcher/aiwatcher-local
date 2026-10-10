@@ -7114,6 +7114,13 @@ def _verification_git_fingerprint(cwd: str) -> dict[str, str | None]:
     return verification_git_fingerprint(cwd)
 
 
+def _verification_state_binding(before: dict[str, str | None], after: dict[str, str | None]) -> str:
+    keys = ("checkout_id", "head", "dirty_fingerprint")
+    if not all(before.get(key) and after.get(key) for key in keys):
+        return "historical"
+    return "git_state" if all(before[key] == after[key] for key in keys) else "git_state_changed"
+
+
 def command_run(args: argparse.Namespace) -> int:
     command = list(args.command)
     if command and command[0] == "--":
@@ -7147,6 +7154,9 @@ def command_run(args: argparse.Namespace) -> int:
                 checkout_path=checkout,
                 repository_id=verification_after.get("repository_id"),
                 repository_lineage_id=verification_after.get("repository_lineage_id"),
+                started_checkout_id=verification_before.get("checkout_id"),
+                started_head=verification_before.get("head"),
+                started_dirty_fingerprint=verification_before.get("dirty_fingerprint"),
                 checkout_id=verification_after.get("checkout_id"),
                 head=verification_after.get("head"),
                 dirty_fingerprint=verification_after.get("dirty_fingerprint"),
@@ -7156,7 +7166,7 @@ def command_run(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 session_source=session_source,
                 completion_state="completed",
-                state_binding="git_state",
+                state_binding=_verification_state_binding(verification_before, verification_after),
             )
         except (OSError, ValueError):
             # The wrapped command's real exit code always wins over optional

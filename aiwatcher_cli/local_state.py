@@ -2595,6 +2595,7 @@ def _receipt_matches_checkout(
     checkout_id: str | None,
     checkout_path: str | None,
     include_legacy: bool,
+    allow_migrated_repository_id: bool = False,
 ) -> bool:
     if checkout_id:
         row_checkout_id = row.get("checkout_id")
@@ -2602,6 +2603,16 @@ def _receipt_matches_checkout(
             return row_checkout_id == checkout_id
         if not include_legacy or not checkout_path:
             return False
+        row_repository_id = row.get("repository_id")
+        if row_repository_id and repository_id and row_repository_id != repository_id:
+            migrated_id = (
+                allow_migrated_repository_id
+                and isinstance(row_repository_id, str)
+                and re.fullmatch(r"[0-9a-f]{16}", row_repository_id) is not None
+                and repository_id.startswith("repository-v1-")
+            )
+            if not migrated_id:
+                return False
         try:
             return os.path.normcase(os.path.realpath(str(row.get("checkout_path") or ""))) == (
                 os.path.normcase(os.path.realpath(checkout_path))
@@ -2656,6 +2667,9 @@ def record_verification_receipt(
     finished_at: str,
     repository_id: str | None = None,
     repository_lineage_id: str | None = None,
+    started_checkout_id: str | None = None,
+    started_head: str | None = None,
+    started_dirty_fingerprint: str | None = None,
     checkout_id: str | None = None,
     head: str | None = None,
     dirty_fingerprint: str | None = None,
@@ -2681,6 +2695,9 @@ def record_verification_receipt(
         "checkout_path": checkout_path.strip()[:1000],
         "repository_id": repository_id.strip()[:160] if repository_id else None,
         "repository_lineage_id": repository_lineage_id.strip()[:160] if repository_lineage_id else None,
+        "started_checkout_id": started_checkout_id.strip()[:160] if started_checkout_id else None,
+        "started_head": started_head.strip()[:40] if started_head else None,
+        "started_dirty_fingerprint": started_dirty_fingerprint.strip()[:80] if started_dirty_fingerprint else None,
         "checkout_id": checkout_id.strip()[:160] if checkout_id else None,
         "head": head.strip()[:40] if head else None,
         "dirty_fingerprint": dirty_fingerprint.strip()[:80] if dirty_fingerprint else None,
@@ -2692,7 +2709,7 @@ def record_verification_receipt(
         "session_source": session_source.strip()[:80] if isinstance(session_source, str) and session_source.strip() else None,
         "source_id": source_id.strip()[:160] if isinstance(source_id, str) and source_id.strip() else None,
         "completion_state": completion_state.strip()[:40],
-        "state_binding": state_binding if state_binding in {"git_state", "historical"} else "historical",
+        "state_binding": state_binding if state_binding in {"git_state", "git_state_changed", "historical"} else "historical",
         "truncated": bool(truncated),
     }
     if not record["runner"] or not record["checkout_path"]:
@@ -2733,6 +2750,7 @@ def recent_verification_receipts(
             checkout_id=checkout_id,
             checkout_path=checkout_path,
             include_legacy=include_legacy,
+            allow_migrated_repository_id=True,
         )
         and (
             session_id is None

@@ -29,6 +29,7 @@ from .scanner import LocalSession
 GIT_TIMEOUT_SECONDS = 2
 MAX_FINGERPRINT_UNTRACKED_FILES = 200
 MAX_FINGERPRINT_UNTRACKED_BYTES = 64 * 1024 * 1024
+MAX_FINGERPRINT_SUBMODULES = 64
 
 # Repo root for a given path does not change while the process lives, but the
 # companion re-derives it for every session on every scan tick -- which meant a
@@ -153,17 +154,17 @@ def _working_tree_fingerprint(repo: str, status: str) -> str | None:
     """
     diff = _run_git(repo, ["diff", "--binary", "--no-ext-diff", "HEAD", "--"])
     untracked = _run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
-    if not diff or diff.returncode != 0 or not untracked or untracked.returncode != 0:
+    index = _run_git(repo, ["ls-files", "--stage", "-z"])
+    if (
+        not diff or diff.returncode != 0
+        or not untracked or untracked.returncode != 0
+        or not index or index.returncode != 0
+    ):
         return None
 
     paths = [item for item in untracked.stdout.split("\0") if item]
     if len(paths) > MAX_FINGERPRINT_UNTRACKED_FILES:
         return None
-    if not status and not diff.stdout and not paths:
-        # Preserve the existing clean-tree fingerprint so receipts recorded by
-        # earlier versions remain comparable after this hardening change.
-        return hashlib.sha256(b"").hexdigest()[:24]
-
     def frame(value: bytes) -> bytes:
         return len(value).to_bytes(8, "big") + value
 
@@ -194,8 +195,55 @@ def _working_tree_fingerprint(repo: str, status: str) -> str | None:
             digest.update(frame(path_bytes))
             digest.update(frame(kind))
             digest.update(frame(file_digest.digest()))
+
+        submodules: list[tuple[str, str]] = []
+        for entry in index.stdout.split("\0"):
+            metadata, separator, relative = entry.partition("\t")
+            if separator and metadata.startswith("160000 "):
+                fields = metadata.split()
+                if len(fields) >= 2:
+                    submodules.append((relative, fields[1]))
+        if len(submodules) > MAX_FINGERPRINT_SUBMODULES:
+            return None
+        for relative, index_head in submodules:
+            digest.update(frame(relative.encode("utf-8", errors="surrogateescape")))
+            digest.update(frame(b"submodule-index"))
+            digest.update(frame(index_head.encode("ascii")))
+            submodule = root / relative
+            top_level = _run_git(str(submodule), ["rev-parse", "--show-toplevel"])
+            if (
+                top_level is None
+                or top_level.returncode != 0
+                or os.path.normcase(os.path.realpath(top_level.stdout.strip()))
+                != os.path.normcase(os.path.realpath(submodule))
+            ):
+                # An uninitialized submodule has no mutable checkout state; its
+                # recorded commit is already represented by the parent diff.
+                continue
+            submodule_head = _git_text(str(submodule), ["rev-parse", "HEAD"])
+            if not submodule_head:
+                return None
+            status_result = _run_git(
+                str(submodule), ["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            if status_result is None or status_result.returncode != 0:
+                return None
+            submodule_fingerprint = _working_tree_fingerprint(
+                str(submodule), status_result.stdout
+            )
+            if submodule_fingerprint is None:
+                return None
+            digest.update(frame(b"submodule-head"))
+            digest.update(frame(submodule_head.encode("ascii")))
+            digest.update(frame(b"submodule-worktree"))
+            digest.update(frame(submodule_fingerprint.encode("ascii")))
     except (OSError, ValueError):
         return None
+    if not status and not diff.stdout and not paths and not submodules:
+        # Preserve the established clean-tree fingerprint for repositories
+        # without submodules. Older receipts lack a pre-state and therefore
+        # remain historical rather than gaining authority from this value.
+        return hashlib.sha256(b"").hexdigest()[:24]
     return digest.hexdigest()[:24]
 
 
@@ -502,7 +550,7 @@ def _verification_receipts(
         repository_id=repository_id,
         checkout_id=checkout_id,
         checkout_path=checkout_path,
-        include_legacy=not bool(checkout_id),
+        include_legacy=True,
         session_id=session.session_id,
         include_unbound=True,
         limit=100,
@@ -527,6 +575,15 @@ def _verification_receipts(
         receipt_head = str(receipt.get("head") or "")
         state_head = str(state.get("head") or "")
         receipt_fingerprint = receipt.get("dirty_fingerprint")
+        stable_basis = (
+            receipt.get("state_binding") == "git_state"
+            and bool(receipt.get("started_checkout_id"))
+            and receipt.get("started_checkout_id") == receipt.get("checkout_id")
+            and bool(receipt.get("started_head"))
+            and receipt.get("started_head") == receipt.get("head")
+            and bool(receipt.get("started_dirty_fingerprint"))
+            and receipt.get("started_dirty_fingerprint") == receipt_fingerprint
+        )
         if not fingerprint_checked:
             status = state.get("_status")
             state_fingerprint = (
@@ -537,7 +594,7 @@ def _verification_receipts(
             state["dirty_fingerprint"] = state_fingerprint
             fingerprint_checked = True
         current = (
-            receipt.get("state_binding") != "historical"
+            stable_basis
             and
             bool(receipt_head and state_head)
             and (receipt_head.startswith(state_head) or state_head.startswith(receipt_head))
@@ -556,6 +613,7 @@ def _verification_receipts(
             ),
             "attribution": "session_bound" if exact_session else "inferred_time_window",
             "completion_state": receipt.get("completion_state") or "completed",
+            "state_binding": receipt.get("state_binding") or "historical",
             "truncated": bool(receipt.get("truncated")),
             "_finished_at_sort": stamp.timestamp(),
         })
