@@ -21,7 +21,7 @@ class OptimizeConfirmationTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": self.tmp.name + "/state.json"})
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.item = {"id": "sessions:/test", "kind": "session_cluster", "project_full": "/test", "session_count": 2}
+        self.item = {"id": "sessions:/test", "review_contract_version": 2, "kind": "session_cluster", "project_full": "/test", "session_count": 2}
         self.item["evidence_hash"] = ui._optimize_candidate_evidence_hash(self.item)
         self.summary = patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [self.item]}})
         self.summary.start()
@@ -85,3 +85,31 @@ class OptimizeConfirmationTests(unittest.TestCase):
         status, item = self.post("/api/optimize-review", {"candidate_id": self.item["id"], "days": "invalid"})
         self.assertEqual(status, 200)
         self.assertEqual(item["id"], self.item["id"])
+
+    def test_basic_copy_rebuilds_canonical_packet_instead_of_cached_prompt(self):
+        self.item["cleanup_prompt"] = "old cached cleanup prompt"
+        status, item = self.post("/api/optimize-review", {"candidate_id": self.item["id"]})
+        self.assertEqual(status, 200)
+        self.assertIn("Review packet", item["cleanup_prompt"])
+        self.assertIn("Present the decision to the user", item["cleanup_prompt"])
+        self.assertNotIn("old cached cleanup prompt", item["cleanup_prompt"])
+        self.assertEqual(recent_optimize_decisions(), [])
+
+    def test_refreshing_or_legacy_evidence_cannot_be_copied_or_confirmed(self):
+        for extra in [{"cache": {"refreshing": True}}, {"summary_complete": False}, {"cache": {"error": "failed"}}]:
+            with patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [self.item]}, **extra}):
+                status, result = self.post("/api/optimize-review", {"candidate_id": self.item["id"]})
+                self.assertEqual(status, 409)
+                self.assertIn(result["status"], ["refreshing", "error"])
+                status, _ = self.post("/api/optimize-decision", {"candidate_id": self.item["id"], "decision": "reviewed", "confirmed": True})
+                self.assertEqual(status, 409)
+        self.item.pop("review_contract_version")
+        self.assertEqual(self.post("/api/optimize-review", {"candidate_id": self.item["id"]})[0], 409)
+        self.assertEqual(recent_optimize_decisions(), [])
+
+    def test_copy_all_refreshes_packets_without_recording_a_decision(self):
+        self.item["cleanup_prompt"] = "old cached cleanup prompt"
+        status, result = self.post("/api/optimize-review", {"all": True})
+        self.assertEqual(status, 200)
+        self.assertNotIn("old cached cleanup prompt", result["cleanup_prompt"])
+        self.assertEqual(recent_optimize_decisions(), [])

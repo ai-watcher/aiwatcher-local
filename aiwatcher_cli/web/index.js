@@ -218,6 +218,23 @@ async function copyOptimizeRuntimeCommand(command, button = null) {
     if (row) row.classList.add('review-command-copied');
   }
 }
+let optimizeCopyRequestToken = 0;
+async function copyOptimizeCleanupPrompt(candidateId = '', button = null) {
+  const token = ++optimizeCopyRequestToken;
+  const label = button?.textContent || 'Copy cleanup prompt';
+  if (button) { button.disabled = true; button.textContent = 'Checking evidence…'; }
+  try {
+    const result = await postJson('/api/optimize-review', {
+      candidate_id: candidateId, all: !candidateId,
+      days: Number(document.getElementById('days')?.value || 7),
+    });
+    if (token !== optimizeCopyRequestToken) return;
+    if (result.error) throw new Error(result.error);
+    if (!result.cleanup_prompt) throw new Error('Review packet unavailable. Refresh Optimize.');
+    await copyText(result.cleanup_prompt, candidateId ? 'Current cleanup prompt copied' : 'Current review queue copied');
+  } catch (error) { showToast(error.message || 'Could not check Optimize evidence', 'error'); }
+  finally { if (button) { button.disabled = false; button.textContent = label; } }
+}
 let pendingOptimizeReview = null;
 let optimizeReviewRequestToken = 0;
 function closeOptimizeReview() {
@@ -2431,7 +2448,15 @@ function renderChangeTotals(rows, meta, unbanked) {
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);
 }
-function renderOptimizeWorkspace(optimize) {
+function renderOptimizeWorkspace(optimize, cache = {}) {
+  const state = optimize?.review_state;
+  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 2);
+  if (state === 'error' || cache.error) {
+    return `<div role="status" class="verdict-card"><h3>Optimize evidence refresh failed</h3><p>Copying is paused until the evidence is ready.</p><button onclick="load(false, true)">Retry evidence refresh</button></div>`;
+  }
+  if (state === 'refreshing' || cache.refreshing || ['building', 'refreshing', 'stale'].includes(cache.status) || outdated) {
+    return `<div role="status" aria-live="polite" class="verdict-card"><h3>Updating Optimize evidence…</h3><p>Matching session identities and checking recent activity. Copy and review controls will appear when the packet is ready.</p></div>`;
+  }
   if (!optimize) return '<div class="empty">Workspace optimization evidence is still building.</div>';
   const candidates = optimize.candidates || [];
   const checklist = optimize.checklist || '';
@@ -2469,7 +2494,7 @@ function renderOptimizeWorkspace(optimize) {
         </div></details>` : ''}
       </div>
       <div class="actions optimize-card-actions">
-        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
+        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>` : `<button class="btn-primary" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>`}
         ${aiCleanup}
         <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
         <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
@@ -2477,7 +2502,7 @@ function renderOptimizeWorkspace(optimize) {
     </div>`;
     }).join('')}</div>
     <div class="copy-row" style="margin-top:12px">
-      <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
+      <button class="btn-quiet" onclick="copyOptimizeCleanupPrompt('', this)">Copy all review items</button>
     </div>`;
 }
 function renderRuntimeOptimizeCard(item, cleanupPrompt) {
@@ -2518,7 +2543,7 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
     </div>
     <div class="actions optimize-card-actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
-      <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
+      <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}
       <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
       <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
@@ -6702,7 +6727,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('sessionContextHealth').innerHTML =
     renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
-  document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
+  document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null, data.cache || {});
   // The summary has to carry the count, or a collapsed card hides the fact that
   // there is anything in it at all.
   const optimizeSummary = document.getElementById('optimizeWorkspaceSummary');

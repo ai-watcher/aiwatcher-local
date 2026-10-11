@@ -233,7 +233,7 @@ checks (`{"enabled": bool}`, off by default),
 `POST /api/optimize-review` returns the dashboard's current review snapshot for
 `candidate_id` (optional `days`). It rechecks bounded local session/runtime
 metadata and returns exact review identities, known activity, unknown checks and
-an `evidence_hash`. Missing/changed candidates return 409. It performs no cleanup.
+an `evidence_hash` and the freshly generated `cleanup_prompt`. The basic copy button uses this endpoint without a model call; `{"all": true}` returns the current review queue. Missing/changed candidates or unfinished/outdated evidence return 409, with `status: "refreshing"` or `"error"` when copying must wait. It performs no cleanup.
 
 `/api/optimize-decision` records a workspace review decision. The current dashboard
 sends `candidate_id`, the snapshot `evidence_hash`, `decision: "reviewed"`, and

@@ -206,7 +206,7 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # 11: Codex chat labels use the concise name field and reject prompt-mirroring caches.
 # 12: evidence-accurate activity, Fresh Start, and historical-token semantics.
 # 13: session payloads carry separate repository and checkout identities.
-SUMMARY_CACHE_SCHEMA_VERSION = 13
+SUMMARY_CACHE_SCHEMA_VERSION = 14
 
 
 def restart_command(
@@ -1292,6 +1292,27 @@ def _optimize_review_days(value) -> int:
         return 7
 
 
+def _optimize_contract_current(summary: dict[str, object]) -> bool:
+    optimize = summary.get("optimize")
+    if optimize is None:
+        return True
+    if not isinstance(optimize, dict) or not isinstance(optimize.get("candidates", []), list):
+        return False
+    return all(isinstance(item, dict) and item.get("review_contract_version") == 2
+               for item in optimize.get("candidates", []))
+
+
+def _optimize_readiness(summary: dict[str, object]) -> dict[str, str]:
+    cache = summary.get("cache") or {}
+    if cache.get("error"):
+        return {"status": "error", "error": "Optimize evidence refresh failed. Retry the refresh before copying or reviewing."}
+    if (summary.get("summary_complete") is False or cache.get("refreshing")
+            or cache.get("status") in {"building", "refreshing", "stale"}
+            or not _optimize_contract_current(summary)):
+        return {"status": "refreshing", "error": "Optimize evidence is updating. Wait for the review packet to finish, then try again."}
+    return {"status": "ready"}
+
+
 def _refresh_optimize_review_candidate(candidate: dict[str, object]) -> dict[str, object]:
     """Recheck bounded local identities before composing or saving a review.
 
@@ -1304,6 +1325,8 @@ def _refresh_optimize_review_candidate(candidate: dict[str, object]) -> dict[str
         item["evidence_hash"] = _optimize_candidate_evidence_hash(item)
         return item
     if not candidate.get("sessions") and not candidate.get("project_activity"):
+        item["cleanup_prompt"] = _optimize_candidate_prompt(item)
+        item["evidence_hash"] = _optimize_candidate_evidence_hash(item)
         return item
     by_id = dict(_SESSION_INDEX)
     item["sessions"] = [session_review_identity(by_id[row["session_id"]], by_id)
@@ -3428,6 +3451,9 @@ def build_ai_assisted_optimize_cleanup_prompt(candidate_id: str, days: int = 7) 
     if not normalized_id:
         return {"error": "candidate_id is required"}
     summary = build_summary_cached(days)
+    readiness = _optimize_readiness(summary)
+    if readiness["status"] != "ready":
+        return readiness
     optimize = summary.get("optimize") if isinstance(summary.get("optimize"), dict) else {}
     candidates = optimize.get("candidates") if isinstance(optimize.get("candidates"), list) else []
     candidate = next(
@@ -6562,6 +6588,9 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
         "schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
         "error": _SUMMARY_REFRESH_ERROR,
     }
+    if isinstance(copy.get("optimize"), dict):
+        readiness = _optimize_readiness(copy)
+        copy["optimize"] = {**copy["optimize"], "review_state": readiness["status"], "review_message": readiness.get("error", "Evidence ready for review.")}
     return copy
 
 
@@ -6575,7 +6604,7 @@ def _read_summary_disk_cache(days: int, *, max_age_seconds: int = SUMMARY_DISK_T
         return None
     if raw.get("cache_schema_version") != SUMMARY_CACHE_SCHEMA_VERSION:
         return None
-    if raw.get("summary_complete") is not True:
+    if raw.get("summary_complete") is not True or not _optimize_contract_current(raw):
         return None
     generated_at = raw.get("generated_at")
     try:
@@ -6858,6 +6887,9 @@ def build_summary_cached(days: int = 7, *, force: bool = False) -> dict[str, obj
         refreshing = days in _SUMMARY_REFRESHING
         hit = cached[1] if cached and time.monotonic() - cached[0] <= SUMMARY_MEMORY_TTL_SECONDS else None
     if hit is not None:
+        if not _optimize_contract_current(hit):
+            refreshing = _maybe_refresh_summary_cache(days, force=True)
+            return _mark_summary_cache(hit, status="refreshing", source="memory", refreshing=refreshing)
         # Marking reads the state file and probes local runtimes; a cached
         # summary is replaced, never mutated, so that work needs no lock and
         # concurrent pollers no longer queue behind it.
@@ -9831,7 +9863,15 @@ class UIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/optimize-review":
             summary = build_summary_cached(_optimize_review_days(payload.get("days")))
+            readiness = _optimize_readiness(summary)
+            if readiness["status"] != "ready":
+                self._send(409, json.dumps(readiness), "application/json; charset=utf-8")
+                return
             candidates = (summary.get("optimize") or {}).get("candidates") or []
+            if payload.get("all") is True:
+                items = [_refresh_optimize_review_candidate(item) for item in candidates]
+                self._send(200, json.dumps({"cleanup_prompt": _optimize_checklist(items)}), "application/json; charset=utf-8")
+                return
             candidate = next((item for item in candidates if item.get("id") == payload.get("candidate_id")), None)
             if candidate is None:
                 self._send(409, json.dumps({"error": "Review item changed; refresh Optimize."}), "application/json; charset=utf-8")
@@ -9848,6 +9888,10 @@ class UIHandler(BaseHTTPRequestHandler):
                     raise ValueError("An exact candidate and review summary confirmation are required.")
                 if payload.get("candidate_id"):
                     summary = build_summary_cached(_optimize_review_days(payload.get("days")))
+                    readiness = _optimize_readiness(summary)
+                    if readiness["status"] != "ready":
+                        self._send(409, json.dumps(readiness), "application/json; charset=utf-8")
+                        return
                     candidate = next((item for item in (summary.get("optimize") or {}).get("candidates", [])
                                       if item.get("id") == payload["candidate_id"]), None)
                     candidate = _refresh_optimize_review_candidate(candidate) if candidate else None
