@@ -908,6 +908,13 @@ class DashboardWindowTests(unittest.TestCase):
         env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(self._state_dir.name, "state.json")})
         env.start()
         self.addCleanup(env.stop)
+        # Companion history is process-global, independent of the state file.
+        # A prior HTTP/presence test can leave an away digest that outranks every
+        # mocked recommendation here. Give each dashboard scenario fresh history.
+        for name in ("_LAST_COMPANION_POLL", "_AWAY_DIGEST"):
+            isolated = patch.object(ui, name, None)
+            isolated.start()
+            self.addCleanup(isolated.stop)
         self.addCleanup(self._wait_for_summary_refresh)
 
     @staticmethod

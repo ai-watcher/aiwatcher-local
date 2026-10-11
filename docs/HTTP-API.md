@@ -230,7 +230,17 @@ companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
 seen so it does not return (no body; the timestamp is the server's),
 `/api/update-auto-check` stores the Settings switch for automatic GitHub update
 checks (`{"enabled": bool}`, off by default),
-`/api/optimize-decision` records a workspace cleanup decision.
+`POST /api/optimize-review` returns the dashboard's current review snapshot for
+`candidate_id` (optional `days`). It rechecks bounded local session/runtime
+metadata and returns exact review identities, known activity, unknown checks and
+an `evidence_hash`. Missing/changed candidates return 409. It performs no cleanup.
+
+`/api/optimize-decision` records a workspace review decision. The current dashboard
+sends `candidate_id`, the snapshot `evidence_hash`, `decision: "reviewed"`, and
+`confirmed: true` after showing the summary. A changed hash returns 409; missing
+confirmation returns 400. Receipts record `cleanup_performed: false`, and quiet
+only the unchanged candidate for 24 hours. Legacy `marked_done` receipts remain
+readable; this endpoint does not archive, complete, delete or stop work.
 `/api/improve-decision` records local feedback on a current Improve evidence key
 (`{"insight_key": "...", "days": 7, "decision": "reviewed" | "later" | "expected" | "helpful" | "not_helpful"}`).
 It is same-origin only, validates the key against current server evidence, and

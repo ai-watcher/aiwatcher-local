@@ -29,6 +29,7 @@ jobs:
         run: |
           node --check aiwatcher_cli/web/index.js
           node --test tests/test-drawer-lifecycle.cjs
+          node --test tests/test-optimize-review.cjs
 
   test:
     strategy:

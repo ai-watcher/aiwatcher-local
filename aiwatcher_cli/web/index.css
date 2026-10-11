@@ -2372,3 +2372,15 @@
     .health-row:hover { background: var(--surface-hover); }
     tbody tr.clickable:focus-within,
     tbody tr:has(.row-action):focus-within { background: var(--surface-hover); }
+
+/* Optimize: a scoped review decision, with exact identities on demand. */
+.optimize-review-context { margin: 12px 0; padding: 12px 14px; border-left: 3px solid var(--accent, #78b7ff); background: var(--bg-muted); border-radius: var(--r-2); }
+.optimize-review-context p { margin: 0 0 10px; }
+.optimize-session-table { overflow-x: auto; margin-top: 10px; }
+.optimize-session-table table { width: 100%; border-collapse: collapse; min-width: 620px; }
+.optimize-session-table th, .optimize-session-table td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid var(--border, #7775); font-size: var(--fs-2); }
+.optimize-session-table code { overflow-wrap: anywhere; }
+.optimize-review-dialog { width: min(1040px, 94vw); max-height: 88vh; overflow: auto; padding: 24px; border: 1px solid var(--border, #7775); border-radius: var(--r-2); color: var(--text-bright); background: var(--bg-card); }
+.optimize-review-dialog::backdrop { background: #0009; }
+.optimize-review-dialog > .actions { position: sticky; bottom: -24px; background: var(--bg-card); padding: 18px 0 12px; flex-wrap: wrap; }
+@media (max-width: 640px) { .optimize-review-dialog { padding: 14px; } .optimize-review-context { padding: 10px; } }
