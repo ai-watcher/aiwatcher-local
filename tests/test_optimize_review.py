@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -123,3 +124,29 @@ class OptimizeReviewTests(unittest.TestCase):
     def test_oversized_review_is_not_silently_truncated(self):
         with self.assertRaises(ai_assist.AiAssistUnavailable):
             ai_assist.compose_optimize_cleanup_prompt({}, local_prompt="x" * (ai_assist.MAX_OPTIMIZE_CLEANUP_INPUT_CHARS + 1))
+
+    def test_legacy_disk_cache_is_rejected_even_if_complete_and_recent(self):
+        path = Path(self.tmp.name) / "summary.json"
+        payload = {"generated_at": self.now.isoformat(), "summary_complete": True,
+                   "cache_schema_version": 13, "optimize": {"candidates": [{"id": "legacy"}]}}
+        with patch.object(ui, "_summary_cache_path", return_value=path):
+            path.write_text(json.dumps(payload))
+            self.assertIsNone(ui._read_summary_disk_cache(7))
+            payload["cache_schema_version"] = ui.SUMMARY_CACHE_SCHEMA_VERSION
+            path.write_text(json.dumps(payload))
+            self.assertIsNone(ui._read_summary_disk_cache(7))
+
+    def test_legacy_memory_candidate_starts_refresh_instead_of_becoming_ready(self):
+        legacy = {"optimize": {"candidates": [{"id": "legacy", "cleanup_prompt": "old"}]}}
+        with patch.dict(ui._SUMMARY_CACHE, {7: (time.monotonic(), legacy)}, clear=True), patch.object(ui, "_maybe_refresh_summary_cache", return_value=True) as refresh, patch.object(ui, "_mark_summary_cache", side_effect=lambda data, **flags: flags):
+            result = ui.build_summary_cached(7)
+        refresh.assert_called_once_with(7, force=True)
+        self.assertEqual(result["status"], "refreshing")
+
+    def test_ai_composition_is_paused_before_any_model_call_during_refresh(self):
+        item = {"id": "candidate", "review_contract_version": 2}
+        summary = {"cache": {"refreshing": True}, "optimize": {"candidates": [item]}}
+        with patch.object(ui, "build_summary_cached", return_value=summary), patch.object(ui, "compose_optimize_cleanup_prompt") as compose:
+            result = ui.build_ai_assisted_optimize_cleanup_prompt("candidate")
+        self.assertEqual(result["status"], "refreshing")
+        compose.assert_not_called()

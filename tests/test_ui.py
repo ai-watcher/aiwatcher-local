@@ -3229,6 +3229,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_ai_assisted_optimize_cleanup_prompt_uses_cache(self) -> None:
         candidate = {
             "id": "sessions:/repo/app",
+            "review_contract_version": 2,
             "kind": "session_cluster",
             "title": "Archive completed or stale chats",
             "project": "repo/app",
@@ -3294,6 +3295,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_ai_assist_provider_auth_failure_marks_key_rejected(self) -> None:
         candidate = {
             "id": "sessions:/repo/app",
+            "review_contract_version": 2,
             "kind": "session_cluster",
             "title": "Archive completed or stale chats",
             "project": "repo/app",
@@ -3346,6 +3348,7 @@ class DashboardWindowTests(unittest.TestCase):
     def _cleanup_candidate(self) -> dict:
         candidate = {
             "id": "sessions:/repo/app",
+            "review_contract_version": 2,
             "kind": "session_cluster",
             "title": "Archive completed or stale chats",
             "project": "repo/app",
@@ -3463,7 +3466,7 @@ class DashboardWindowTests(unittest.TestCase):
                 first = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
                 spend = ui.ai_assist_day_spend()
                 # Different evidence so the second click is not a cache hit.
-                candidate["evidence_hash"] = "other"
+                candidate["last_activity"] = "2026-10-11T12:00:00+00:00"
                 second = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
                 runs = recent_ai_assist_runs(limit=3)
 
