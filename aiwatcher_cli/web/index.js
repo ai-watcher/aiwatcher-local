@@ -218,12 +218,71 @@ async function copyOptimizeRuntimeCommand(command, button = null) {
     if (row) row.classList.add('review-command-copied');
   }
 }
-async function recordOptimizeDecision(decision, project = '', impact = '', button = null) {
+let pendingOptimizeReview = null;
+let optimizeReviewRequestToken = 0;
+function closeOptimizeReview() {
+  optimizeReviewRequestToken++;
+  pendingOptimizeReview = null;
+  document.getElementById('optimizeReview').close();
+}
+function formatOptimizeTime(value) {
+  const date = new Date(value || '');
+  return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  });
+}
+function renderOptimizeReviewEvidence(item, expanded = false) {
+  const activity = item.project_activity || {};
+  const rows = item.sessions || [];
+  return `<div class="optimize-review-context">
+    <p><strong>Why review:</strong> ${esc(item.selection_rule || item.why_inactive || item.summary || '')}</p>
+    ${activity.session_id ? `<p><strong>Latest project activity:</strong> ${esc(activity.title || activity.session_id)} · ${esc(formatOptimizeTime(activity.last_activity))}<br>${esc(activity.status || '')}</p>` : ''}
+    <p><strong>Review scope:</strong> ${esc(item.review_scope || `${item.session_count || 0} items`)}${item.excluded_internal_count ? ` · ${esc(item.excluded_internal_count)} internal approval/session logs excluded` : ''}</p>
+    ${rows.length ? `<details class="aiw-details" ${expanded ? 'open' : ''}><summary>Inspect ${rows.length} exact sessions and ownership</summary><div class="optimize-session-table"><table><thead><tr><th>Exact session</th><th>Owner / role</th><th>Last observed state</th></tr></thead><tbody>${rows.map(row => `<tr>
+      <td><strong>${esc(row.title || 'Untitled session')}</strong><br><code>${esc(row.session_id)}</code><br><button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button></td>
+      <td>${esc(row.tool)} · ${esc(row.surface || 'unknown')}<br>${esc(row.session_role || 'unknown')}${row.parent_session_id ? `<br>Parent: <code>${esc(row.parent_session_id)}</code><br>${esc(row.parent_title || 'Parent title unavailable')}` : ''}</td>
+      <td>${esc(formatOptimizeTime(row.last_activity))}<br>Turn: ${esc(row.last_turn_status || 'unknown')}<br>${row.final_response_observed ? 'Final response event observed; text needs review' : 'Final response unverified'}<br>${esc(row.runtime_status || 'Live state unverified')}</td>
+    </tr>`).join('')}</tbody></table></div></details>` : ''}
+    ${item.omitted_session_count ? `<p class="receipt-note">${esc(item.omitted_session_count)} older sessions are outside this bounded review. No recommendation applies to them.</p>` : ''}
+    <p class="receipt-note">${esc(item.reward_basis || 'Resource savings are unmeasured. Review in the owning app before any separate cleanup action.')}</p>
+  </div>`;
+}
+async function openOptimizeReview(candidateId) {
+  const token = ++optimizeReviewRequestToken;
+  try {
+    const days = Number(document.getElementById('days')?.value || 7);
+    const item = await postJson('/api/optimize-review', { candidate_id: candidateId, days });
+    if (token !== optimizeReviewRequestToken) return;
+    if (item.error) throw new Error(item.error);
+    pendingOptimizeReview = { item, days };
+    const dialog = document.getElementById('optimizeReview');
+    document.getElementById('optimizeReviewBody').innerHTML = `<h3>${esc(item.title)}</h3>
+      <p>Confirm the review of this exact snapshot. This records a review and quiets this unchanged item for 24 hours. It does not archive chats, remove workspaces, stop runtimes or mark work complete.</p>
+      ${renderOptimizeReviewEvidence(item, true)}
+      <p><strong>Before any cleanup:</strong> verify the latest ask and final response, parent activity, actual checkout and live runtime in the owning app. Missing checks stay unknown; a completed turn does not prove completed work.</p>`;
+    dialog.showModal();
+  } catch (error) { showToast(error.message || 'Could not load review', 'error'); }
+}
+async function confirmOptimizeReview(button) {
+  if (!pendingOptimizeReview) return;
+  const {item, days} = pendingOptimizeReview;
+  button.disabled = true;
+  const saved = await recordOptimizeDecision('reviewed', item.project_full || '', item.impact_label || '', null, item, true, days);
+  button.disabled = false;
+  if (saved && pendingOptimizeReview?.item === item) {
+    closeOptimizeReview();
+    pendingOptimizeReview = null;
+    const card = Array.from(document.querySelectorAll('[data-optimize-id]')).find(row => row.dataset.optimizeId === item.id);
+    if (card) card.remove();
+  }
+}
+async function recordOptimizeDecision(decision, project = '', impact = '', button = null, item = null, confirmed = false, days = null) {
+  item = item || (currentData?.optimize?.candidates || []).find(row => row.id === button?.dataset.candidate);
   try {
     const res = await fetch('/api/optimize-decision', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision, project, reason: decision === 'skipped' ? 'User skipped workspace cleanup nudge.' : 'User marked workspace cleanup reviewed.' }),
+      body: JSON.stringify({ decision, project, candidate_id: item?.id, evidence_hash: item?.evidence_hash, confirmed, days: days || Number(document.getElementById('days')?.value || 7), reason: decision === 'skipped' ? 'User skipped workspace cleanup nudge.' : 'User confirmed the review summary; cleanup not performed.' }),
     });
     if (!res.ok) {
       const payload = await res.json().catch(() => ({}));
@@ -240,13 +299,15 @@ async function recordOptimizeDecision(decision, project = '', impact = '', butto
       reward.hidden = false;
       reward.className = decision === 'skipped' ? 'verdict-card' : 'verdict-card low';
       reward.innerHTML = `<h3>${decision === 'skipped' ? 'Nudge skipped' : 'Review saved'}</h3>
-        <p>${decision === 'skipped' ? 'AIWatcher will quiet this Optimize nudge for 3 days.' : 'AIWatcher recorded that you reviewed this item and will quiet it for 3 days.'}</p>
+        <p>${decision === 'skipped' ? 'AIWatcher will quiet this Optimize nudge for 24 hours.' : 'AIWatcher recorded that you reviewed this item and will quiet it for 24 hours.'}</p>
         ${impact ? `<div class="pill-row"><span class="pill">${esc(impact)}</span><span class="pill">No deletion performed</span></div>` : '<div class="pill-row"><span class="pill">No deletion performed</span></div>'}`;
       reward.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-    showToast(decision === 'skipped' ? 'Optimize nudge skipped for 3 days' : 'Optimize review saved for 3 days');
+    showToast(decision === 'skipped' ? 'Optimize nudge skipped for 24 hours' : 'Optimize review saved for 24 hours');
+    return true;
   } catch (error) {
     showToast(`Could not save Optimize decision: ${error.message || 'unknown error'}`, 'error');
+    return false;
   }
 }
 function optimizeAiAssistReady() {
@@ -2385,24 +2446,24 @@ function renderOptimizeWorkspace(optimize) {
       <div class="mini"><span class="label">Evidence</span><strong>${esc(optimize.evidence_label || 'Observed')}</strong></div>
       <div class="mini"><span class="label">Items</span><strong>${esc(candidates.length)}</strong></div>
     </div>
-    <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
+    <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Start with one review batch. Verify current work in the owning app, then confirm the review summary. Only the unchanged item is quieted for 24 hours. Historical tokens are not cleanup savings.</p>
     <div class="action-queue">${candidates.map(item => {
       const cleanupPrompt = item.cleanup_prompt || checklist;
       const aiCleanup = optimizeAiButton(item.id || '');
       if (item.kind === 'stale_processes') {
         return renderRuntimeOptimizeCard(item, cleanupPrompt);
       }
-      const fullPath = item.project_full || item.project || '';
+      const fullPath = item.project_full || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
-      return `<div class="action-row optimize-card low">
+      return `<div class="action-row optimize-card low" data-optimize-id="${esc(item.id)}">
       <div class="optimize-card-copy">
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         ${pathLine}
-        <p class="receipt-note">Verify this is not active work before deciding whether to archive or clean it up.</p>
-        ${activityLine || item.evidence ? `<details class="aiw-details optimize-evidence"><summary>Review evidence</summary><div class="details-body">
+        ${renderOptimizeReviewEvidence(item)}
+        ${activityLine || item.evidence ? `<details class="aiw-details optimize-evidence"><summary>More evidence</summary><div class="details-body">
           ${activityLine}
           ${item.evidence ? `<p class="receipt-note">${esc(item.evidence)}</p>` : ''}
         </div></details>` : ''}
@@ -2410,8 +2471,8 @@ function renderOptimizeWorkspace(optimize) {
       <div class="actions optimize-card-actions">
         ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
         ${aiCleanup}
-        <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
-        <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
+        <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
+        <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
       </div>
     </div>`;
     }).join('')}</div>
@@ -2425,7 +2486,7 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
     : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Report stale/orphaned runtimes you recognize for a separate user stop decision.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   const aiCleanup = optimizeAiButton(item.id || '');
-  return `<div class="action-row optimize-card low runtime-review-card">
+  return `<div class="action-row optimize-card low runtime-review-card" data-optimize-id="${esc(item.id)}">
     <div class="optimize-card-copy">
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
       <p>${esc(item.review_summary || item.why_inactive || 'Review local AI runtimes; identify detached ones for a separate user decision.')}</p>
@@ -2434,6 +2495,7 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
         <span class="pill">${esc(item.impact_label || 'runtime clutter')}</span>
         <span class="pill">No auto-stop</span>
       </div>
+      ${renderOptimizeReviewEvidence(item)}
       <details class="aiw-details runtime-review-details">
         <summary>Safe runtime review steps</summary>
         <div class="details-body">
@@ -2458,8 +2520,8 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}
-      <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
-      <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
+      <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
+      <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
     </div>
   </div>`;
 }

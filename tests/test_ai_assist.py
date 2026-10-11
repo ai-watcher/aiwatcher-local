@@ -733,7 +733,7 @@ class AiAssistTests(unittest.TestCase):
                     "enabled_workflows": ["optimize_cleanup"],
                     "api_keys": {"openai": "sk-secret"},
                 },
-                local_prompt="AIWatcher Optimize cleanup prompt\nFull path: /repo/app\n" + ("x" * 20_000),
+                local_prompt="AIWatcher Optimize cleanup prompt\nFull path: /repo/app\nSafe to archive/review\nKeep active\nUnknown\nNext verification\nDo not delete files\n" + ("x" * 6_000),
             )
 
         payload = call.call_args.args[1][1]["content"]
@@ -747,7 +747,9 @@ class AiAssistTests(unittest.TestCase):
         self.assertIn("Full path: /repo/app", result["text"])
         self.assertEqual(result["structured"]["next_verification"], ["Open the owning app and verify the chat is done"])
         self.assertNotIn("sk-secret", payload)
-        self.assertLess(len(payload), 8_000)
+        self.assertLess(len(payload), ai_assist.MAX_OPTIMIZE_CLEANUP_INPUT_CHARS + 2000)
+        self.assertNotIn("Old Codex chat can be reviewed in the app", result["text"])
+        self.assertIn("No item is pre-approved", result["text"])
 
     def test_ask_aiwatcher_answer_composes_bounded_local_evidence(self) -> None:
         with (

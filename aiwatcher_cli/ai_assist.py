@@ -41,9 +41,9 @@ MAX_FRESH_START_INPUT_CHARS = 9000
 # could not be parsed, and were rejected as generic after being billed.
 MAX_FRESH_START_OUTPUT_TOKENS = 1400
 MAX_FRESH_START_BRIEF_CHARS = 6000
-MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 7000
+MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 24000
 MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS = 600
-MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS = 7000
+MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS = 28000
 MAX_ASK_INPUT_CHARS = 9000
 MAX_ASK_OUTPUT_TOKENS = 420
 MAX_ASK_ANSWER_CHARS = 2200
@@ -925,31 +925,16 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
 
 
 def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt: str) -> str:
-    safe = _clean_list(parsed.get("safe_to_archive_or_review") or parsed.get("safe_to_review"), limit=6)
-    keep = _clean_list(parsed.get("keep_active"), limit=6)
-    unknown = _clean_list(parsed.get("unknown"), limit=6)
-    next_verification = _clean_list(parsed.get("next_verification") or parsed.get("next_action"), limit=5)
-    guardrails = _clean_list(parsed.get("guardrails"), limit=6)
-    lines = [
-        "AIWatcher AI-assisted Optimize cleanup prompt",
-        "",
-        "Use this in a focused review session. The job is to classify local AI work safely, not to clean it up automatically.",
-        "Do not delete files, kill processes, archive chats, or rewrite history from this prompt.",
-        *_section("Safe to archive/review", safe or ["Only mark something safe after verifying it in the owning AI app, git worktree, or runtime tool."]),
-        *_section("Keep active", keep or ["Keep any session, worktree, or process that may still be connected to live work."]),
-        *_section("Unknown", unknown or ["Treat missing identity, stale metadata, and ambiguous ownership as unknown until verified."]),
-        *_section("Next verification", next_verification or ["Review the candidate below, choose one bucket, and report the evidence for that choice without performing cleanup."]),
-        *_section("Guardrails", guardrails or [
-            "Do not delete files or folders.",
-            "Do not kill processes.",
-            "Do not archive chats or sessions automatically.",
-            "Ask before any destructive or irreversible action.",
-        ]),
-        "",
-        "Local evidence to verify",
-        str(local_prompt or "").strip()[:MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS],
-    ]
-    return "\n".join(lines).strip()
+    # A composer has not visited the owning app. It cannot populate a safe bucket.
+    # Preserve the complete deterministic packet and instructions before suggestions.
+    questions = _clean_list(parsed.get("next_verification"), limit=5)
+    return "\n".join([
+        "AIWatcher AI-assisted Optimize cleanup prompt", "",
+        str(local_prompt or "").strip(), "",
+        "Optional AI verification questions (unverified suggestions, not classifications)",
+        *[f"- {question}" for question in questions],
+        "No item is pre-approved for archiving. Use the checks and user confirmation above.",
+    ]).strip()
 
 
 def _structured_ask_aiwatcher_text(parsed: dict[str, object], _packet: str) -> str:
@@ -1058,6 +1043,7 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
         "unknown: string[]\n"
         "next_verification: string[]\n"
         "guardrails: string[]\n\n"
+        "You have not checked the owning app. Leave safe_to_archive_or_review empty. Age, useful outcomes and token totals never prove completion. Supply specific next_verification questions using only packet identities. Do not classify candidates or weaken the provided guardrails. All values must be arrays of strings, never objects. "
         "The final prompt must help another AI session classify the candidate into those buckets, "
         "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
         "Keep this short and concrete."
@@ -1117,6 +1103,8 @@ def _compose(
     status = build_ai_assist_status(config)
     if not status.get("ready") or status.get("mode") == "off":
         raise AiAssistUnavailable(str(status.get("setup_hint") or "AI Assist is not ready."))
+    if spec.id == "optimize_cleanup" and len(normalized) > spec.max_input_chars:
+        raise AiAssistUnavailable("Optimize evidence is too large; use a smaller review batch. No identities or guardrails were silently truncated.")
     trimmed = normalized[:spec.max_input_chars]
     messages = [
         {"role": "system", "content": spec.system_prompt},
@@ -1137,6 +1125,16 @@ def _compose(
             model=str(response.get("model") or "") or None,
             usage=response.get("usage") if isinstance(response.get("usage"), dict) else {},
         )
+    if spec.id == "optimize_cleanup" and (
+        not isinstance(parsed, dict)
+        or not isinstance(parsed.get("next_verification"), list)
+        or not parsed["next_verification"]
+        or any(not isinstance(value, list) or any(not isinstance(item, str) for item in value)
+               for value in parsed.values())
+    ):
+        raise AiAssistRejected("AI Assist returned an invalid review schema; using the complete local review prompt.",
+                               provider=response.get("provider"), mode=response.get("mode"),
+                               model=response.get("model"), usage=response.get("usage") or {})
     final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
     bounded_text = final_text
     if len(bounded_text) > spec.max_result_chars:

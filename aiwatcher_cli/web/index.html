@@ -388,12 +388,18 @@
     <section id="optimizeWorkspace" class="card" style="margin-top:14px">
       <div class="section-title">
         <div><h2 id="optimizeWorkspaceSummary">Optimize workspace</h2>
-          <p class="optimize-lede">Unused AI sessions and scratch workspaces ready for review.</p></div>
+          <p class="optimize-lede">Review older AI work with current activity and ownership checks before deciding what to keep.</p></div>
         <span class="note-chip local">Private</span>
       </div>
       <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
     </section>
   </section>
+
+  <dialog id="optimizeReview" class="optimize-review-dialog" oncancel="closeOptimizeReview()">
+    <div id="optimizeReviewBody"></div>
+    <div class="actions"><button class="btn-primary" onclick="confirmOptimizeReview(this)">Confirm review · quiet for 24 hours</button>
+      <button class="btn-quiet" onclick="closeOptimizeReview()">Cancel</button></div>
+  </dialog>
 
   <section id="view-receipts" class="view" hidden>
     <!-- The claim, above the numbers that back it and the receipts that
