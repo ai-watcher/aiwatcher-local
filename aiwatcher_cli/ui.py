@@ -56,6 +56,8 @@ from .delivery_review import (
     build_work_receipt,
     format_work_receipt,
     hydrate_persisted_receipt,
+    work_receipt_evidence_hash,
+    work_receipt_matches_current_checkout,
 )
 from .delivery import ObjectiveClaim
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
@@ -75,6 +77,7 @@ from .local_state import (
     VALID_OUTCOMES,
     active_command_gate,
     active_prompt_gate,
+    approve_work_receipt,
     acquire_ai_assist_cloud_call_lock,
     ai_assist_cache_get,
     ai_assist_config,
@@ -282,6 +285,7 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/optimize-review",
     "/api/optimize-decision",
     "/api/delivery-review",
+    "/api/delivery-review-approve",
     "/api/delivery-reviews",
     "/api/delivery-review-viewed",
 })
@@ -3629,6 +3633,90 @@ def _handoff_options_from_payload(payload: dict[str, object], *, default_type: s
     }
 
 
+def _finalize_delivery_review(
+    payload: dict[str, object],
+    event_record: dict[str, object] | None,
+    *,
+    infer_objective: bool = True,
+) -> dict[str, object]:
+    """Attach transient objective, approval, and current-state facts to a review."""
+    objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
+    if (
+        infer_objective
+        and not objective.get("text")
+        and objective.get("provenance") != "user_confirmed"
+    ):
+        contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
+        for contribution in contributions:
+            if not isinstance(contribution, dict):
+                continue
+            session = _find_session_row(str(contribution.get("session_id") or ""))
+            if session is None:
+                continue
+            segments = segment_session_by_prompt(session.source_path, max_chars=500)
+            prompt = next((
+                str(segment.get("prompt") or "").strip()
+                for segment in segments
+                if not segment.get("compact_summary") and str(segment.get("prompt") or "").strip()
+            ), "")
+            if not prompt:
+                continue
+            objective = ObjectiveClaim(
+                provenance="inferred", confidence="low", text=prompt,
+            ).to_json()
+            payload["objective"] = objective
+            break
+    payload["objective_retained"] = bool(objective.get("text"))
+    payload["objective_label"] = (
+        "Objective inferred from a linked session; confirm before sharing"
+        if objective.get("provenance") == "inferred"
+        else (
+            "Objective confirmed; text is not retained"
+            if objective.get("provenance") == "user_confirmed"
+            else "Objective unavailable"
+        )
+    )
+    if objective.get("provenance") in {"inferred", "user_confirmed"}:
+        payload["attention"] = [
+            item for item in (payload.get("attention") or [])
+            if not str(item).startswith("Objective unavailable.")
+        ]
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    payload["ready"] = bool(
+        event.get("status") == "confirmed"
+        and not payload.get("viewed_at")
+        and not payload.get("superseded_by")
+    )
+    current_state_matches = work_receipt_matches_current_checkout(payload, event_record)
+    payload["current_state_matches"] = current_state_matches
+    evidence_hash = work_receipt_evidence_hash(payload)
+    payload["evidence_hash"] = evidence_hash
+    approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
+    payload["approval_valid"] = bool(
+        current_state_matches
+        and approval.get("status") == "approved"
+        and approval.get("evidence_hash") == evidence_hash
+        and approval.get("objective_hash") == objective.get("source_hash")
+    )
+    payload["approval_label"] = (
+        "Approved for this exact objective and Git evidence"
+        if payload["approval_valid"]
+        else (
+            "Approval is stale; review the changed evidence"
+            if approval.get("status") == "approved"
+            else "Not approved"
+        )
+    )
+    if not current_state_matches:
+        attention = list(payload.get("attention") or [])
+        message = "Checkout HEAD changed after this review; regenerate it before approval."
+        if message not in attention:
+            attention.append(message)
+        payload["attention"] = attention
+    payload["summary_text"] = format_work_receipt(payload)
+    return payload
+
+
 def build_delivery_reviews(*, limit: int = 20) -> dict[str, object]:
     """Return recent Local receipts with transient Git paths rehydrated."""
     events = {
@@ -3653,46 +3741,9 @@ def build_delivery_reviews(*, limit: int = 20) -> dict[str, object]:
         event_state = (str(event.get("checkout_id") or ""), str(event.get("head_sha") or ""))
         if event.get("status") == "candidate" and event_state in confirmed_states:
             continue
-        payload = hydrate_persisted_receipt(stored, events.get(str(event.get("event_id") or "")))
-        objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
-        if not objective.get("text"):
-            contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
-            for contribution in contributions:
-                if not isinstance(contribution, dict):
-                    continue
-                session = _find_session_row(str(contribution.get("session_id") or ""))
-                if session is None:
-                    continue
-                segments = segment_session_by_prompt(session.source_path, max_chars=500)
-                prompt = next((
-                    str(segment.get("prompt") or "").strip()
-                    for segment in segments
-                    if not segment.get("compact_summary") and str(segment.get("prompt") or "").strip()
-                ), "")
-                if not prompt:
-                    continue
-                objective = ObjectiveClaim(
-                    provenance="inferred", confidence="low", text=prompt,
-                ).to_json()
-                payload["objective"] = objective
-                break
-        payload["objective_retained"] = bool(objective.get("text"))
-        payload["objective_label"] = (
-            "Objective inferred from a linked session; confirm before sharing"
-            if objective.get("provenance") == "inferred"
-            else (
-                "Objective confirmed; text is not retained"
-                if objective.get("provenance") == "user_confirmed"
-                else "Objective unavailable"
-            )
-        )
-        payload["ready"] = bool(
-            event.get("status") == "confirmed"
-            and not payload.get("viewed_at")
-            and not payload.get("superseded_by")
-        )
-        payload["summary_text"] = format_work_receipt(payload)
-        reviews.append(payload)
+        event_record = events.get(str(event.get("event_id") or ""))
+        payload = hydrate_persisted_receipt(stored, event_record)
+        reviews.append(_finalize_delivery_review(payload, event_record))
     ready = [row for row in reviews if row.get("ready")]
     return {
         "reviews": reviews,
@@ -3760,23 +3811,80 @@ def build_explicit_delivery_review(payload: dict[str, object]) -> dict[str, obje
             confirmed, events.get(str(confirmed_event.get("event_id") or "")),
         )
         result["objective"] = receipt.objective.to_json()
-        result["ready"] = bool(not result.get("viewed_at") and not result.get("superseded_by"))
-        result["objective_retained"] = False
-        result["objective_label"] = (
-            objective or "Objective unavailable; enter it before copying the PR summary."
-        )
         result["transient_objective"] = bool(objective)
-        result["summary_text"] = format_work_receipt(result)
-        return result
+        return _finalize_delivery_review(
+            result,
+            events.get(str(confirmed_event.get("event_id") or "")),
+            infer_objective=False,
+        )
     result = receipt.to_json()
-    result["ready"] = False
-    result["objective_retained"] = False
-    result["objective_label"] = (
-        objective
-        if objective else "Objective unavailable"
+    stored = next((
+        row for row in recent_work_receipts(checkout_id=receipt.snapshot.checkout_id, limit=50)
+        if isinstance(row, dict) and row.get("receipt_id") == receipt.receipt_id
+    ), None)
+    if stored and isinstance(stored.get("approval"), dict):
+        result["approval"] = dict(stored["approval"])
+    event_record = next((
+        row for row in recent_delivery_events(checkout_id=receipt.snapshot.checkout_id, limit=100)
+        if isinstance(row, dict) and row.get("event_id") == receipt.event.event_id
+    ), None)
+    return _finalize_delivery_review(
+        result,
+        event_record,
+        infer_objective=False,
     )
-    result["summary_text"] = format_work_receipt(receipt)
-    return result
+
+
+def approve_delivery_review(payload: dict[str, object]) -> dict[str, object]:
+    """Approve one exact review after validating objective and current checkout state."""
+    if payload.get("confirmed") is not True:
+        return {"error": "Explicit confirmation is required", "http_status": 400}
+    receipt_id = str(payload.get("receipt_id") or "").strip()[:160]
+    objective_text = str(payload.get("objective") or "").strip()[:2_000]
+    submitted_hash = str(payload.get("evidence_hash") or "").strip().lower()
+    if not receipt_id:
+        return {"error": "receipt_id is required", "http_status": 400}
+    if not objective_text:
+        return {"error": "Confirm the objective before approving this summary", "http_status": 400}
+    stored = next((
+        row for row in recent_work_receipts(limit=100)
+        if isinstance(row, dict) and row.get("receipt_id") == receipt_id
+    ), None)
+    if stored is None:
+        return {"error": "delivery review not found", "http_status": 404}
+    if stored.get("superseded_by"):
+        return {"error": "delivery review was superseded; regenerate it", "http_status": 409}
+    stored_event = stored.get("event") if isinstance(stored.get("event"), dict) else {}
+    event_record = next((
+        row for row in recent_delivery_events(limit=500)
+        if isinstance(row, dict) and row.get("event_id") == stored_event.get("event_id")
+    ), None)
+    review = hydrate_persisted_receipt(stored, event_record)
+    objective = ObjectiveClaim(
+        provenance="user_confirmed", confidence="high", text=objective_text,
+        confirmed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    review["objective"] = objective.to_json()
+    review = _finalize_delivery_review(review, event_record, infer_objective=False)
+    expected_hash = str(review.get("evidence_hash") or "")
+    if submitted_hash != expected_hash:
+        return {"error": "delivery evidence changed; review the refreshed summary", "http_status": 409}
+    if not work_receipt_matches_current_checkout(review, event_record):
+        return {"error": "checkout HEAD changed; regenerate the delivery review", "http_status": 409}
+    try:
+        approved = approve_work_receipt(
+            receipt_id,
+            evidence_hash=expected_hash,
+            objective_hash=str(objective.source_hash or ""),
+        )
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc), "http_status": 500}
+    if approved is None:
+        return {"error": "delivery review not found", "http_status": 404}
+    result = hydrate_persisted_receipt(approved, event_record)
+    result["objective"] = objective.to_json()
+    result["transient_objective"] = True
+    return _finalize_delivery_review(result, event_record, infer_objective=False)
 
 
 def build_report(days: int = 7) -> dict[str, object]:
@@ -9689,6 +9797,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/update-apply",
             "/api/update-auto-check",
             "/api/delivery-review",
+            "/api/delivery-review-approve",
             "/api/delivery-review-viewed",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
@@ -9724,6 +9833,14 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             response = build_explicit_delivery_review(payload)
             self._send(400 if response.get("error") else 200, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/delivery-review-approve":
+            if not isinstance(payload, dict):
+                self._send(400, json.dumps({"error": "Expected a JSON object"}), "application/json; charset=utf-8")
+                return
+            response = approve_delivery_review(payload)
+            status = int(response.pop("http_status", 200))
+            self._send(status, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/delivery-review-viewed":
             receipt_id = str(payload.get("receipt_id") or "").strip()

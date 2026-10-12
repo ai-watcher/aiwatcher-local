@@ -5003,6 +5003,16 @@ function deliveryReviewCard(review) {
   const objective = objectiveClaim.provenance === 'inferred'
     ? `${objectiveText} (inferred from linked session; confirm before sharing)`
     : objectiveText;
+  const objectiveAvailable = Boolean(objectiveClaim.text);
+  const approved = review.approval_valid === true;
+  const hadApproval = Boolean((review.approval || {}).approved_at);
+  const approvalButton = approved
+    ? ''
+    : `<button class="btn-primary" onclick="approveDeliveryReview(${jsArg(review.receipt_id || '')})" ${objectiveAvailable && review.current_state_matches ? '' : 'disabled'}>${hadApproval ? 'Reapprove changed summary' : 'Confirm objective & approve'}</button>`;
+  const copyDisabled = approved && objectiveAvailable ? '' : 'disabled';
+  const approvalStatus = approved
+    ? (objectiveAvailable ? 'Approved for this exact evidence' : 'Approved; re-enter the objective to copy the summary')
+    : (review.current_state_matches ? (objectiveAvailable ? 'Approval required before copying' : 'Enter or infer an objective before approval') : 'Checkout changed; regenerate this review');
   const verification = checks.length
     ? `<ul>${checks.slice(0, 5).map(row => `<li><strong>${esc(row.runner || 'Check')}</strong>: ${esc(row.status || 'result unknown')} <span class="sub">(${esc(row.scope || 'unknown scope')})</span></li>`).join('')}</ul>`
     : '<p>No verification is bound to this exact Git state.</p>';
@@ -5031,9 +5041,10 @@ function deliveryReviewCard(review) {
       </div>
     </details>
     <div class="delivery-review-actions">
-      <button class="btn-primary" onclick="copyDeliverySummary(${jsArg(review.receipt_id || '')})">Copy PR summary</button>
+      ${approvalButton}
+      <button class="btn-quiet" onclick="copyDeliverySummary(${jsArg(review.receipt_id || '')})" ${copyDisabled}>Copy PR summary</button>
       ${event.pull_request_url ? `<a class="btn-quiet" href="${esc(event.pull_request_url)}" target="_blank" rel="noreferrer">Open pull request</a>` : ''}
-      <span class="sub">${review.viewed_at ? 'Reviewed' : (review.ready ? 'Ready to review' : 'Not a confirmed remote delivery')}</span>
+      <span class="sub">${esc(approvalStatus)}${event.status === 'confirmed' ? '' : ' · Local candidate; remote delivery is not confirmed'}</span>
     </div>
   </article>`;
 }
@@ -5137,6 +5148,41 @@ async function markDeliveryReviewViewed(receiptId) {
   }
 }
 
+async function approveDeliveryReview(receiptId) {
+  const review = deliveryReviewsCache.find(row => row.receipt_id === receiptId);
+  const objective = review && review.objective ? String(review.objective.text || '').trim() : '';
+  if (!review || !objective) {
+    showToast('Enter or infer an objective before approval.', 'error');
+    return;
+  }
+  const ok = window.confirm('Approve this objective and exact Git evidence for the PR summary?');
+  if (!ok) return;
+  try {
+    const response = await fetch('/api/delivery-review-approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receipt_id: receiptId,
+        evidence_hash: review.evidence_hash,
+        objective,
+        confirmed: true,
+      }),
+    });
+    const updated = await response.json();
+    if (!response.ok || updated.error) throw new Error(updated.error || 'approval failed');
+    deliveryReviewTransient = updated;
+    deliveryReviewsCache = deliveryReviewsCache.map(row => row.receipt_id === receiptId ? updated : row);
+    renderDeliveryReviews({
+      reviews: deliveryReviewsCache,
+      privacy: deliveryReviewPrivacy,
+      automatic_coverage: deliveryReviewCoverage,
+    });
+    focusDeliveryReview(receiptId);
+    showToast('PR summary approved for this exact evidence.');
+  } catch (error) {
+    showToast(`Could not approve this summary: ${error.message || 'unknown error'}`, 'error');
+  }
+}
+
 async function loadDeliveryReviews(options = {}) {
   if (deliveryReviewsLoading) {
     if (options.markViewed) deliveryReviewPendingView = true;
@@ -5148,8 +5194,12 @@ async function loadDeliveryReviews(options = {}) {
     if (!response.ok) throw new Error('load failed');
     const data = await response.json();
     if (deliveryReviewTransient) {
-      data.reviews = (data.reviews || []).map(row =>
-        row.receipt_id === deliveryReviewTransient.receipt_id ? deliveryReviewTransient : row);
+      const rows = data.reviews || [];
+      const includesTransient = rows.some(row =>
+        row.receipt_id === deliveryReviewTransient.receipt_id);
+      data.reviews = includesTransient
+        ? rows.map(row => row.receipt_id === deliveryReviewTransient.receipt_id ? deliveryReviewTransient : row)
+        : [deliveryReviewTransient, ...rows];
     }
     renderDeliveryReviews(data);
     renderDeliveryReviewTile(data.latest_ready);
@@ -5188,7 +5238,16 @@ async function createDeliveryCandidate() {
     const review = await response.json();
     if (!response.ok || review.error) throw new Error(review.error || 'review failed');
     deliveryReviewTransient = review;
-    await loadDeliveryReviews();
+    const existing = deliveryReviewsCache.findIndex(row => row.receipt_id === review.receipt_id);
+    deliveryReviewsCache = existing >= 0
+      ? deliveryReviewsCache.map((row, index) => index === existing ? review : row)
+      : [review, ...deliveryReviewsCache];
+    renderDeliveryReviews({
+      reviews: deliveryReviewsCache,
+      privacy: deliveryReviewPrivacy,
+      automatic_coverage: deliveryReviewCoverage,
+    });
+    renderDeliveryReviewTile(deliveryReviewsCache.find(row => row.ready));
     focusDeliveryReview(review.receipt_id);
     showToast(
       (review.event || {}).status === 'confirmed'
@@ -5204,7 +5263,10 @@ async function createDeliveryCandidate() {
 
 function copyDeliverySummary(receiptId) {
   const review = deliveryReviewsCache.find(row => row.receipt_id === receiptId);
-  if (!review) return false;
+  if (!review || !review.approval_valid || !(review.objective || {}).text) {
+    showToast('Approve the exact summary and keep its objective visible before copying.', 'error');
+    return false;
+  }
   return copyText(review.summary_text || '', 'PR summary copied');
 }
 

@@ -27,6 +27,8 @@ function review(status = 'candidate') {
       changed_files: ['src/app.py'], changed_file_count: 1, lines_added: 4, lines_removed: 1,
     },
     objective_label: status === 'confirmed' ? 'Objective confirmed; text is not retained' : 'Objective unavailable',
+    objective: { provenance: 'user_confirmed', text: 'Deliver exact review evidence.' },
+    evidence_hash: 'e'.repeat(64), current_state_matches: true, approval_valid: false,
     verifications: [
       { runner: 'unit tests', status: 'passed', scope: 'project_default', exact_state: true },
       { runner: 'old tests', status: 'passed', scope: 'project_default', exact_state: false },
@@ -66,8 +68,75 @@ test('review cards distinguish exact verification from stale checks', () => {
   assert.match(card, /Push confirmed/);
   assert.match(card, /unit tests/);
   assert.doesNotMatch(card, /old tests/);
-  assert.match(card, /Objective confirmed; text is not retained/);
+  assert.match(card, /Deliver exact review evidence/);
   assert.match(card, /src\/app.py/);
+  assert.match(card, /Confirm objective &amp; approve|Confirm objective & approve/);
+  assert.match(card, /<button[^>]*disabled>Copy PR summary<\/button>/);
+});
+
+test('an approved exact review enables copying and removes the approval action', () => {
+  const ctx = vm.createContext({
+    esc: value => String(value), jsArg: value => JSON.stringify(value),
+    deliveryStatusLabel: () => 'Push confirmed', deliveryDestination: () => 'feature',
+  });
+  vm.runInContext(extract('deliveryReviewCard'), ctx);
+  const item = review('confirmed');
+  item.approval_valid = true;
+  item.approval = { approved_at: '2026-10-12T12:00:00Z' };
+  const card = ctx.deliveryReviewCard(item);
+  assert.doesNotMatch(card, /Confirm objective/);
+  assert.match(card, /Approved for this exact evidence/);
+  assert.doesNotMatch(card, /<button[^>]*disabled>Copy PR summary<\/button>/);
+});
+
+test('approval posts the exact evidence and explicit confirmation', async () => {
+  const requests = [];
+  const item = review('candidate');
+  const updated = { ...item, approval_valid: true };
+  const ctx = vm.createContext({
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => updated };
+    },
+    window: { confirm: () => true },
+    renderDeliveryReviews() {}, focusDeliveryReview() {}, showToast() {},
+  });
+  vm.runInContext("let deliveryReviewsCache = []; let deliveryReviewTransient = null; let deliveryReviewPrivacy = ''; let deliveryReviewCoverage = '';", ctx);
+  vm.runInContext(extract('approveDeliveryReview'), ctx);
+  ctx.item = item;
+  vm.runInContext('deliveryReviewsCache.push(item)', ctx);
+  await ctx.approveDeliveryReview(item.receipt_id);
+  assert.equal(requests[0].url, '/api/delivery-review-approve');
+  const body = JSON.parse(requests[0].options.body);
+  assert.equal(body.evidence_hash, item.evidence_hash);
+  assert.equal(body.objective, item.objective.text);
+  assert.equal(body.confirmed, true);
+});
+
+test('checkout review renders its transient objective while a background load is active', async () => {
+  const previous = review('candidate');
+  previous.objective = { provenance: 'user_confirmed', text: null };
+  const updated = review('candidate');
+  const nodes = {
+    deliveryReviewProject: { value: '/repo' },
+    deliveryReviewObjective: { value: updated.objective.text },
+    deliveryReviewCreateButton: { disabled: false, isConnected: true },
+  };
+  let rendered = null;
+  const ctx = vm.createContext({
+    fetch: async () => ({ ok: true, json: async () => updated }),
+    document: { getElementById: id => nodes[id] || null },
+    renderDeliveryReviews: data => { rendered = data; },
+    renderDeliveryReviewTile() {}, focusDeliveryReview() {}, showToast() {},
+  });
+  vm.runInContext("let deliveryReviewsLoading = true; let deliveryReviewTransient = null; let deliveryReviewsCache = []; let deliveryReviewPrivacy = 'private'; let deliveryReviewCoverage = 'bounded';", ctx);
+  ctx.previous = previous;
+  vm.runInContext('deliveryReviewsCache.push(previous)', ctx);
+  vm.runInContext(extract('createDeliveryCandidate'), ctx);
+  await ctx.createDeliveryCandidate();
+  assert.equal(rendered.reviews.length, 1);
+  assert.equal(rendered.reviews[0].objective.text, updated.objective.text);
+  assert.equal(nodes.deliveryReviewCreateButton.disabled, false);
 });
 
 test('loading Prove marks confirmed ready evidence but not candidates', async () => {
@@ -92,6 +161,32 @@ test('loading Prove marks confirmed ready evidence but not candidates', async ()
   vm.runInContext(extract('loadDeliveryReviews'), ctx);
   await ctx.loadDeliveryReviews({ markViewed: true });
   assert.deepEqual(marked, ['receipt-confirmed']);
+});
+
+test('a late background response cannot drop a newly created transient review', async () => {
+  const stale = review('candidate');
+  const transient = { ...review('candidate'), receipt_id: 'receipt-new' };
+  let rendered = null;
+  const nodes = {
+    deliveryReviews: { hidden: true },
+    deliveryReviewBody: { innerHTML: '' },
+  };
+  const ctx = vm.createContext({
+    URLSearchParams,
+    location: { search: '' },
+    fetch: async () => ({ ok: true, json: async () => ({ reviews: [stale] }) }),
+    deliveryReviewLauncher: () => '', deliveryReviewCard: () => '', esc: value => String(value),
+    renderDeliveryReviewTile() {}, focusDeliveryReview() {}, markDeliveryReviewViewed: async () => {},
+    document: { getElementById: id => nodes[id] || null },
+  });
+  vm.runInContext("let deliveryReviewsLoading = false; let deliveryReviewTransient = null; let deliveryReviewsCache = []; let deliveryReviewPendingView = false; let deliveryReviewPrivacy = ''; let deliveryReviewCoverage = '';", ctx);
+  ctx.transient = transient;
+  vm.runInContext('deliveryReviewTransient = transient', ctx);
+  vm.runInContext(extract('renderDeliveryReviews'), ctx);
+  ctx.renderDeliveryReviews = data => { rendered = data; };
+  vm.runInContext(extract('loadDeliveryReviews'), ctx);
+  await ctx.loadDeliveryReviews();
+  assert.equal(rendered.reviews.map(row => row.receipt_id).join(','), 'receipt-new,receipt-candidate');
 });
 
 test('the real page and responsive stylesheet include the complete delivery surface', () => {

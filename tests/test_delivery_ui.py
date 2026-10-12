@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timezone
 
-from aiwatcher_cli import ui
+from aiwatcher_cli import local_state, ui
 from aiwatcher_cli.delivery_review import build_work_receipt
 from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.scanner import LocalSession
@@ -105,6 +105,62 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertNotIn("Ship an evidence-backed delivery review.", stored["summary_text"])
         self.assertIn("aiwatcher push", ui.build_delivery_reviews()["automatic_coverage"])
 
+    def test_candidate_approval_is_explicit_privacy_safe_and_bound_to_head(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Ship the reviewed delivery evidence.",
+        })
+        self.assertFalse(candidate["approval_valid"])
+        self.assertTrue(candidate["current_state_matches"])
+        self.assertEqual(len(candidate["evidence_hash"]), 64)
+
+        rejected = ui.approve_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "objective": "Ship the reviewed delivery evidence.",
+        })
+        self.assertEqual(rejected["http_status"], 400)
+
+        approved = ui.approve_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "objective": "Ship the reviewed delivery evidence.",
+            "confirmed": True,
+        })
+        self.assertTrue(approved["approval_valid"])
+        self.assertEqual(approved["objective"]["provenance"], "user_confirmed")
+        self.assertNotIn("Objective unavailable", " ".join(approved["attention"]))
+        stored = local_state.recent_work_receipts()[0]
+        self.assertIsNone(stored["objective"]["text"])
+        self.assertEqual(stored["approval"]["evidence_hash"], candidate["evidence_hash"])
+        self.assertNotIn("Ship the reviewed delivery evidence.", json.dumps(stored))
+
+        listing = ui.build_delivery_reviews()["reviews"][0]
+        self.assertTrue(listing["approval_valid"])
+        self.assertIsNone(listing["objective"]["text"])
+
+        (self.repo / "later.txt").write_text("later\n", encoding="utf-8")
+        git(self.repo, "add", "later.txt")
+        git(self.repo, "commit", "-m", "later change")
+        stale = ui.build_delivery_reviews()["reviews"][0]
+        self.assertFalse(stale["approval_valid"])
+        self.assertFalse(stale["current_state_matches"])
+        self.assertIn("Checkout HEAD changed", " ".join(stale["attention"]))
+
+    def test_approval_rejects_a_stale_evidence_hash(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Ship exact evidence.",
+        })
+        result = ui.approve_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": "0" * 64,
+            "objective": "Ship exact evidence.",
+            "confirmed": True,
+        })
+        self.assertEqual(result["http_status"], 409)
+        self.assertIn("evidence changed", result["error"])
+
     def test_objective_is_inferred_on_demand_from_exactly_linked_session(self) -> None:
         identity = resolve_git_identity(str(self.repo))
         head = git(self.repo, "rev-parse", "HEAD")
@@ -141,6 +197,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
 
     def test_delivery_mutations_reject_cross_origin_pages(self) -> None:
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)
+        self.assertIn("/api/delivery-review-approve", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-viewed", ui.SAME_ORIGIN_ONLY_ROUTES)
 
 

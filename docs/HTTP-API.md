@@ -169,7 +169,9 @@ the Companion and whether completed runs stay quiet or expand the bar.
 `/api/delivery-reviews` returns recent privacy-safe delivery receipts. Changed
 paths are reconstructed only while the exact local Git range remains available;
 objective text is never rehydrated from AIWatcher state. A receipt is `ready`
-only when its remote event is confirmed, unread, and not superseded.
+only when its remote event is confirmed, unread, and not superseded. Approval is
+reported separately and is valid only while its objective hash, evidence hash,
+and current checkout HEAD still match.
 
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
@@ -252,6 +254,9 @@ accepts `project_path`, optional `session_id`, and optional transient
 It never confirms a remote push or pull request. `/api/delivery-review-viewed`
 marks one confirmed receipt as reviewed by `receipt_id`. Both routes are
 same-origin only.
+`/api/delivery-review-approve` requires `receipt_id`, `evidence_hash`, transient
+`objective`, and `confirmed: true`. It rejects stale evidence or a changed HEAD,
+and persists only the objective hash, evidence hash, and approval timestamp.
 `/api/improve-decision` records local feedback on a current Improve evidence key
 (`{"insight_key": "...", "days": 7, "decision": "reviewed" | "later" | "expected" | "helpful" | "not_helpful"}`).
 It is same-origin only, validates the key against current server evidence, and

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import uuid
@@ -12,6 +13,7 @@ from typing import Any, Iterable
 
 from .delivery import (
     ContributionEdge,
+    DELIVERY_SCHEMA_VERSION,
     DeliveryEvent,
     DeliverySnapshot,
     ObjectiveClaim,
@@ -382,6 +384,68 @@ def hydrate_persisted_receipt(receipt: dict[str, Any], event: dict[str, Any] | N
         snapshot["evidence_available"] = False
     payload["snapshot"] = snapshot
     return payload
+
+
+def work_receipt_evidence_hash(
+    receipt: WorkReceipt | dict[str, Any], *, objective_source_hash: str | None = None,
+) -> str:
+    """Hash the exact review facts a developer approves, without retaining text."""
+    payload = receipt.to_json() if isinstance(receipt, WorkReceipt) else receipt
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
+    verifications = payload.get("verifications") if isinstance(payload.get("verifications"), list) else []
+    contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
+    workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
+    evidence = {
+        "schema_version": DELIVERY_SCHEMA_VERSION,
+        "event": {
+            key: event.get(key)
+            for key in (
+                "kind", "status", "repository_id", "checkout_id", "head_sha",
+                "remote", "remote_ref", "pull_request_url",
+            )
+        },
+        "snapshot": {
+            key: snapshot.get(key)
+            for key in (
+                "repository_id", "checkout_id", "branch", "base_sha", "head_sha",
+                "upstream", "clean", "commit_shas", "changed_file_count",
+                "lines_added", "lines_removed",
+            )
+        },
+        "objective_source_hash": objective_source_hash or objective.get("source_hash"),
+        "verifications": [
+            {
+                key: row.get(key)
+                for key in ("runner", "status", "scope", "provenance", "exact_state", "finished_at", "source_id")
+            }
+            for row in verifications if isinstance(row, dict)
+        ],
+        "contributions": [
+            {
+                key: row.get(key)
+                for key in ("session_id", "commit_shas", "strength", "provenance", "source_id")
+            }
+            for row in contributions if isinstance(row, dict)
+        ],
+        "workflow": workflow,
+        "attention": [str(item) for item in payload.get("attention", []) if isinstance(item, str)],
+    }
+    encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def work_receipt_matches_current_checkout(receipt: dict[str, Any], event: dict[str, Any] | None) -> bool:
+    """Return whether the receipt still describes the checkout's current HEAD."""
+    snapshot = receipt.get("snapshot") if isinstance(receipt.get("snapshot"), dict) else {}
+    checkout_path = str((event or {}).get("checkout_path") or "")
+    identity = resolve_git_identity(checkout_path) if checkout_path else None
+    return bool(
+        identity is not None
+        and identity.checkout_id == snapshot.get("checkout_id")
+        and _commit(identity.checkout_path, "HEAD") == snapshot.get("head_sha")
+    )
 
 
 def format_work_receipt(receipt: WorkReceipt | dict[str, Any]) -> str:

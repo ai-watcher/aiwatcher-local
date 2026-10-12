@@ -216,11 +216,14 @@ After a confirmed push, Home and Companion show **Delivery review ready**. Open
 **Prove** to inspect the delivered commit range, checks tied to that exact HEAD
 and dirty-tree fingerprint, sessions linked by commit receipts, and anything
 that still needs confirmation. Enter or confirm the objective there before
-copying the bounded PR summary. The objective text stays in that browser preview
-only; refresh and AIWatcher asks for it again rather than retaining prompt text.
+approving the exact evidence and copying the bounded PR summary. Copy remains
+disabled until that approval is recorded. The objective text stays in that
+browser preview only; refresh and AIWatcher asks for it again rather than
+retaining prompt text. The approval stores only the objective hash, evidence
+hash, and timestamp, and becomes stale when the checkout HEAD or evidence changes.
 When an exact commit receipt links a delivery to a local session, Prove may
 re-read the first user prompt and show it as **inferred**; it remains explicitly
-unconfirmed until the developer accepts or replaces it.
+unconfirmed until the developer accepts or replaces it and approves the summary.
 
 The Prove view can also review a checkout before it is pushed. That result is
 labelled **Local candidate** and never triggers a delivery-ready signal. The

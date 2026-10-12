@@ -435,7 +435,9 @@ Delivery reviews close this evidence loop at the remote boundary:
   objective text, changed-file paths, or hashes of changed-file paths. The
   delivery event retains the local checkout path so paths can be reconstructed
   from the immutable Git range when the Prove view is opened. A confirmed
-  objective can be applied transiently in Prove before copying the summary.
+  objective can be applied transiently in Prove before approval. Approval stores
+  only the objective hash, exact evidence hash, and timestamp; copying remains
+  unavailable until approval, and a changed checkout HEAD or evidence invalidates it.
 - Request timing is labelled as observed agent/request time. It is not presented
   as developer productivity or time saved.
 

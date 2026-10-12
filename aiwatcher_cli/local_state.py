@@ -2966,7 +2966,7 @@ def record_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
             if isinstance(row, dict) and row.get("receipt_id") == receipt_id
         ), None)
         if existing:
-            for key in ("viewed_at", "superseded_by", "superseded_at"):
+            for key in ("viewed_at", "superseded_by", "superseded_at", "approval"):
                 if existing.get(key):
                     record[key] = existing[key]
         new_event = record.get("event") if isinstance(record.get("event"), dict) else {}
@@ -3029,6 +3029,49 @@ def mark_work_receipt_viewed(receipt_id: str) -> dict[str, Any] | None:
             if not row.get("viewed_at"):
                 row["viewed_at"] = datetime.now(timezone.utc).isoformat()
                 _save(data)
+            return dict(row)
+    return None
+
+
+def approve_work_receipt(
+    receipt_id: str, *, evidence_hash: str, objective_hash: str,
+) -> dict[str, Any] | None:
+    """Record explicit approval without retaining objective or source text."""
+    receipt_id = receipt_id.strip()[:160]
+    evidence_hash = evidence_hash.strip().lower()
+    objective_hash = objective_hash.strip().lower()
+    if not receipt_id:
+        raise ValueError("receipt_id is required")
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
+        raise ValueError("a valid evidence_hash is required")
+    if not re.fullmatch(r"[0-9a-f]{64}", objective_hash):
+        raise ValueError("a valid objective hash is required")
+    now = datetime.now(timezone.utc).isoformat()
+    with _locked_state():
+        data = _load()
+        for row in reversed(data.get("work_receipts", [])):
+            if not isinstance(row, dict) or row.get("receipt_id") != receipt_id:
+                continue
+            objective = row.get("objective") if isinstance(row.get("objective"), dict) else {}
+            objective.update({
+                "provenance": "user_confirmed",
+                "confidence": "high",
+                "text": None,
+                "source_hash": objective_hash,
+                "confirmed_at": now,
+            })
+            row["objective"] = objective
+            row["attention"] = [
+                item for item in row.get("attention", [])
+                if not str(item).startswith("Objective unavailable.")
+            ]
+            row["approval"] = {
+                "status": "approved",
+                "evidence_hash": evidence_hash,
+                "objective_hash": objective_hash,
+                "approved_at": now,
+            }
+            _save(data)
             return dict(row)
     return None
 
