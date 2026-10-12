@@ -288,9 +288,17 @@ The command below installs or moves an existing feature-branch installation to
 
 ```console
 pipx install --force 'git+https://github.com/ai-watcher/aiwatcher-local.git@main'
+pipx runpip aiwatcher-local freeze
+aiwatcher setup
+aiwatcher doctor
 aiwatcher companion stop
 aiwatcher ui --restart --open
 ```
+
+The `freeze` output includes the exact Git commit installed by pipx, which is
+useful when confirming that a newly merged change is actually running. On a
+machine with substantial local AI history, the first `doctor` or dashboard scan
+can take tens of seconds while AIWatcher builds its local index.
 
 Later, use `pipx reinstall aiwatcher-local` to fetch the current commit from the
 same GitHub source, even when the package version has not changed.
