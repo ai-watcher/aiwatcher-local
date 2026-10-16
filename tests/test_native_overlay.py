@@ -766,6 +766,28 @@ class NativeOverlayConfigTests(unittest.TestCase):
         run_presence.assert_not_called()
         self.assertIn("already owns", stderr.getvalue())
 
+    def test_tray_and_presence_share_one_companion_ui_role(self) -> None:
+        ownership = mock.Mock()
+        with (
+            mock.patch.object(native_overlay, "acquire_runtime_lock", return_value=ownership) as acquire,
+            mock.patch.object(native_overlay, "run_native_tray", return_value=0),
+        ):
+            result = native_overlay.main([
+                "--tray", "--url", "http://127.0.0.1:8765",
+            ])
+
+        self.assertEqual(result, 0)
+        acquire.assert_called_once_with(
+            "companion-ui",
+            metadata={
+                "mode": "tray",
+                "url": "http://127.0.0.1:8765",
+                "interval_seconds": 30,
+            },
+            timeout=native_overlay.ROLE_ACQUIRE_TIMEOUT_SECONDS,
+        )
+        ownership.release.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

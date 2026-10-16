@@ -4288,14 +4288,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-action-available", action="store_true")
     args = parser.parse_args(argv)
     if args.tray or args.presence:
-        role = "companion-tray" if args.tray else "companion-ui"
+        role = "companion-ui"
         ownership = acquire_runtime_lock(
             role,
-            metadata={"url": args.url, "interval_seconds": args.interval},
+            metadata={
+                "mode": "tray" if args.tray else "presence",
+                "url": args.url,
+                "interval_seconds": args.interval,
+            },
             timeout=ROLE_ACQUIRE_TIMEOUT_SECONDS,
         )
         if ownership is None:
-            print(f"Another AIWatcher {role} process already owns the local runtime.", file=sys.stderr)
+            print("Another AIWatcher Companion UI already owns the local runtime.", file=sys.stderr)
             return 2
         try:
             if args.tray:
