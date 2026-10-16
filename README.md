@@ -111,8 +111,7 @@ the existing installation instead:
 
 ```console
 pipx upgrade aiwatcher-local
-aiwatcher companion stop
-aiwatcher ui --restart --open
+aiwatcher restart --open-ui
 ```
 
 The restart matters because a running Console or Companion keeps using the code
@@ -132,8 +131,7 @@ Use the update command that matches how AIWatcher was installed:
 After any update, restart both local processes:
 
 ```console
-aiwatcher companion stop
-aiwatcher ui --restart --open
+aiwatcher restart --open-ui
 ```
 
 Merging code into GitHub `main` does not update PyPI installations. PyPI users
@@ -325,8 +323,7 @@ The command below installs or moves an existing feature-branch installation to
 
 ```console
 pipx install --force 'git+https://github.com/ai-watcher/aiwatcher-local.git@main'
-aiwatcher companion stop
-aiwatcher ui --restart --open
+aiwatcher restart --open-ui
 ```
 
 Later, use `pipx reinstall aiwatcher-local` to fetch the current commit from the
@@ -393,7 +390,7 @@ Start with the first command that fails, then use the matching row.
 | `No module named pipx` | Install pipx first. On Linux with PEP 668, use `apt`, `dnf`, or the official pipx guide rather than system pip. |
 | `No module named pip3` | Use `python3 -m pip`, not `python3 -m pip3`; the module name is `pip`. |
 | `python3` or `py` is missing | Install Python 3.10+ from your package manager or [python.org](https://www.python.org/downloads/), then open a new terminal. |
-| Companion says `UI offline` | Run `aiwatcher companion stop`, then `aiwatcher ui --restart --open`. |
+| Companion says `UI offline` | Expand the Companion and click **Restart**, or run `aiwatcher restart --open-ui`. |
 | Dashboard opens an older checkout | Stop the old process, change to the intended workspace if using a source clone, and restart. Run `aiwatcher doctor` for install details. |
 | Upgrade reports no change | Compare `pipx list` with the [PyPI release page](https://pypi.org/project/aiwatcher-local/). GitHub `main` can be newer than PyPI. |
 | Hook does not appear to run | Restart or reload the AI tool, send a test prompt, then run `aiwatcher hook-status`. Use manual `preflight` when the surface does not expose the hook. |

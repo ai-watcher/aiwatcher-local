@@ -275,6 +275,7 @@ def build_work_receipt(
         raise DeliveryReviewUnavailable("the checkout has no readable HEAD commit")
     branch = _git_text(repo, ["branch", "--show-current"])
     upstream = _upstream(repo)
+    upstream_sha = _commit(repo, upstream)
     base, base_basis = _delivery_base(repo, head, branch, upstream, event_base_sha)
     commits = _commit_range(repo, base, head)
     if not commits:
@@ -282,6 +283,7 @@ def build_work_receipt(
     files, added, removed = _range_files(repo, base, head)
     status = _run_git(repo, ["status", "--porcelain=v1", "-z"])
     clean = status is not None and status.returncode == 0 and not status.stdout
+    dirty_fingerprint = verification_git_fingerprint(repo).get("dirty_fingerprint")
     observed_at = event_observed_at or datetime.now(timezone.utc).isoformat()
     source_seed = event_source_id or (
         f"explicit_review\0{identity.checkout_id}\0{head}"
@@ -317,7 +319,9 @@ def build_work_receipt(
         base_sha=base,
         head_sha=head,
         upstream=upstream,
+        upstream_sha=upstream_sha,
         clean=clean,
+        dirty_fingerprint=dirty_fingerprint,
         commit_shas=commits,
         changed_files=files,
         lines_added=added,
@@ -410,7 +414,7 @@ def work_receipt_evidence_hash(
             key: snapshot.get(key)
             for key in (
                 "repository_id", "checkout_id", "branch", "base_sha", "head_sha",
-                "upstream", "clean", "commit_shas", "changed_file_count",
+                "upstream", "upstream_sha", "clean", "dirty_fingerprint", "commit_shas", "changed_file_count",
                 "lines_added", "lines_removed",
             )
         },
@@ -437,14 +441,23 @@ def work_receipt_evidence_hash(
 
 
 def work_receipt_matches_current_checkout(receipt: dict[str, Any], event: dict[str, Any] | None) -> bool:
-    """Return whether the receipt still describes the checkout's current HEAD."""
+    """Return whether the receipt still describes the exact current Git evidence."""
     snapshot = receipt.get("snapshot") if isinstance(receipt.get("snapshot"), dict) else {}
     checkout_path = str((event or {}).get("checkout_path") or "")
     identity = resolve_git_identity(checkout_path) if checkout_path else None
+    if identity is None or identity.checkout_id != snapshot.get("checkout_id"):
+        return False
+    current = verification_git_fingerprint(identity.checkout_path)
+    branch = _git_text(identity.checkout_path, ["branch", "--show-current"])
+    upstream = _upstream(identity.checkout_path)
     return bool(
-        identity is not None
-        and identity.checkout_id == snapshot.get("checkout_id")
-        and _commit(identity.checkout_path, "HEAD") == snapshot.get("head_sha")
+        _commit(identity.checkout_path, "HEAD") == snapshot.get("head_sha")
+        and branch == snapshot.get("branch")
+        and upstream == snapshot.get("upstream")
+        and _commit(identity.checkout_path, upstream) == snapshot.get("upstream_sha")
+        and bool(snapshot.get("dirty_fingerprint"))
+        and bool(current.get("dirty_fingerprint"))
+        and current.get("dirty_fingerprint") == snapshot.get("dirty_fingerprint")
     )
 
 

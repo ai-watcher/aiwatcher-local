@@ -18,7 +18,7 @@ explicitly. See [Privacy](../README.md#privacy) for the full contract.
 
 ## Contents
 
-- [Getting started](#getting-started) -- `start`, `setup`, `update`, `status`, `doctor`
+- [Getting started](#getting-started) -- `start`, `restart`, `setup`, `update`, `status`, `doctor`
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `delivery-review`, `push`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
@@ -56,6 +56,35 @@ aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
 | `--no-presence` | flag |  | Start the Companion without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
 | `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible: always, only during AI app work, or only for nudges |
+
+### `aiwatcher restart`
+
+Cleanly restart the dashboard UI and Companion together
+
+```sh
+aiwatcher restart [--interval INTERVAL] [--open-ui]
+                  [--ui-host UI_HOST] [--ui-port UI_PORT]
+                  [--ui-port-attempts UI_PORT_ATTEMPTS]
+                  [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+                  [--presence-visibility {always,ai-apps,nudges-only}]
+```
+
+Example:
+
+```sh
+aiwatcher restart --open-ui
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local Companion scans |
+| `--open-ui` | flag |  | Open the dashboard after restarting it |
+| `--ui-host` | text | `127.0.0.1` | Dashboard loopback address to bind |
+| `--ui-port` | integer | `8765` | Preferred dashboard port |
+| `--ui-port-attempts` | integer | `20` | How many sequential dashboard ports to try |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
+| `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible after restart |
+| `--from-companion` | flag |  | ==SUPPRESS== |
 
 ### `aiwatcher setup`
 

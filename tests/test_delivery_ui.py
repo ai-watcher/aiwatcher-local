@@ -8,7 +8,7 @@ from unittest.mock import patch
 from datetime import datetime, timezone
 
 from aiwatcher_cli import local_state, ui
-from aiwatcher_cli.delivery_review import build_work_receipt
+from aiwatcher_cli.delivery_review import build_work_receipt, work_receipt_matches_current_checkout
 from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.scanner import LocalSession
 
@@ -145,7 +145,86 @@ class DeliveryReviewApiTests(unittest.TestCase):
         stale = ui.build_delivery_reviews()["reviews"][0]
         self.assertFalse(stale["approval_valid"])
         self.assertFalse(stale["current_state_matches"])
-        self.assertIn("Checkout HEAD changed", " ".join(stale["attention"]))
+        self.assertIn("Checkout Git evidence changed", " ".join(stale["attention"]))
+
+    def test_approval_becomes_stale_when_dirty_evidence_changes_at_same_head(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Ship exact working-tree evidence.",
+        })
+        approved = ui.approve_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "objective": "Ship exact working-tree evidence.",
+            "confirmed": True,
+        })
+        self.assertTrue(approved["approval_valid"])
+
+        (self.repo / "uncommitted.txt").write_text("changed after approval\n", encoding="utf-8")
+        stale = ui.build_delivery_reviews()["reviews"][0]
+
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), candidate["snapshot"]["head_sha"])
+        self.assertFalse(stale["current_state_matches"])
+        self.assertFalse(stale["approval_valid"])
+
+    def test_unobservable_dirty_state_never_matches_exact_approval(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Ship only observable evidence.",
+        })
+        candidate["snapshot"]["dirty_fingerprint"] = None
+        event = local_state.recent_delivery_events()[0]
+
+        self.assertFalse(work_receipt_matches_current_checkout(candidate, event))
+
+    def test_approval_becomes_stale_on_same_head_branch_change(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Ship from the reviewed branch.",
+        })
+        approved = ui.approve_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "objective": "Ship from the reviewed branch.",
+            "confirmed": True,
+        })
+        self.assertTrue(approved["approval_valid"])
+
+        git(self.repo, "switch", "-c", "same-head-other-branch")
+        stale = ui.build_delivery_reviews()["reviews"][0]
+
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), candidate["snapshot"]["head_sha"])
+        self.assertFalse(stale["current_state_matches"])
+        self.assertFalse(stale["approval_valid"])
+
+    def test_approval_becomes_stale_when_tracked_upstream_advances(self) -> None:
+        remote = self.root / "remote.git"
+        git(self.root, "init", "--bare", str(remote))
+        git(self.repo, "remote", "add", "origin", str(remote))
+        git(self.repo, "push", "-u", "origin", "feature")
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Ship against this upstream state.",
+        })
+        approved = ui.approve_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "objective": "Ship against this upstream state.",
+            "confirmed": True,
+        })
+        self.assertTrue(approved["approval_valid"])
+
+        head = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "remote-change.txt").write_text("remote moved\n", encoding="utf-8")
+        git(self.repo, "add", "remote-change.txt")
+        git(self.repo, "commit", "-m", "advance upstream")
+        git(self.repo, "push", "origin", "feature")
+        git(self.repo, "reset", "--hard", head)
+        stale = ui.build_delivery_reviews()["reviews"][0]
+
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertFalse(stale["current_state_matches"])
+        self.assertFalse(stale["approval_valid"])
 
     def test_approval_rejects_a_stale_evidence_hash(self) -> None:
         candidate = ui.build_explicit_delivery_review({

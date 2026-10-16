@@ -138,6 +138,8 @@ class DeliverySnapshot:
     head_sha: str
     upstream: str | None
     clean: bool | None
+    upstream_sha: str | None = None
+    dirty_fingerprint: str | None = None
     commit_shas: tuple[str, ...] = ()
     changed_files: tuple[str, ...] = ()
     lines_added: int | None = None
@@ -150,6 +152,8 @@ class DeliverySnapshot:
         object.__setattr__(self, "base_sha", _sha(self.base_sha))
         object.__setattr__(self, "head_sha", _sha(self.head_sha))
         object.__setattr__(self, "upstream", _bounded(self.upstream, 300))
+        object.__setattr__(self, "upstream_sha", _sha(self.upstream_sha))
+        object.__setattr__(self, "dirty_fingerprint", _bounded(self.dirty_fingerprint, 128))
         commits = tuple(item for item in (_sha(value) for value in self.commit_shas) if item)[:200]
         files = tuple(filter(None, (_bounded(value, 1_000) for value in self.changed_files)))[:500]
         object.__setattr__(self, "commit_shas", commits)
@@ -170,7 +174,9 @@ class DeliverySnapshot:
             "base_sha": self.base_sha,
             "head_sha": self.head_sha,
             "upstream": self.upstream,
+            "upstream_sha": self.upstream_sha,
             "clean": self.clean,
+            "dirty_fingerprint": self.dirty_fingerprint,
             "commit_shas": list(self.commit_shas),
             "changed_files": list(self.changed_files) if include_paths else [],
             "changed_file_hashes": [],

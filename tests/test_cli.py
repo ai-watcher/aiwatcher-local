@@ -173,6 +173,96 @@ class SurfaceCoverageCliTests(unittest.TestCase):
 
 
 class StartCommandCliTests(unittest.TestCase):
+    def test_restart_replaces_dashboard_then_companion_with_requested_settings(self) -> None:
+        calls: list[str] = []
+        identity = {"install_kind": "source", "source_root": "/repo"}
+        old_dashboard = {**identity, "pid": 100}
+        new_dashboard = {**identity, "pid": 200}
+        with (
+            patch.object(
+                cli,
+                "_start_dashboard_server",
+                side_effect=lambda **_kwargs: calls.append("dashboard") or "http://127.0.0.1:8899/",
+            ) as start_dashboard,
+            patch.object(cli, "stop_companion", side_effect=lambda: calls.append("stop") or {"ok": True}),
+            patch.object(
+                cli,
+                "start_companion",
+                side_effect=lambda **_kwargs: calls.append("start") or {"ok": True, "pid": 4321},
+            ) as start_companion,
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli, "_running_dashboard_identity", side_effect=[old_dashboard, new_dashboard]),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                interval=45,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8899,
+                ui_port_attempts=7,
+                presence_position="top-left",
+                presence_visibility="ai-apps",
+                from_companion=False,
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["dashboard", "stop", "start"])
+        start_dashboard.assert_called_once_with(host="127.0.0.1", port=8899, port_attempts=7, restart=True)
+        start_companion.assert_called_once_with(
+            interval_seconds=45,
+            presence=True,
+            presence_position="top-left",
+            presence_visibility="ai-apps",
+        )
+
+    def test_restart_rejects_non_loopback_dashboard_host(self) -> None:
+        with (
+            patch.object(cli, "_start_dashboard_server") as start_dashboard,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_restart(SimpleNamespace(ui_host="0.0.0.0", ui_port=8765))
+
+        self.assertEqual(result, 2)
+        start_dashboard.assert_not_called()
+        self.assertIn("loopback", stderr.getvalue())
+
+    def test_restart_leaves_companion_running_when_dashboard_never_becomes_healthy(self) -> None:
+        with (
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "local_action_server_available", return_value=False),
+            patch.object(cli.time_module, "sleep"),
+            patch.object(cli, "stop_companion") as stop_companion,
+            patch.object(cli, "start_companion") as start_companion,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                ui_host="127.0.0.1", ui_port=8765, ui_port_attempts=1, from_companion=False,
+            ))
+
+        self.assertEqual(result, 2)
+        stop_companion.assert_not_called()
+        start_companion.assert_not_called()
+        self.assertIn("did not become healthy", stderr.getvalue())
+
+    def test_restart_does_not_accept_the_old_same_install_dashboard_pid(self) -> None:
+        identity = {"install_kind": "source", "source_root": "/repo", "pid": 100}
+        with (
+            patch.object(cli, "_running_dashboard_identity", return_value=identity),
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli.time_module, "sleep"),
+            patch.object(cli, "stop_companion") as stop_companion,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                ui_host="127.0.0.1", ui_port=8765, ui_port_attempts=1, from_companion=False,
+            ))
+
+        self.assertEqual(result, 2)
+        stop_companion.assert_not_called()
+
     def test_start_runs_scan_and_starts_visible_companion_by_default(self) -> None:
         coverage = [
             SurfaceCoverage(
@@ -219,6 +309,7 @@ class StartCommandCliTests(unittest.TestCase):
         )
         open_presence.assert_called_once_with(
             cli._watch_ui_base_url(),
+            interval=30,
             position="bottom-right",
             visibility="always",
         )
@@ -248,6 +339,43 @@ class StartCommandCliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         start_companion.assert_not_called()
+
+    def test_start_preserves_an_existing_companion_interval_in_the_presence(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(
+                cli, "start_companion",
+                return_value={"ok": True, "already_running": True, "pid": 123, "interval_seconds": 45},
+            ),
+            patch.object(
+                cli, "_refresh_existing_native_companion_presence",
+                return_value=(True, "native companion presence PID 456"),
+            ) as refresh_presence,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=False,
+                no_presence=False,
+                presence_position="bottom-right",
+                presence_visibility="always",
+                no_ui=False,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+            ))
+
+        self.assertEqual(result, 0)
+        refresh_presence.assert_called_once_with(
+            cli._watch_ui_base_url(),
+            exclude_pid=123,
+            interval=45,
+            position="bottom-right",
+            visibility="always",
+        )
 
     def test_start_can_skip_dashboard_ui(self) -> None:
         with (
@@ -383,6 +511,7 @@ class StartCommandCliTests(unittest.TestCase):
         stop_presence.assert_called_once_with()
         open_presence.assert_called_once_with(
             "http://127.0.0.1:8896",
+            interval=30,
             position="bottom-right",
             visibility="ai-apps",
         )
@@ -409,13 +538,17 @@ class StartCommandCliTests(unittest.TestCase):
         stop_presence.assert_called_once_with()
         open_presence.assert_called_once_with(
             "http://127.0.0.1:8896",
+            interval=30,
             position="bottom-right",
             visibility="always",
         )
 
     def test_companion_start_refreshes_presence_when_daemon_already_runs(self) -> None:
         with (
-            patch.object(cli, "start_companion", return_value={"ok": True, "already_running": True, "pid": 999}),
+            patch.object(
+                cli, "start_companion",
+                return_value={"ok": True, "already_running": True, "pid": 999, "interval_seconds": 45},
+            ),
             patch.object(
                 cli,
                 "_refresh_existing_native_companion_presence",
@@ -436,6 +569,7 @@ class StartCommandCliTests(unittest.TestCase):
         refresh_presence.assert_called_once_with(
             cli._watch_ui_base_url(),
             exclude_pid=999,
+            interval=45,
             position="bottom-right",
             visibility="always",
         )
@@ -1012,16 +1146,14 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn(["pull", "--ff-only", "origin", "main"], calls)
         self.assertNotIn("aiwatcher start --open-ui", output)
-        self.assertIn("`aiwatcher companion stop`, then `aiwatcher companion start`", output)
-        self.assertIn("aiwatcher ui --restart --port 8799", output)
+        self.assertIn("aiwatcher restart --open-ui --ui-port 8799", output)
         self.assertIn("http://127.0.0.1:8799", output)
 
     def test_update_apply_points_at_start_when_nothing_is_running(self) -> None:
         result, output, _calls = self._apply_update(dashboard=False, companion=False)
         self.assertEqual(result, 0)
         self.assertIn("aiwatcher start --open-ui", output)
-        self.assertNotIn("companion stop", output)
-        self.assertNotIn("ui --restart", output)
+        self.assertNotIn("aiwatcher restart", output)
 
 
 class ProjectAttributionCliTests(unittest.TestCase):
@@ -1588,7 +1720,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIsNone(started["resource"])
         start_companion.assert_not_called()
-        refresh_presence.assert_called_once_with("http://127.0.0.1:8896", exclude_pid=999)
+        refresh_presence.assert_called_once_with("http://127.0.0.1:8896", exclude_pid=999, interval=30)
         self.assertIn("Companion presence refreshed for http://127.0.0.1:8896", stdout.getvalue())
 
     def test_ui_startup_can_open_the_bound_dashboard_url(self) -> None:

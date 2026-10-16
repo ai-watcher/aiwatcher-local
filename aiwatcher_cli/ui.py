@@ -3709,7 +3709,7 @@ def _finalize_delivery_review(
     )
     if not current_state_matches:
         attention = list(payload.get("attention") or [])
-        message = "Checkout HEAD changed after this review; regenerate it before approval."
+        message = "Checkout Git evidence changed after this review; regenerate it before approval."
         if message not in attention:
             attention.append(message)
         payload["attention"] = attention
