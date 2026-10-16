@@ -201,6 +201,12 @@ Hook installers prefer the durable `aiwatcher` executable on your `PATH`.
 source checkout has disappeared; reinstall the hook with the same gated command
 to repair it without disabling Prompt Gate.
 
+MCP is optional and pull-based. An MCP-capable client may start one
+`aiwatcher mcp` process per live connection so its agent can request preflight,
+session, usage, journal, or runtime-health evidence. Those connection-scoped
+servers do not power the Console or Companion and are not duplicate product
+runtimes. The Console and Companion call the same local functions directly.
+
 ## Review A Delivery
 
 Capture verification against the exact Git state, then push through AIWatcher:
@@ -398,11 +404,17 @@ Start with the first command that fails, then use the matching row.
 Useful diagnostics:
 
 ```console
+aiwatcher runtime status
 aiwatcher companion status
 aiwatcher doctor
 aiwatcher hook-status
 aiwatcher update
 ```
+
+`runtime status` reports lock-owned product roles: one dashboard, one Companion
+scanner, and an optional native Companion UI. It does not enumerate every
+Python process. MCP servers are separate and optional because each live
+AI-client connection owns its own stdio server.
 
 </details>
 

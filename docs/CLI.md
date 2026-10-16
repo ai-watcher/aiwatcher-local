@@ -22,7 +22,7 @@ explicitly. See [Privacy](../README.md#privacy) for the full contract.
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `delivery-review`, `push`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
-- [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
+- [Monitoring](#monitoring) -- `watch`, `companion`, `runtime`, `statusline`, `processes`, `run`
 - [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-activity-hook`, `uninstall-claude-activity-hook`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `compactions`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
@@ -767,6 +767,32 @@ aiwatcher companion run [--interval INTERVAL] [--presence]
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
 | `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible: always, only during AI app work, or only for nudges |
 
+### `aiwatcher runtime`
+
+Inspect AIWatcher-owned local runtime roles
+
+```sh
+aiwatcher runtime {status} ...
+```
+
+Subcommands:
+
+| Subcommand | Purpose |
+| --- | --- |
+| `status` | Show dashboard, Companion, and optional MCP roles |
+
+#### `aiwatcher runtime status`
+
+Show dashboard, Companion, and optional MCP roles
+
+```sh
+aiwatcher runtime status [--json]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | flag |  | Emit structured runtime status |
+
 ### `aiwatcher statusline`
 
 Render the Claude Code status line; reads its payload on stdin
@@ -1294,6 +1320,7 @@ It exposes these tools:
 
 | Tool | Arguments | Description |
 | --- | --- | --- |
+| `aiwatcher_runtime_status` | none | Check whether the local AIWatcher dashboard and Companion roles are healthy. |
 | `aiwatcher_today` | `days` | Summarize local AI coding usage for this machine. |
 | `aiwatcher_last_session` | `days` | Inspect the latest local Claude/Codex/Cursor session without exposing prompt or source content. |
 | `aiwatcher_project_summary` | `days`, `project` | Show which local projects are driving AI usage. |

@@ -60,7 +60,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Monitoring",
         "Catch expensive or looping work, and keep runtimes tidy.",
-        ["watch", "companion", "statusline", "processes", "run"],
+        ["watch", "companion", "runtime", "statusline", "processes", "run"],
     ),
     (
         "Hooks and wrappers",

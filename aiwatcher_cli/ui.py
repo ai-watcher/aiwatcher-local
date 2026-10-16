@@ -151,6 +151,7 @@ from .runtime_attachment import (
     safe_runtime_processes,
 )
 from .runtime_nudge import foreground_tool, presentation_for_signal
+from .runtime_lifecycle import ROLE_ACQUIRE_TIMEOUT_SECONDS, acquire_runtime_lock
 from .session_presence import (
     LIVE_WINDOW_MINUTES,
     SessionPresence,
@@ -10600,6 +10601,11 @@ def serve(
         if stopped_port is not None:
             port = stopped_port
             print(f"Stopped verified AIWatcher dashboard on port {port}.")
+    elif (existing := _verified_recorded_ui_server()) is not None:
+        raise OSError(
+            f"AIWatcher dashboard already running on port {existing['port']} "
+            f"(PID {existing['pid']})."
+        )
 
     selected_port = port
     if auto_port:
@@ -10607,8 +10613,19 @@ def serve(
         if selected_port != port:
             print(f"Port {port} is busy. Using {selected_port} instead.")
 
-    server = ThreadingHTTPServer((host, selected_port), UIHandler)
     identity = install_identity()
+    ownership = acquire_runtime_lock(
+        "dashboard",
+        metadata={"host": host, "port": selected_port, **identity},
+        timeout=ROLE_ACQUIRE_TIMEOUT_SECONDS,
+    )
+    if ownership is None:
+        raise OSError("Another AIWatcher dashboard already owns the local runtime.")
+    try:
+        server = ThreadingHTTPServer((host, selected_port), UIHandler)
+    except Exception:
+        ownership.release()
+        raise
     record_ui_server(
         host,
         selected_port,
@@ -10634,3 +10651,4 @@ def serve(
             except OSError:
                 pass
         server.server_close()
+        ownership.release()

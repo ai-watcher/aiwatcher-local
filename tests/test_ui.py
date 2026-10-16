@@ -654,6 +654,32 @@ class DashboardServeTests(unittest.TestCase):
             cwd=str(cwd_path.resolve()),
         )
 
+    def test_serve_refuses_a_second_dashboard_owner(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value=None),
+            patch.object(ui, "find_available_port", return_value=8765),
+            patch.object(ui, "acquire_runtime_lock", return_value=None),
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+        ):
+            with self.assertRaisesRegex(OSError, "already owns the local runtime"):
+                ui.serve(host="127.0.0.1", port=8765, auto_port=True)
+
+        server_cls.assert_not_called()
+
+    def test_serve_refuses_a_verified_legacy_dashboard_without_a_lock(self) -> None:
+        with (
+            patch.object(ui, "_verified_recorded_ui_server", return_value={
+                "host": "127.0.0.1", "port": 8765, "pid": 123,
+            }),
+            patch.object(ui, "acquire_runtime_lock") as acquire,
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+        ):
+            with self.assertRaisesRegex(OSError, "already running"):
+                ui.serve(host="127.0.0.1", port=8765, auto_port=True)
+
+        acquire.assert_not_called()
+        server_cls.assert_not_called()
+
     def test_restart_reuses_verified_dashboard_fallback_port(self) -> None:
         cwd_path = Path("/repo/work")
         with (
