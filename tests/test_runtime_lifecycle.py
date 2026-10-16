@@ -76,6 +76,22 @@ class RuntimeLockTests(unittest.TestCase):
         self.assertFalse(status["active"])
         self.assertEqual(status["url"], "http://127.0.0.1:8765")
 
+    def test_metadata_is_stored_separately_from_the_locked_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = str(Path(temp_dir) / "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                ownership = runtime_lifecycle.acquire_runtime_lock(
+                    "dashboard", metadata={"port": 8765}
+                )
+                ownership.release()
+                lock_payload = runtime_lifecycle._lock_path("dashboard").read_bytes()
+                metadata = json.loads(
+                    runtime_lifecycle._metadata_path("dashboard").read_text(encoding="utf-8")
+                )
+
+        self.assertEqual(lock_payload, b"\0")
+        self.assertEqual(metadata["port"], 8765)
+
     def test_invalid_lock_name_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             runtime_lifecycle.acquire_runtime_lock("../../unsafe")

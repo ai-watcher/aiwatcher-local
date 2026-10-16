@@ -37,6 +37,11 @@ def _lock_path(name: str) -> Path:
     return state_path().parent / f".runtime-{name}.lock"
 
 
+def _metadata_path(name: str) -> Path:
+    lock_path = _lock_path(name)
+    return lock_path.with_suffix(".json")
+
+
 def _try_file_lock(handle: BinaryIO) -> bool:
     try:
         handle.seek(0)
@@ -61,14 +66,25 @@ def _release_file_lock(handle: BinaryIO) -> None:
 
 
 def _read_metadata(path: Path) -> dict[str, Any]:
-    try:
-        payload = path.read_bytes()
-        if payload.startswith(b"\0"):
-            payload = payload[1:]
-        value = json.loads(payload.decode("utf-8")) if payload.strip() else {}
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    for attempt in range(3):
+        try:
+            payload = path.read_bytes()
+            value = json.loads(payload.decode("utf-8")) if payload.strip() else {}
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            if attempt < 2:
+                time.sleep(0.01)
+                continue
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _write_metadata(path: Path, record: dict[str, Any]) -> None:
+    payload = json.dumps(record, sort_keys=True).encode("utf-8")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
 
 
 @dataclass
@@ -109,6 +125,7 @@ def acquire_runtime_lock(
         return None
 
     path = _lock_path(name)
+    metadata_path = _metadata_path(name)
     handle: BinaryIO | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,10 +147,7 @@ def acquire_runtime_lock(
                 "pid": os.getpid(),
                 "started_at": datetime.now(timezone.utc).isoformat(),
             }
-            handle.seek(1)
-            handle.write(json.dumps(record, sort_keys=True).encode("utf-8"))
-            handle.truncate()
-            handle.flush()
+            _write_metadata(metadata_path, record)
         return RuntimeLock(name=name, handle=handle, thread_lock=thread_lock)
     except Exception:
         if handle is not None:
@@ -144,10 +158,10 @@ def acquire_runtime_lock(
 
 def runtime_lock_status(name: str) -> dict[str, Any]:
     """Report whether a named role is currently owned by a live process."""
-    path = _lock_path(name)
+    metadata_path = _metadata_path(name)
     probe = acquire_runtime_lock(name, timeout=0)
     if probe is not None:
-        metadata = _read_metadata(path)
+        metadata = _read_metadata(metadata_path)
         probe.release()
         return {**metadata, "active": False}
-    return {**_read_metadata(path), "active": True}
+    return {**_read_metadata(metadata_path), "active": True}
