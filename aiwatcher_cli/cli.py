@@ -1582,7 +1582,7 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
             "history_span_days": history_span_days,
             "required_sessions": MIN_SAVINGS_SESSIONS,
             "required_history_days": MIN_SAVINGS_HISTORY_DAYS,
-            "direction": "A narrower prompt with checkpoints should reduce context and tool-call pressure, but AIWatcher cannot quantify savings yet.",
+            "direction": "A narrower prompt with checkpoints may reduce execution pressure, but AIWatcher cannot model a comparison from the available history yet.",
         }
 
     base_tokens = stats["p75_tokens"] or 120_000
@@ -2074,7 +2074,7 @@ def _workflow_reward_label(impact: dict[str, object], workflow: dict[str, str]) 
         token_label = _number_range_label(*tokens) if isinstance(tokens, list) and len(tokens) == 2 else ""
         value_label = _range_label(*api_value, money) if isinstance(api_value, list) and len(api_value) == 2 else ""
         if token_label and value_label:
-            return f"Potential avoided pressure before execution: {token_label} tokens and {value_label} API-equivalent."
+            return "Heuristic scenario: the scoped prompt is modeled to use less execution pressure; no measured savings are claimed."
     if workflow.get("mode") == "fork_task":
         return "Likely reward: isolates exploratory context before it pollutes the main task."
     if workflow.get("mode") == "use_subagents":
@@ -2456,7 +2456,7 @@ def render_preflight(result: dict[str, object]) -> str:
             "Expected impact",
             str(impact.get("direction", "A narrower prompt should reduce execution pressure.")),
             (
-                "Quantified savings unavailable: "
+                "Scenario comparison unavailable: "
                 f"AIWatcher needs at least {impact.get('required_sessions', MIN_SAVINGS_SESSIONS)} comparable sessions "
                 f"spanning {impact.get('required_history_days', MIN_SAVINGS_HISTORY_DAYS)} days. "
                 f"Current basis: {impact.get('basis', 'local history unavailable')}."
@@ -2465,12 +2465,12 @@ def render_preflight(result: dict[str, object]) -> str:
     elif int(result.get("score", 0)) > 0 and original and safer and savings:
         lines.extend([
             "",
-            "Estimated impact",
-            f"Original prompt: {_number_range_label(*original['tokens'])} tokens | {_number_range_label(*original['model_calls'])} model calls | {_number_range_label(*original['tool_calls'])} tool calls | {_range_label(*original['api_value_usd'], money)} API-equivalent",
-            f"Safer prompt: {_number_range_label(*safer['tokens'])} tokens | {_number_range_label(*safer['model_calls'])} model calls | {_number_range_label(*safer['tool_calls'])} tool calls | {_range_label(*safer['api_value_usd'], money)} API-equivalent",
-            f"Estimated savings: {_number_range_label(*savings['tokens'])} tokens | {_number_range_label(*savings['model_calls'])} model calls | {_number_range_label(*savings['tool_calls'])} tool calls | {_range_label(*savings['api_value_usd'], money)} API-equivalent",
-            f"Planning confidence: {impact.get('confidence', 'low')} ({impact.get('basis', 'local history unavailable')})",
-            "These are planning ranges, not guaranteed billing savings.",
+            "Heuristic scenario comparison",
+            "Broad-prompt scenario: higher execution pressure.",
+            "Scoped-prompt scenario: lower execution pressure with explicit checkpoints.",
+            "Modeled direction: scope reduction may lower tokens and tool activity; magnitude is not measured.",
+            f"History basis: {impact.get('basis', 'local history unavailable')}",
+            "Method: fixed risk and scope multipliers over historical percentiles; this is not measured savings or a billing forecast.",
         ])
     if workflow:
         lines.extend([
@@ -2489,21 +2489,19 @@ def render_preflight(result: dict[str, object]) -> str:
 def _impact_summary(result: dict[str, object]) -> str:
     impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
     if not impact:
-        return "AIWatcher can identify risk, but no local history exists yet for savings estimates."
+        return "AIWatcher can identify risk, but no local history exists yet for a heuristic scenario comparison."
     if not impact.get("available", False):
         return (
             f"{impact.get('direction', 'A narrower prompt should reduce execution pressure.')} "
-            f"Measured savings need at least {impact.get('required_sessions', MIN_SAVINGS_SESSIONS)} comparable sessions "
+            f"Scenario modeling needs at least {impact.get('required_sessions', MIN_SAVINGS_SESSIONS)} comparable sessions "
             f"over {impact.get('required_history_days', MIN_SAVINGS_HISTORY_DAYS)} days."
         )
     savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
     if not savings:
-        return "AIWatcher found comparable sessions, but could not calculate a savings range."
+        return "AIWatcher found comparable sessions, but could not calculate a modeled difference."
     return (
-        f"Estimated avoidable pressure: {_number_range_label(*savings['tokens'])} tokens, "
-        f"{_number_range_label(*savings['tool_calls'])} tool calls, "
-        f"{_range_label(*savings['api_value_usd'], money)} API-equivalent. "
-        f"Confidence: {impact.get('confidence', 'low')}."
+        "Modeled scenario direction: the scoped prompt may use less execution pressure. "
+        "Magnitude is not shown because measured results require linked post-intervention evidence."
     )
 
 
@@ -2537,7 +2535,7 @@ def _hero_savings_label(result: dict[str, object]) -> str | None:
     api_value = savings.get("api_value_usd")
     if not isinstance(api_value, list) or len(api_value) != 2:
         return None
-    return f"~{_range_label(*api_value, money)} avoidable"
+    return "Heuristic only"
 
 
 def _hero_pressure_label(result: dict[str, object]) -> str | None:
@@ -2556,7 +2554,7 @@ def _hero_pressure_label(result: dict[str, object]) -> str | None:
         return None
     if not isinstance(tool_calls, list) or len(tool_calls) != 2:
         return None
-    return f"{_number_range_label(*tokens)} tokens · {_number_range_label(*tool_calls)} tool calls avoided"
+    return "Lower pressure in scoped scenario"
 
 
 def _prompt_gate_route(result: dict[str, object]) -> dict[str, str]:
@@ -10215,7 +10213,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT, help="Port to serve the dashboard on")
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
-    ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")
+    ui.add_argument("--restart", action="store_true", help="Restart the verified recorded AIWatcher dashboard before starting")
     ui.add_argument("--open", "--open-ui", dest="open_ui", action="store_true", help="Open the dashboard in a browser after binding the final port")
     ui.add_argument("--no-watch", action="store_true", help="Do not start Ambient Watch alongside the dashboard")
     ui.add_argument("--watch-interval", type=int, default=60, help="Seconds between Ambient Watch scans when started with the UI")

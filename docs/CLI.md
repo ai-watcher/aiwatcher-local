@@ -1265,7 +1265,7 @@ aiwatcher ui --port 9000 --restart
 | `--port` | integer | `8765` | Port to serve the dashboard on |
 | `--port-attempts` | integer | `20` | How many sequential ports to try when the requested port is busy |
 | `--no-port-fallback` | flag |  | Fail instead of trying the next available port |
-| `--restart` | flag |  | Stop an existing local process on the requested port before starting |
+| `--restart` | flag |  | Restart the verified recorded AIWatcher dashboard before starting |
 | `--open`, `--open-ui` | flag |  | Open the dashboard in a browser after binding the final port |
 | `--no-watch` | flag |  | Do not start Ambient Watch alongside the dashboard |
 | `--watch-interval` | integer | `60` | Seconds between Ambient Watch scans when started with the UI |
