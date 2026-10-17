@@ -27,6 +27,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from . import transcript_cache
 from .pricing import context_window, estimate_cost, lookup
 from .scanner import (
     INJECTED_ROW_PREFIXES,
@@ -64,181 +65,127 @@ def _git_head_time(repo: str) -> datetime | None:
 
 
 def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, Any]:
-    """Cost and context for one session, from its transcript alone.
+    """Cost/context for one transcript; long-lived callers fold appended rows.
 
-    Deliberately narrow: one file, no directory walk, no state file. A full
-    9.6MB transcript parses in about 13ms, which is the whole reason this can
-    run on every render.
-
-    `since` splits out the portion spent after a timestamp -- used for spend
-    since the last commit, so that figure covers the session actually in front
-    of you rather than everything the machine has ever done.
+    Each timestamp window has independent accounting and deduplication state.
+    Replacement or truncation rebuilds it; unavailable/oversized logs report
+    unavailable instead of returning a partial measurement.
     """
-    total_usd = 0.0
-    since_usd = 0.0
-    latest_context = 0
-    peak_context = 0
-    first_context = 0
-    turns = 0
-    model: str | None = None
-    # The boundary view, all relative to `since`: the context the session had
-    # just before it, the smallest context after it (a drop is a compaction),
-    # how many calls came after, and which files those calls touched. Read by
-    # compaction.assess; the statusline itself only uses since_usd.
-    context_at_since = 0
-    min_context_since = 0
-    turns_since = 0        # model calls after `since`
-    prompts_since = 0      # things the user typed after `since` -- the turn count a person means
-    files_since: list[str] = []
-    # The compaction itself, as Claude Code records it: the `/compact` the
-    # user typed lands as a user row the moment they press enter, and the
-    # finished compaction as a compact_boundary row plus its summary, about
-    # a minute later. Both arrive before the next reply, which is the first
-    # row whose usage shows the new size. A surface that only reads usage
-    # keeps asking for a compaction that has already happened.
-    title: str | None = None
-    command_seen_at: datetime | None = None
-    boundary_seen_at: datetime | None = None
-    # Calls after the one that set min_context_since: zero means the latest
-    # call is the small one, i.e. the shed has just been observed.
-    turns_after_min_since = 0
-    # Prompts after that call: zero means the user has not typed since the
-    # shed. Claude Code carries on by itself after a compaction, several tool
-    # calls in a few seconds, so "calls after" cannot tell whether a person
-    # has seen the result; "typed after" can.
-    prompts_after_min_since = 0
-    context_before_min_since = 0
-    previous_context = 0
+    def initial() -> dict[str, Any]:
+        # Each row UUID and usage receipt counts once across compaction replays.
+        # Boundary counters describe the calls/prompts after the commit window,
+        # including whether the latest context minimum has just been observed.
+        return {
+            "total_usd": 0.0, "since_usd": 0.0,
+            "latest_context": 0, "peak_context": 0, "first_context": 0,
+            "turns": 0, "model": None, "context_at_since": 0,
+            "min_context_since": 0, "turns_since": 0, "prompts_since": 0,
+            "files_since": [], "title": None, "ai_title": None,
+            "command_seen_at": None, "boundary_seen_at": None,
+            "turns_after_min_since": 0, "prompts_after_min_since": 0,
+            "context_before_min_since": 0, "previous_context": 0,
+            "seen_rows": set(), "counted_requests": set(),
+        }
 
-    empty = {
-        "available": False, "total_usd": 0.0, "since_usd": 0.0,
-        "latest_context": 0, "peak_context": 0, "first_context": 0, "turns": 0, "model": None,
-        "context_at_since": 0, "min_context_since": 0, "turns_since": 0, "prompts_since": 0,
-        "files_since": [], "title": None, "command_seen_at": None, "boundary_seen_at": None,
-        "turns_after_min_since": 0, "prompts_after_min_since": 0, "context_before_min_since": 0,
-    }
-    try:
-        handle = open(path, "r", encoding="utf-8", errors="replace")
-    except OSError:
-        return empty
+    def consume(s: dict[str, Any], obj: dict[str, Any]) -> None:
+        if _repeated_row(obj, s['seen_rows']):
+            return
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        usage = message.get("usage") or obj.get("usage")
+        if not isinstance(usage, dict):
+            custom_title = obj.get("customTitle")
+            if isinstance(custom_title, str) and custom_title.strip():
+                s['title'] = custom_title.strip()
+            generated_title = obj.get("aiTitle")
+            if isinstance(generated_title, str) and generated_title.strip():
+                s['ai_title'] = generated_title.strip()
+            if _is_compact_boundary_row(obj):
+                s['boundary_seen_at'] = _parse_stamp(obj.get("timestamp") or obj.get("createdAt")) or s['boundary_seen_at']
+            elif _is_compact_command_row(obj, message):
+                s['command_seen_at'] = _parse_stamp(obj.get("timestamp") or obj.get("createdAt")) or s['command_seen_at']
+            elif since is not None and _is_prompt_row(obj, message):
+                prompt_stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
+                if prompt_stamp is not None and prompt_stamp >= since:
+                    s['prompts_since'] += 1
+                    s['prompts_after_min_since'] += 1
+            return
 
-    # Claude Code writes earlier rows again when it compacts (see
-    # scanner._repeated_row). Walking the file in order, "the last usage row"
-    # was a copy from hours before, so the bar closed a receipt on the wrong
-    # size and skipped its Compacted step. Each row counts once.
-    seen_rows: set[str] = set()
-    # One request's usage is copied onto each of its content-block lines
-    # (scanner._usage_receipt_key). Counted per line, the session cost here read
-    # several times the dashboard's: $180.88 against $44.40 on one chat,
-    # 2026-09-15. Each request now counts once; its file edits still count.
-    counted_requests: set[str] = set()
-    # The name Claude Code generates for a chat, used when the user gave none.
-    ai_title: str | None = None
+        receipt = _usage_receipt_key(obj, message)
+        if receipt is not None:
+            if receipt in s['counted_requests']:
+                if since is not None:
+                    copy_stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
+                    if copy_stamp is not None and copy_stamp >= since:
+                        _collect_files(message, s['files_since'])
+                return
+            s['counted_requests'].add(receipt)
 
-    with handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if _repeated_row(obj, seen_rows):
-                continue
-            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            usage = message.get("usage") or obj.get("usage")
-            if not isinstance(usage, dict):
-                custom_title = obj.get("customTitle")
-                if isinstance(custom_title, str) and custom_title.strip():
-                    title = custom_title.strip()
-                generated_title = obj.get("aiTitle")
-                if isinstance(generated_title, str) and generated_title.strip():
-                    ai_title = generated_title.strip()
-                if _is_compact_boundary_row(obj):
-                    boundary_seen_at = _parse_stamp(obj.get("timestamp") or obj.get("createdAt")) or boundary_seen_at
-                elif _is_compact_command_row(obj, message):
-                    command_seen_at = _parse_stamp(obj.get("timestamp") or obj.get("createdAt")) or command_seen_at
-                elif since is not None and _is_prompt_row(obj, message):
-                    prompt_stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
-                    if prompt_stamp is not None and prompt_stamp >= since:
-                        prompts_since += 1
-                        prompts_after_min_since += 1
-                continue
+        # The scanner's own splitter, not a copy of it. Cached input is
+        # most of the bill on a long session, and a statusline that read
+        # `input_tokens` alone would understate it by roughly 11x.
+        tokens = _anthropic_usage(usage)
+        billed_in = _billed_input(tokens)
+        if billed_in <= 0 and tokens["output"] <= 0:
+            return
 
-            receipt = _usage_receipt_key(obj, message)
-            if receipt is not None:
-                if receipt in counted_requests:
-                    if since is not None:
-                        copy_stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
-                        if copy_stamp is not None and copy_stamp >= since:
-                            _collect_files(message, files_since)
-                    continue
-                counted_requests.add(receipt)
+        turn_model = message.get("model") or obj.get("model")
+        if isinstance(turn_model, str) and turn_model:
+            s['model'] = turn_model
 
-            # The scanner's own splitter, not a copy of it. Cached input is
-            # most of the bill on a long session, and a statusline that read
-            # `input_tokens` alone would understate it by roughly 11x.
-            tokens = _anthropic_usage(usage)
-            billed_in = _billed_input(tokens)
-            if billed_in <= 0 and tokens["output"] <= 0:
-                continue
+        stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
+        cost = estimate_cost(
+            s['model'], tokens["input"], tokens["output"],
+            cache_write_5m=tokens["cache_write_5m"],
+            cache_write_1h=tokens["cache_write_1h"],
+            cache_read=tokens["cache_read"],
+            when=stamp,
+        )
+        s['total_usd'] += cost
+        s['turns'] += 1
+        s['latest_context'] = billed_in
+        s['peak_context'] = max(s['peak_context'], billed_in)
+        if not s['first_context']:
+            s['first_context'] = billed_in
 
-            turn_model = message.get("model") or obj.get("model")
-            if isinstance(turn_model, str) and turn_model:
-                model = turn_model
-
-            stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
-            cost = estimate_cost(
-                model, tokens["input"], tokens["output"],
-                cache_write_5m=tokens["cache_write_5m"],
-                cache_write_1h=tokens["cache_write_1h"],
-                cache_read=tokens["cache_read"],
-                when=stamp,
-            )
-            total_usd += cost
-            turns += 1
-            latest_context = billed_in
-            peak_context = max(peak_context, billed_in)
-            if not first_context:
-                first_context = billed_in
-
-            if since is not None:
-                if stamp is not None and stamp >= since:
-                    since_usd += cost
-                    turns_since += 1
-                    if not min_context_since or billed_in < min_context_since:
-                        min_context_since = billed_in
-                        context_before_min_since = previous_context
-                        turns_after_min_since = 0
-                        prompts_after_min_since = 0
-                    else:
-                        turns_after_min_since += 1
-                    _collect_files(message, files_since)
+        if since is not None:
+            if stamp is not None and stamp >= since:
+                s['since_usd'] += cost
+                s['turns_since'] += 1
+                if not s['min_context_since'] or billed_in < s['min_context_since']:
+                    s['min_context_since'] = billed_in
+                    s['context_before_min_since'] = s['previous_context']
+                    s['turns_after_min_since'] = 0
+                    s['prompts_after_min_since'] = 0
                 else:
-                    context_at_since = billed_in
-            previous_context = billed_in
+                    s['turns_after_min_since'] += 1
+                _collect_files(message, s['files_since'])
+            else:
+                s['context_at_since'] = billed_in
+        s['previous_context'] = billed_in
 
-    return {
-        "available": turns > 0,
-        "total_usd": total_usd,
-        "since_usd": since_usd,
-        "latest_context": latest_context,
-        "peak_context": peak_context,
-        "first_context": first_context,
-        "turns": turns,
-        "model": model,
-        "context_at_since": context_at_since,
-        "min_context_since": min_context_since,
-        "turns_since": turns_since,
-        "prompts_since": prompts_since,
-        "files_since": files_since,
-        "title": title or ai_title,
-        "command_seen_at": command_seen_at,
-        "boundary_seen_at": boundary_seen_at,
-        "turns_after_min_since": turns_after_min_since,
-        "prompts_after_min_since": prompts_after_min_since,
-        "context_before_min_since": context_before_min_since,
-    }
+    with transcript_cache.folded_jsonl(path, ("claude-usage", since), initial, consume) as aggregate:
+        s = aggregate if aggregate is not None else initial()
+        return {
+            "available": s['turns'] > 0,
+            "total_usd": s['total_usd'],
+            "since_usd": s['since_usd'],
+            "latest_context": s['latest_context'],
+            "peak_context": s['peak_context'],
+            "first_context": s['first_context'],
+            "turns": s['turns'],
+            "model": s['model'],
+            "context_at_since": s['context_at_since'],
+            "min_context_since": s['min_context_since'],
+            "turns_since": s['turns_since'],
+            "prompts_since": s['prompts_since'],
+            "files_since": list(s['files_since']),
+            "title": s['title'] or s['ai_title'],
+            "command_seen_at": s['command_seen_at'],
+            "boundary_seen_at": s['boundary_seen_at'],
+            "turns_after_min_since": s['turns_after_min_since'],
+            "prompts_after_min_since": s['prompts_after_min_since'],
+            "context_before_min_since": s['context_before_min_since'],
+        }
 
 
 _FILE_TOOLS = frozenset({"Read", "Edit", "Write", "MultiEdit", "NotebookEdit"})

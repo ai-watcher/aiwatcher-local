@@ -33,12 +33,12 @@ than guessed from a drop in size.
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import transcript_cache
 from . import local_state
 from .pricing import CACHE_READ_MULTIPLIER, CACHE_WRITE_1H_MULTIPLIER, CACHE_WRITE_5M_MULTIPLIER, lookup
 from .scanner import _anthropic_usage, _billed_input, _repeated_row, _usage_receipt_key
@@ -103,68 +103,66 @@ def _read_timeline(path: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
     content-block line, counts once (scanner._usage_receipt_key). Returns the
     events and the output size of every Read call, by tool_use id.
     """
-    timeline: list[dict[str, Any]] = []
-    read_chars: dict[str, int] = {}
-    read_ids: set[str] = set()
-    seen_rows: set[str] = set()
-    seen_requests: set[str] = set()
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict) or _repeated_row(obj, seen_rows) or obj.get("isSidechain"):
-                continue
-            stamp = _parse_stamp(obj.get("timestamp"))
-            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            if obj.get("type") == "system" and obj.get("subtype") == "compact_boundary":
-                meta = obj.get("compactMetadata") if isinstance(obj.get("compactMetadata"), dict) else {}
-                timeline.append({
-                    "kind": "boundary", "at": stamp, "uuid": obj.get("uuid"),
-                    "trigger": meta.get("trigger"),
-                    "pre_tokens": int(meta.get("preTokens") or 0),
-                    "duration_ms": int(meta.get("durationMs") or 0),
-                })
-                continue
-            if obj.get("isCompactSummary"):
-                timeline.append({"kind": "summary", "chars": _text_chars(message.get("content"))})
-                continue
-            if obj.get("type") == "user":
-                content = message.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in read_ids:
-                            read_chars[block["tool_use_id"]] = _text_chars(block.get("content"))
-                if _is_compact_command_row(obj, message):
-                    timeline.append({"kind": "command", "at": stamp})
-                elif _is_prompt_row(obj, message):
-                    timeline.append({"kind": "prompt", "at": stamp})
-                continue
-            if obj.get("type") != "assistant":
-                continue
-            usage = message.get("usage")
-            key = _usage_receipt_key(obj, message)
-            if isinstance(usage, dict) and message.get("model") != "<synthetic>" and (key is None or key not in seen_requests):
-                if key is not None:
-                    seen_requests.add(key)
-                tokens = _anthropic_usage(usage)
-                if _billed_input(tokens) > 0 or tokens["output"] > 0:
-                    timeline.append({"kind": "request", "at": stamp, "model": message.get("model"), "tokens": tokens})
+    def initial() -> dict[str, Any]:
+        return {
+            "timeline": [], "read_chars": {}, "read_ids": set(),
+            "seen_rows": set(), "seen_requests": set(),
+        }
+
+    def consume(s: dict[str, Any], obj: dict[str, Any]) -> None:
+        if not isinstance(obj, dict) or _repeated_row(obj, s['seen_rows']) or obj.get("isSidechain"):
+            return
+        stamp = _parse_stamp(obj.get("timestamp"))
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        if obj.get("type") == "system" and obj.get("subtype") == "compact_boundary":
+            meta = obj.get("compactMetadata") if isinstance(obj.get("compactMetadata"), dict) else {}
+            s['timeline'].append({
+                "kind": "boundary", "at": stamp, "uuid": obj.get("uuid"),
+                "trigger": meta.get("trigger"),
+                "pre_tokens": int(meta.get("preTokens") or 0),
+                "duration_ms": int(meta.get("durationMs") or 0),
+            })
+            return
+        if obj.get("isCompactSummary"):
+            s['timeline'].append({"kind": "summary", "chars": _text_chars(message.get("content"))})
+            return
+        if obj.get("type") == "user":
             content = message.get("content")
-            for block in content if isinstance(content, list) else []:
-                if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") not in _FILE_TOOLS:
-                    continue
-                file_path = (block.get("input") or {}).get("file_path") or (block.get("input") or {}).get("notebook_path")
-                if not isinstance(file_path, str) or not file_path:
-                    continue
-                tool_id = str(block.get("id") or "")
-                if block.get("name") == "Read" and tool_id:
-                    read_ids.add(tool_id)
-                timeline.append({"kind": "touch", "tool": block.get("name"), "path": file_path, "id": tool_id})
-    return timeline, read_chars
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in s['read_ids']:
+                        s['read_chars'][block["tool_use_id"]] = _text_chars(block.get("content"))
+            if _is_compact_command_row(obj, message):
+                s['timeline'].append({"kind": "command", "at": stamp})
+            elif _is_prompt_row(obj, message):
+                s['timeline'].append({"kind": "prompt", "at": stamp})
+            return
+        if obj.get("type") != "assistant":
+            return
+        usage = message.get("usage")
+        key = _usage_receipt_key(obj, message)
+        if isinstance(usage, dict) and message.get("model") != "<synthetic>" and (key is None or key not in s['seen_requests']):
+            if key is not None:
+                s['seen_requests'].add(key)
+            tokens = _anthropic_usage(usage)
+            if _billed_input(tokens) > 0 or tokens["output"] > 0:
+                s['timeline'].append({"kind": "request", "at": stamp, "model": message.get("model"), "tokens": tokens})
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") not in _FILE_TOOLS:
+                continue
+            file_path = (block.get("input") or {}).get("file_path") or (block.get("input") or {}).get("notebook_path")
+            if not isinstance(file_path, str) or not file_path:
+                continue
+            tool_id = str(block.get("id") or "")
+            if block.get("name") == "Read" and tool_id:
+                s['read_ids'].add(tool_id)
+            s['timeline'].append({"kind": "touch", "tool": block.get("name"), "path": file_path, "id": tool_id})
+
+    with transcript_cache.folded_jsonl(path, "claude-outcomes", initial, consume) as aggregate:
+        if aggregate is None:
+            raise OSError("Transcript unavailable or exceeds the record size limit")
+        return list(aggregate['timeline']), dict(aggregate['read_chars'])
 
 
 def _is_rebuild(tokens: dict[str, int]) -> bool:
@@ -415,8 +413,7 @@ COMPACTION_MARKER = re.compile(rb'"subtype":\s?"compact_boundary"')
 
 
 def compaction_markers(path: Path | str) -> int:
-    with open(path, "rb") as handle:
-        return len(COMPACTION_MARKER.findall(handle.read()))
+    return transcript_cache.count_pattern(str(path), COMPACTION_MARKER)
 
 
 def has_compaction(path: Path | str) -> bool:

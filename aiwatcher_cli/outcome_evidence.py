@@ -253,11 +253,6 @@ def _working_tree_fingerprint(repo: str, status: str) -> str | None:
     return digest.hexdigest()[:24]
 
 
-def _git_common_dir(repo: str | None) -> str | None:
-    identity = resolve_git_identity(repo)
-    return identity.common_dir if identity else None
-
-
 def _checkout_root(
     session: LocalSession,
     observed_commands: list[CommandEvidence] | None = None,
