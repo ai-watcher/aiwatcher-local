@@ -92,6 +92,19 @@ class FreshStartContractTests(unittest.TestCase):
         second = {**first, 'next_outcome': 'Verify admin', 'next_brief': 'different complete contract'}
         self.assertNotEqual(ui._fresh_start_evidence_hash(first), ui._fresh_start_evidence_hash(second))
 
+    def test_snapshot_clock_alone_does_not_trigger_a_new_composition(self):
+        first = self.capsule(objective="Fix rendering", next_outcome="Verify the reader")
+        new_stamp = "2099-01-01T00:00:00+00:00"
+        second = {**first, "observed_at": new_stamp,
+                  "next_brief": first["next_brief"].replace(first["observed_at"], new_stamp)}
+        self.assertEqual(ui._fresh_start_evidence_hash(first), ui._fresh_start_evidence_hash(second))
+        self.assertIn(first["observed_at"], first["next_brief"])
+        self.assertIn(new_stamp, second["next_brief"])
+        changed = {**second, "next_brief": second["next_brief"] + "\nAdditional safety instruction."}
+        self.assertNotEqual(ui._fresh_start_evidence_hash(first), ui._fresh_start_evidence_hash(changed))
+        changed = {**second, "updated_at": new_stamp}
+        self.assertNotEqual(ui._fresh_start_evidence_hash(first), ui._fresh_start_evidence_hash(changed))
+
     def test_oversized_packet_is_rejected_before_model_call(self):
         with patch.object(ai_assist, 'build_ai_assist_status', return_value={'ready': True, 'mode': 'cloud'}), \
              patch.object(ai_assist, '_call_configured_chat') as call:

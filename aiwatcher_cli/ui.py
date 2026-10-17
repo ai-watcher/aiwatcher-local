@@ -1813,6 +1813,16 @@ def _fresh_start_evidence_hash(
     *,
     source_access: str = "metadata_only",
 ) -> str:
+    canonical_brief = str(capsule.get("next_brief") or "")
+    observed_at = str(capsule.get("observed_at") or "")
+    if _parse_iso_datetime(observed_at) is not None:
+        # Observation time belongs on the preserved brief, but does not
+        # change the evidence or justify another model call. Keep every
+        # other byte (including source update time and guardrails) in the key.
+        canonical_brief = canonical_brief.replace(
+            f"- Observed: {observed_at}; source updated:",
+            "- Observed: <snapshot-time>; source updated:", 1,
+        )
     evidence = {
         "session_id": capsule.get("session_id"),
         "project": capsule.get("project"),
@@ -1838,7 +1848,7 @@ def _fresh_start_evidence_hash(
         "repo_state_id": capsule.get("repo_state_id"),
         "include_prompt_excerpt": capsule.get("include_prompt_excerpt"),
         "source_access": source_access,
-        "next_brief": capsule.get("next_brief"),
+        "next_brief": canonical_brief,
     }
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
 
