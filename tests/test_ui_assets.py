@@ -3388,15 +3388,15 @@ class CompactAtTheBoundaryTest(unittest.TestCase):
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
 
-    def test_the_row_offers_the_command_when_recommended(self):
+    def test_the_row_offers_guided_review_when_recommended(self):
         row = js_function_source(self.js, "healthRow")
         # actionable, not recommend: the numbers can still recommend while
         # the log already shows the /compact typed, and offering the command
         # again then would ask for a thing already done.
         self.assertIn("row.compact.actionable", row)
         self.assertNotIn("row.compact.recommend", row)
-        self.assertIn("Copy /compact", row)
-        self.assertIn("copyCompactCommand(", row)
+        self.assertIn("Review compact", row)
+        self.assertIn("openCompactReview(", row)
         self.assertIn("deferCompact(", row)
         # Deferred keeps the numbers and drops the buttons.
         self.assertIn("!row.compact.deferred", row)
@@ -3404,7 +3404,7 @@ class CompactAtTheBoundaryTest(unittest.TestCase):
         # subject ended the inline handler mid-expression on real data. It
         # travels in the title attribute and is read back from there.
         self.assertNotIn("jsArg(compact.command)", row)
-        self.assertIn("this.title, this)", row)
+        self.assertIn("this.title, this)", js_function_source(self.js, "renderCompactReview"))
 
     def test_copy_writes_the_clipboard_and_records_a_receipt(self):
         copy = js_function_source(self.js, "copyCompactCommand")
@@ -3417,7 +3417,8 @@ class CompactAtTheBoundaryTest(unittest.TestCase):
     def test_the_reason_leads_with_the_boundary(self):
         reason = js_function_source(self.js, "healthReason")
         self.assertIn("predates commit", reason)
-        self.assertIn("drops the next turn to about", reason)
+        self.assertIn("Estimated context after compaction", reason)
+        self.assertIn("actual size may differ", reason)
 
     def test_the_reason_follows_the_compaction_through_the_log(self):
         # Each later step has its own sentence, checked before the nudge so a

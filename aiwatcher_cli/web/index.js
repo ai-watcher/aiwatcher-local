@@ -5906,11 +5906,13 @@ function renderCompactReview(item) {
   const status = { nudge: 'Ready to review', copied: 'Command copied; compaction not yet observed. Monitoring continues.', compacting: 'Compaction command observed; waiting for completion.', compacted: 'Compaction boundary observed; waiting for the next measured reply.', confirmed: 'New context size observed.' }[item.stage] || 'Status unknown; refresh before acting.';
   return `<section class="detail-section compact-review">
     <h3>${esc(item.title || item.name || item.session_id)}</h3>
-    <p><strong>Target:</strong> ${esc(item.tool_name || item.tool)} · ${esc(item.project || '')} · ${esc(item.session_id)}</p>
+    <p><strong>Target:</strong> ${esc(item.tool_name || item.tool)} / ${esc(item.model || 'model unknown')} · ${esc(item.project || '')} · ${esc(item.session_id)}</p>
     <p><strong>Checkout:</strong> <code>${esc(item.checkout || 'unknown')}</code></p>
+    <p><strong>Checkpoint:</strong> ${esc(item.sha_short)} · ${esc(item.subject || 'subject unavailable')} · ${esc(item.committed_at || 'time unknown')}</p>
     <p><strong>Why now:</strong> ${esc(item.dead_label)} of ${esc(item.latest_label)} observed context predates checkpoint ${esc(item.sha_short)}. A commit is an anchor; unfinished work may still exist.</p>
     <p><strong>Potential benefit:</strong> estimated ${esc(item.after_label)} context after compaction. This is a heuristic, not measured savings, reclaimed RAM, or disk space.</p>
     <p><strong>Status:</strong> ${esc(status)}</p>
+    ${item.stage === 'confirmed' ? `<p><strong>Observed result:</strong> ${esc(item.before_shed_label || 'previous size unknown')} → ${esc(item.after_shed_label || item.latest_label)} context per reply.</p>` : ''}
     ${active ? `<ol>
       <li>Open this exact chat and wait for its current turn to finish. Confirm the identity above.</li>
       <li>Optional: paste the preservation brief below as a normal message. Review its summary before compacting.</li>

@@ -81,3 +81,11 @@ test('guided review fits a narrow drawer with long paths and an expanded preserv
     if (process.env.AIWATCHER_COMPACT_PREVIEW) await page.screenshot({ path: process.env.AIWATCHER_COMPACT_PREVIEW, fullPage: true });
   } finally { await browser.close(); }
 });
+
+test('observed compaction shows actual size and cannot offer another command', () => {
+  const h = harness();
+  const html = h.ctx.renderCompactReview({ stage: 'confirmed', before_shed_label: '160k', after_shed_label: '42k' });
+  assert.ok(html.includes('Observed result:'));
+  assert.ok(html.includes('160k → 42k'));
+  assert.ok(!html.includes('Copy native command'));
+});

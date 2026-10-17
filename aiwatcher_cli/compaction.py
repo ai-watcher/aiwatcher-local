@@ -196,7 +196,7 @@ _PATCH_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$", re.M)
 def _codex_patch_paths(payload: dict[str, Any]) -> list[str]:
     """Files named by an apply_patch call. Shell commands are not mined for
     paths: a path-shaped token in a command is a guess, and these only feed
-    the focus text, which Codex's /compact cannot take anyway."""
+    the optional preservation message rather than Codex command arguments."""
     if payload.get("name") not in {"apply_patch", "applyPatch"}:
         return []
     text = payload.get("input")
@@ -317,7 +317,8 @@ def compact_command(
 
     Claude Code's /compact takes free-text focus, so the command says what to
     keep -- the boundary and the files touched since -- and what to drop.
-    Codex's takes nothing, so its command is the bare word.
+    For Codex, keep the native command separate rather than assume inline
+    focus arguments; the preservation message is an optional prior step.
     """
     if "codex" in tool.lower():
         return "/compact"
