@@ -21,6 +21,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+from .runtime_lifecycle import ROLE_ACQUIRE_TIMEOUT_SECONDS, acquire_runtime_lock
+
 
 @dataclass(frozen=True)
 class OverlayConfig:
@@ -4285,16 +4287,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--primary-mode", choices=("copy", "inspect"))
     parser.add_argument("--runtime-action-available", action="store_true")
     args = parser.parse_args(argv)
-    if args.tray:
-        return run_native_tray(args.url, prompt_url=args.prompt_url)
-    if args.presence:
-        return run_native_presence(
-            args.url,
-            prompt_url=args.prompt_url,
-            position=args.position,
-            visibility=args.visibility,
-            interval=args.interval,
+    if args.tray or args.presence:
+        role = "companion-ui"
+        ownership = acquire_runtime_lock(
+            role,
+            metadata={
+                "mode": "tray" if args.tray else "presence",
+                "url": args.url,
+                "interval_seconds": args.interval,
+            },
+            timeout=ROLE_ACQUIRE_TIMEOUT_SECONDS,
         )
+        if ownership is None:
+            print("Another AIWatcher Companion UI already owns the local runtime.", file=sys.stderr)
+            return 2
+        try:
+            if args.tray:
+                return run_native_tray(args.url, prompt_url=args.prompt_url)
+            return run_native_presence(
+                args.url,
+                prompt_url=args.prompt_url,
+                position=args.position,
+                visibility=args.visibility,
+                interval=args.interval,
+            )
+        finally:
+            ownership.release()
     return run_native_overlay(
         args.url,
         args.title,

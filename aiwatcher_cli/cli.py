@@ -124,6 +124,12 @@ from .receipt import (
     survival_note,
 )
 from .runtime_attachment import perform_runtime_return, runtime_attachment_for_session, safe_runtime_processes
+from .runtime_lifecycle import (
+    ROLE_ACQUIRE_TIMEOUT_SECONDS,
+    RuntimeLock,
+    acquire_runtime_lock,
+    runtime_lock_status,
+)
 from .runtime_nudge import (
     COMPANION_BAR_SIGNAL_KINDS,
     MAX_ACTIVE_IDLE_SECONDS,
@@ -3633,6 +3639,9 @@ def command_start(args: argparse.Namespace) -> int:
             port=int(getattr(args, "ui_port", DEFAULT_UI_PORT)),
             port_attempts=int(getattr(args, "ui_port_attempts", 20)),
         )
+        if ui_url is None:
+            print("AIWatcher could not start the dashboard; startup was stopped.", file=sys.stderr)
+            return 2
     sessions = sessions_since(1)
     print(f"AIWatcher v{__version__} - private-by-default mode")
     print("Read-only scan. No data leaves this machine.\n")
@@ -3772,6 +3781,11 @@ def command_restart(args: argparse.Namespace) -> int:
     stop_result = stop_companion()
     if not stop_result.get("ok"):
         print(f"Companion could not stop: {stop_result.get('message', 'unknown error')}", file=sys.stderr)
+        return 2
+    presence_stopped = _stop_native_companion_presence()
+    tray_stopped = _stop_native_companion_tray()
+    if not presence_stopped or not tray_stopped:
+        print("Companion UI could not stop cleanly; refusing to start a duplicate.", file=sys.stderr)
         return 2
 
     start_result = start_companion(
@@ -4039,17 +4053,17 @@ def _start_dashboard_server(
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
     try:
-        log_handle = log_path.open("a", encoding="utf-8")
-        subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=log_handle,
-            cwd=os.getcwd(),
-            env=env,
-            start_new_session=(os.name != "nt"),
-            close_fds=(os.name != "nt"),
-        )
+        with log_path.open("a", encoding="utf-8") as log_handle:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=log_handle,
+                cwd=os.getcwd(),
+                env=env,
+                start_new_session=(os.name != "nt"),
+                close_fds=(os.name != "nt"),
+            )
     except OSError as exc:
         print(f"Dashboard UI could not start: {exc}", file=sys.stderr)
         return None
@@ -4057,6 +4071,12 @@ def _start_dashboard_server(
     for _ in range(30):
         if local_action_server_available() and _same_install_identity(_running_dashboard_identity(), current_identity):
             return f"{_watch_ui_base_url()}/"
+        if process.poll() is not None:
+            print(
+                f"Dashboard UI exited before becoming healthy. Log: {log_path}",
+                file=sys.stderr,
+            )
+            return None
         time_module.sleep(0.1)
 
     print(f"Dashboard UI is still starting. Log: {log_path}", file=sys.stderr)
@@ -4205,7 +4225,11 @@ def command_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_companion_heartbeat(interval_seconds: int) -> int:
+def _run_companion_heartbeat(
+    interval_seconds: int,
+    *,
+    ownership: RuntimeLock | None = None,
+) -> int:
     """Keep lifecycle state alive while the local action server owns scans.
 
     The Companion used to run command_watch() beside the server, so the same
@@ -4214,6 +4238,13 @@ def _run_companion_heartbeat(interval_seconds: int) -> int:
     the second scan had no user-visible purpose and doubled background work.
     """
     interval = max(15, int(interval_seconds))
+    ownership = ownership or acquire_runtime_lock(
+        "companion", metadata={"interval_seconds": interval, **install_identity()},
+        timeout=ROLE_ACQUIRE_TIMEOUT_SECONDS,
+    )
+    if ownership is None:
+        print("Another AIWatcher Companion already owns the local runtime.", file=sys.stderr)
+        return 2
     try:
         while True:
             record_watcher_heartbeat(
@@ -4228,6 +4259,58 @@ def _run_companion_heartbeat(interval_seconds: int) -> int:
         return 0
     finally:
         clear_watcher_heartbeat(pid=os.getpid())
+        ownership.release()
+
+
+def runtime_status_snapshot() -> dict[str, object]:
+    """Return logical product roles without counting generic Python wrappers."""
+    roles = {
+        "dashboard": runtime_lock_status("dashboard"),
+        "companion": runtime_lock_status("companion"),
+        "companion_ui": runtime_lock_status("companion-ui"),
+    }
+    return {
+        "roles": roles,
+        "healthy": bool(roles["dashboard"].get("active") and roles["companion"].get("active")),
+        "observability": "role_locks",
+        "mcp": {
+            "mode": "connection_scoped",
+            "required": False,
+            "process_count": None,
+            "detail": (
+                "Each live MCP-capable client connection owns one optional stdio server; "
+                "runtime status does not enumerate client-owned MCP processes."
+            ),
+        },
+    }
+
+
+def render_runtime_status(snapshot: dict[str, object] | None = None) -> str:
+    snapshot = snapshot or runtime_status_snapshot()
+    labels = {
+        "dashboard": "Dashboard",
+        "companion": "Companion scanner",
+        "companion_ui": "Companion UI",
+    }
+    lines = ["AIWatcher runtime status"]
+    for name, row in snapshot["roles"].items():
+        state = "running" if row.get("active") else "stopped"
+        pid = f" (PID {row['pid']})" if row.get("active") and isinstance(row.get("pid"), int) else ""
+        lines.append(f"- {labels[name]}: {state}{pid}")
+    lines.extend([
+        "- MCP servers: optional and connection-scoped; process count is not observed here.",
+        "Healthy local runtime: " + ("yes" if snapshot["healthy"] else "no"),
+    ])
+    return "\n".join(lines)
+
+
+def command_runtime(args: argparse.Namespace) -> int:
+    snapshot = runtime_status_snapshot()
+    if getattr(args, "json", False):
+        print(json.dumps(snapshot, indent=2))
+    else:
+        print(render_runtime_status(snapshot))
+    return 0 if snapshot["healthy"] else 1
 
 
 def command_companion(args: argparse.Namespace) -> int:
@@ -4310,40 +4393,52 @@ def command_companion(args: argparse.Namespace) -> int:
         print(f"Path: {status.get('path')}")
         return 0 if status.get("supported") else 2
     if action == "run":
-        if not local_action_server_available():
-            from .ui import serve
+        interval = max(15, int(getattr(args, "interval", 30)))
+        ownership = acquire_runtime_lock(
+            "companion", metadata={"interval_seconds": interval, **install_identity()},
+            timeout=ROLE_ACQUIRE_TIMEOUT_SECONDS,
+        )
+        if ownership is None:
+            print("Another AIWatcher Companion already owns the local runtime.", file=sys.stderr)
+            return 2
+        try:
+            if not local_action_server_available():
+                from .ui import serve
 
-            threading.Thread(
-                target=serve,
-                kwargs={"host": "127.0.0.1", "port": DEFAULT_UI_PORT, "auto_port": True},
-                name="aiwatcher-companion-actions",
-                daemon=True,
-            ).start()
-            for _ in range(20):
-                if local_action_server_available():
-                    break
-                time_module.sleep(0.1)
-        if presence_requested:
-            base_url = _watch_ui_base_url()
-            ok, detail = _refresh_existing_native_companion_presence(
-                base_url,
-                exclude_pid=os.getpid(),
-                interval=int(getattr(args, "interval", 30)),
-                position=str(getattr(args, "presence_position", "bottom-right")),
-                visibility=str(getattr(args, "presence_visibility", "always")),
-            )
-            if not ok and "not running" in detail:
-                ok, detail = _open_native_companion_presence(
+                threading.Thread(
+                    target=serve,
+                    kwargs={"host": "127.0.0.1", "port": DEFAULT_UI_PORT, "auto_port": True},
+                    name="aiwatcher-companion-actions",
+                    daemon=True,
+                ).start()
+                for _ in range(20):
+                    if local_action_server_available():
+                        break
+                    time_module.sleep(0.1)
+            if presence_requested:
+                base_url = _watch_ui_base_url()
+                ok, detail = _refresh_existing_native_companion_presence(
                     base_url,
-                    interval=int(getattr(args, "interval", 30)),
+                    exclude_pid=os.getpid(),
+                    interval=interval,
                     position=str(getattr(args, "presence_position", "bottom-right")),
                     visibility=str(getattr(args, "presence_visibility", "always")),
                 )
-            if ok:
-                print(f"AIWatcher companion presence started ({detail}).")
-            else:
-                print(f"AIWatcher companion presence not started ({detail}).", file=sys.stderr)
-        return _run_companion_heartbeat(getattr(args, "interval", 30))
+                if not ok and "not running" in detail:
+                    ok, detail = _open_native_companion_presence(
+                        base_url,
+                        interval=interval,
+                        position=str(getattr(args, "presence_position", "bottom-right")),
+                        visibility=str(getattr(args, "presence_visibility", "always")),
+                    )
+                if ok:
+                    print(f"AIWatcher companion presence started ({detail}).")
+                else:
+                    print(f"AIWatcher companion presence not started ({detail}).", file=sys.stderr)
+            return _run_companion_heartbeat(interval, ownership=ownership)
+        except BaseException:
+            ownership.release()
+            raise
     if action == "start":
         result = start_companion(
             interval_seconds=args.interval,
@@ -4390,10 +4485,13 @@ def command_companion(args: argparse.Namespace) -> int:
         print(f"Log: {result.get('log_path') or companion_log_path()}")
         return 0
     if action == "stop":
-        _stop_native_companion_presence()
-        _stop_native_companion_tray()
+        presence_stopped = _stop_native_companion_presence()
+        tray_stopped = _stop_native_companion_tray()
         result = stop_companion()
         print(str(result.get("message") or "Companion stopped."))
+        if not presence_stopped or not tray_stopped:
+            print("One Companion UI process could not be stopped.", file=sys.stderr)
+            return 2
         return 0 if result.get("ok") else 2
 
     status = get_watcher_status()
@@ -5739,50 +5837,56 @@ def _existing_companion_tray_pid() -> int | None:
     return None
 
 
-def _stop_native_companion_presence() -> None:
+def _stop_native_companion_presence() -> bool:
     pid = _existing_companion_presence_pid()
     if pid is None:
-        return
+        return True
     try:
         if sys.platform == "win32":
-            subprocess.run(
+            completed = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 timeout=5,
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            if completed.returncode != 0 and _pid_is_running(pid):
+                return False
         else:
             os.kill(pid, signal.SIGTERM)
     except (OSError, subprocess.TimeoutExpired):
-        return
+        return False
     try:
         _companion_presence_pid_path().unlink()
     except OSError:
         pass
+    return True
 
 
-def _stop_native_companion_tray() -> None:
+def _stop_native_companion_tray() -> bool:
     pid = _existing_companion_tray_pid()
     if pid is None:
-        return
+        return True
     try:
         if sys.platform == "win32":
-            subprocess.run(
+            completed = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 timeout=5,
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            if completed.returncode != 0 and _pid_is_running(pid):
+                return False
         else:
             os.kill(pid, signal.SIGTERM)
     except (OSError, subprocess.TimeoutExpired):
-        return
+        return False
     try:
         _companion_tray_pid_path().unlink()
     except OSError:
         pass
+    return True
 
 
 def _open_native_companion_presence(
@@ -5865,7 +5969,8 @@ def _refresh_existing_native_companion_presence(
     stopped_orphans = cleanup_orphan_companion_processes(exclude_pid=exclude_pid)
     if existing_pid is None and not stopped_orphans:
         return False, "native companion presence not running"
-    _stop_native_companion_presence()
+    if not _stop_native_companion_presence():
+        return False, f"native companion presence PID {existing_pid} could not be stopped"
     ok, detail = _open_native_companion_presence(
         base_url, interval=interval, position=position, visibility=visibility,
     )
@@ -9689,6 +9794,11 @@ def command_hook_status(_args: argparse.Namespace) -> int:
 def _mcp_tool_specs() -> list[dict[str, object]]:
     return [
         {
+            "name": "aiwatcher_runtime_status",
+            "description": "Check whether the local AIWatcher dashboard and Companion roles are healthy.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "aiwatcher_today",
             "description": "Summarize local AI coding usage for this machine.",
             "inputSchema": {
@@ -9764,6 +9874,8 @@ def _mcp_tool_specs() -> list[dict[str, object]]:
 
 def _mcp_tool_call(name: str, arguments: dict[str, object] | None) -> str:
     args = arguments or {}
+    if name == "aiwatcher_runtime_status":
+        return render_runtime_status()
     if name == "aiwatcher_today":
         return render_today(days=max(1, min(90, int(args.get("days", 1)))))
     if name == "aiwatcher_last_session":
@@ -9991,7 +10103,13 @@ def command_ui(args: argparse.Namespace) -> int:
         )
     except OSError as exc:
         print(f"Could not start AIWatcher Local UI: {exc}", file=sys.stderr)
-        print("Try `aiwatcher ui --restart` or omit `--no-port-fallback` to use the next available port.", file=sys.stderr)
+        if "already running" in str(exc) or "already owns" in str(exc):
+            print(
+                "Use the existing dashboard, or run `aiwatcher restart --open-ui` to replace it.",
+                file=sys.stderr,
+            )
+        else:
+            print("Try `aiwatcher ui --restart` after checking the requested port.", file=sys.stderr)
         return 2
     return 0
 
@@ -10053,6 +10171,15 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--branch", default="main", help="Remote branch to check")
     update.set_defaults(func=command_update)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
+    runtime = sub.add_parser("runtime", help="Inspect AIWatcher-owned local runtime roles")
+    runtime_sub = runtime.add_subparsers(
+        dest="runtime_action",
+        required=True,
+        help="Inspect logical runtime ownership",
+    )
+    runtime_status = runtime_sub.add_parser("status", help="Show dashboard, Companion, and optional MCP roles")
+    runtime_status.add_argument("--json", action="store_true", help="Emit structured runtime status")
+    runtime_status.set_defaults(func=command_runtime)
     companion = sub.add_parser("companion", help="Run the local runtime-nudge companion without the dashboard")
     companion_sub = companion.add_subparsers(
         dest="companion_action",
@@ -10641,7 +10768,27 @@ def main(argv: list[str] | None = None) -> int:
         handler = handlers[arguments[0]]
         return int(handler(hook_args))
     args = build_parser().parse_args(arguments)
-    return int(args.func(args))
+    companion_action = getattr(args, "companion_action", None)
+    lifecycle_action = args.command in {"start", "restart"} or (
+        args.command == "companion" and (
+            companion_action in {"start", "stop"}
+            or (companion_action == "tray" and getattr(args, "tray_action", None) == "start")
+        )
+    )
+    if not lifecycle_action:
+        return int(args.func(args))
+    lifecycle = acquire_runtime_lock(
+        "lifecycle",
+        metadata={"command": " ".join(arguments), **install_identity()},
+        timeout=10,
+    )
+    if lifecycle is None:
+        print("Another AIWatcher start, stop, or restart is still in progress.", file=sys.stderr)
+        return 2
+    try:
+        return int(args.func(args))
+    finally:
+        lifecycle.release()
 
 
 if __name__ == "__main__":

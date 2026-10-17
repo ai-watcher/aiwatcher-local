@@ -173,6 +173,81 @@ class SurfaceCoverageCliTests(unittest.TestCase):
 
 
 class StartCommandCliTests(unittest.TestCase):
+    def test_main_serializes_lifecycle_commands(self) -> None:
+        parser = Mock()
+        handler = Mock(return_value=0)
+        parser.parse_args.return_value = SimpleNamespace(command="start", func=handler)
+        ownership = Mock()
+        with (
+            patch.object(cli, "build_parser", return_value=parser),
+            patch.object(cli, "install_identity", return_value={}),
+            patch.object(cli, "acquire_runtime_lock", return_value=ownership) as acquire,
+        ):
+            result = cli.main(["start"])
+
+        self.assertEqual(result, 0)
+        acquire.assert_called_once()
+        handler.assert_called_once()
+        ownership.release.assert_called_once_with()
+
+    def test_main_refuses_overlapping_lifecycle_command(self) -> None:
+        parser = Mock()
+        handler = Mock(return_value=0)
+        parser.parse_args.return_value = SimpleNamespace(command="restart", func=handler)
+        with (
+            patch.object(cli, "build_parser", return_value=parser),
+            patch.object(cli, "install_identity", return_value={}),
+            patch.object(cli, "acquire_runtime_lock", return_value=None),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.main(["restart"])
+
+        self.assertEqual(result, 2)
+        handler.assert_not_called()
+        self.assertIn("still in progress", stderr.getvalue())
+
+    def test_companion_heartbeat_refuses_a_second_role_owner(self) -> None:
+        with (
+            patch.object(cli, "acquire_runtime_lock", return_value=None),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli._run_companion_heartbeat(30)
+
+        self.assertEqual(result, 2)
+        self.assertIn("already owns", stderr.getvalue())
+
+    def test_companion_run_claims_ownership_before_starting_children(self) -> None:
+        with (
+            patch.object(cli, "acquire_runtime_lock", return_value=None),
+            patch.object(cli, "local_action_server_available") as server_available,
+            patch.object(cli, "_open_native_companion_presence") as open_presence,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            result = cli.command_companion(SimpleNamespace(
+                companion_action="run",
+                interval=30,
+                no_presence=False,
+                presence_position="bottom-right",
+                presence_visibility="always",
+            ))
+
+        self.assertEqual(result, 2)
+        server_available.assert_not_called()
+        open_presence.assert_not_called()
+
+    def test_companion_heartbeat_releases_ownership_on_exit(self) -> None:
+        ownership = Mock()
+        with (
+            patch.object(cli, "acquire_runtime_lock", return_value=ownership),
+            patch.object(cli, "record_watcher_heartbeat", side_effect=KeyboardInterrupt),
+            patch.object(cli, "clear_watcher_heartbeat") as clear,
+        ):
+            result = cli._run_companion_heartbeat(30)
+
+        self.assertEqual(result, 0)
+        clear.assert_called_once()
+        ownership.release.assert_called_once_with()
+
     def test_restart_replaces_dashboard_then_companion_with_requested_settings(self) -> None:
         calls: list[str] = []
         identity = {"install_kind": "source", "source_root": "/repo"}
@@ -185,6 +260,16 @@ class StartCommandCliTests(unittest.TestCase):
                 side_effect=lambda **_kwargs: calls.append("dashboard") or "http://127.0.0.1:8899/",
             ) as start_dashboard,
             patch.object(cli, "stop_companion", side_effect=lambda: calls.append("stop") or {"ok": True}),
+            patch.object(
+                cli,
+                "_stop_native_companion_presence",
+                side_effect=lambda: calls.append("stop-presence") or True,
+            ),
+            patch.object(
+                cli,
+                "_stop_native_companion_tray",
+                side_effect=lambda: calls.append("stop-tray") or True,
+            ),
             patch.object(
                 cli,
                 "start_companion",
@@ -207,7 +292,7 @@ class StartCommandCliTests(unittest.TestCase):
             ))
 
         self.assertEqual(result, 0)
-        self.assertEqual(calls, ["dashboard", "stop", "start"])
+        self.assertEqual(calls, ["dashboard", "stop", "stop-presence", "stop-tray", "start"])
         start_dashboard.assert_called_once_with(host="127.0.0.1", port=8899, port_attempts=7, restart=True)
         start_companion.assert_called_once_with(
             interval_seconds=45,
@@ -227,6 +312,27 @@ class StartCommandCliTests(unittest.TestCase):
         start_dashboard.assert_not_called()
         self.assertIn("loopback", stderr.getvalue())
 
+    def test_restart_refuses_to_duplicate_a_native_ui_that_did_not_stop(self) -> None:
+        identity = {"install_kind": "source", "source_root": "/repo"}
+        with (
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "_running_dashboard_identity", side_effect=[None, {**identity, "pid": 200}]),
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli, "stop_companion", return_value={"ok": True}),
+            patch.object(cli, "_stop_native_companion_presence", return_value=False),
+            patch.object(cli, "_stop_native_companion_tray", return_value=True),
+            patch.object(cli, "start_companion") as start_companion,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                ui_host="127.0.0.1", ui_port=8765, ui_port_attempts=1, from_companion=False,
+            ))
+
+        self.assertEqual(result, 2)
+        start_companion.assert_not_called()
+        self.assertIn("refusing to start a duplicate", stderr.getvalue())
+
     def test_restart_leaves_companion_running_when_dashboard_never_becomes_healthy(self) -> None:
         with (
             patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
@@ -244,6 +350,24 @@ class StartCommandCliTests(unittest.TestCase):
         stop_companion.assert_not_called()
         start_companion.assert_not_called()
         self.assertIn("did not become healthy", stderr.getvalue())
+
+    def test_dashboard_launcher_rejects_a_child_that_exits_before_health(self) -> None:
+        process = Mock()
+        process.poll.return_value = 2
+        with (
+            patch.object(cli.subprocess, "Popen", return_value=process),
+            patch.object(cli, "local_action_server_available", return_value=False),
+            patch.object(cli, "install_identity", return_value={}),
+            patch.object(cli.time_module, "sleep") as sleep,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli._start_dashboard_server(
+                host="127.0.0.1", port=8765, port_attempts=1, restart=False,
+            )
+
+        self.assertIsNone(result)
+        sleep.assert_not_called()
+        self.assertIn("exited before becoming healthy", stderr.getvalue())
 
     def test_restart_does_not_accept_the_old_same_install_dashboard_pid(self) -> None:
         identity = {"install_kind": "source", "source_root": "/repo", "pid": 100}
@@ -339,6 +463,26 @@ class StartCommandCliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         start_companion.assert_not_called()
+
+    def test_start_fails_when_requested_dashboard_cannot_start(self) -> None:
+        with (
+            patch.object(cli, "_ensure_dashboard_server", return_value=None),
+            patch.object(cli, "sessions_since") as scan,
+            patch.object(cli, "start_companion") as start_companion,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_start(SimpleNamespace(
+                no_ui=False,
+                no_companion=True,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=1,
+            ))
+
+        self.assertEqual(result, 2)
+        scan.assert_not_called()
+        start_companion.assert_not_called()
+        self.assertIn("could not start the dashboard", stderr.getvalue())
 
     def test_start_preserves_an_existing_companion_interval_in_the_presence(self) -> None:
         with (
@@ -543,6 +687,21 @@ class StartCommandCliTests(unittest.TestCase):
             visibility="always",
         )
 
+    def test_presence_refresh_does_not_claim_success_when_stop_fails(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "cleanup_orphan_companion_processes", return_value=[]),
+            patch.object(cli, "_stop_native_companion_presence", return_value=False),
+            patch.object(cli, "_open_native_companion_presence") as open_presence,
+        ):
+            ok, detail = cli._refresh_existing_native_companion_presence(
+                "http://127.0.0.1:8896",
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("PID 123 could not be stopped", detail)
+        open_presence.assert_not_called()
+
     def test_companion_start_refreshes_presence_when_daemon_already_runs(self) -> None:
         with (
             patch.object(
@@ -650,8 +809,9 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli.os, "kill") as kill,
         ):
             pid_path.return_value.unlink.return_value = None
-            cli._stop_native_companion_presence()
+            stopped = cli._stop_native_companion_presence()
 
+        self.assertTrue(stopped)
         run.assert_called_once_with(
             ["taskkill", "/PID", "123", "/T", "/F"],
             capture_output=True,
@@ -662,6 +822,19 @@ class StartCommandCliTests(unittest.TestCase):
             creationflags=getattr(cli.subprocess, "CREATE_NO_WINDOW", 0),
         )
         kill.assert_not_called()
+
+    def test_companion_stop_keeps_windows_pid_when_taskkill_fails(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.subprocess, "run", return_value=SimpleNamespace(returncode=1)),
+            patch.object(cli, "_pid_is_running", return_value=True),
+        ):
+            stopped = cli._stop_native_companion_presence()
+
+        self.assertFalse(stopped)
+        pid_path.return_value.unlink.assert_not_called()
 
     def test_presence_launcher_uses_windows_headless_console_flags(self) -> None:
         original_import = __import__
