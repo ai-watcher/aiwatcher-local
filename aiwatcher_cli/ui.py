@@ -8205,12 +8205,14 @@ def _recent_signal_block() -> dict[str, object] | None:
 # Later hides one commit's nudge; a new commit is a new key, so the cap only
 # matters if nothing is committed for a day.
 COMPACT_LATER_MINUTES = 24 * 60
+COMPACT_COPY_ACK_SECONDS = 10
 _COMPACT_CACHE: dict[str, tuple[str, str, compaction.Assessment | None]] = {}
 
 
 def _compact_payload(assessment: compaction.Assessment) -> dict[str, object]:
     data = assessment.to_json()
     data.update({
+        "preservation_prompt": compaction.preservation_prompt(assessment),
         "sha_short": assessment.sha[:7],
         "session_short": short_session_id(assessment.session_id),
         "latest_label": compact_int(assessment.latest_turn_tokens),
@@ -8326,9 +8328,15 @@ def _compact_session_payload(session: LocalSession, row: SessionPresence) -> dic
     except OSError:
         pass
     payload["stage"] = stage
+    decided_at = _parse_iso_datetime(record.get("decided_at")) if record else None
+    payload["copy_ack_active"] = bool(
+        stage == "copied" and decided_at
+        and 0 <= (datetime.now(timezone.utc) - decided_at).total_seconds() < COMPACT_COPY_ACK_SECONDS
+    )
     payload["nudge_id"] = record.get("id") if record else None
     payload["after_estimate_nudged"] = int(record.get("after_estimate") or 0) if record else 0
     payload["project"] = _project_basename(session.project_path) or ""
+    payload["checkout"] = session.raw_cwd or session.project_path or "unknown"
     payload["tool_name"] = tool_label(session.tool)
     payload["name"] = assessment.title or f"{payload['tool_name']} · {payload['project']}".strip(" ·")
     return payload
@@ -8596,9 +8604,9 @@ def _compact_row(item: dict[str, object]) -> dict[str, object]:
         "sha": str(item.get("sha") or ""),
         "text": f"{item.get('name')} · {item.get('dead_label')} of {item.get('latest_label')}",
         "tag": tag,
-        "action": "copy_compact" if stage in {"nudge", "copied"} else "",
+        "action": "open_url" if stage in {"nudge", "copied"} else "",
         "command": str(item.get("command") or "") if stage in {"nudge", "copied"} else "",
-        "url": f"/?session={quote(session_id, safe='')}",
+        "url": f"/?compact={quote(session_id, safe='')}",
     }
 
 
@@ -8607,7 +8615,8 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
 
     Title fits 18 characters and subtitle 46 -- the bar's own caps, which
     truncated the first version mid-word. Every step changes on a line the
-    tool wrote to the session log; nothing here waits on a timer.
+    tool wrote to the session log. Only the copy acknowledgement expires;
+    it is never evidence that compaction ran.
     """
     items = [item for item in compact.get("sessions") or [] if isinstance(item, dict)]
     lead = items[0] if items else compact
@@ -8629,7 +8638,7 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
         "primary_action": "none",
         "primary_label": "",
         "primary_session_id": session_id,
-        "primary_url": f"/?session={quote(session_id, safe='')}",
+        "primary_url": f"/?compact={quote(session_id, safe='')}",
         "compact_command": "",
         "compact_sha": str(lead.get("sha") or ""),
         "skip_label": "Later",
@@ -8656,7 +8665,7 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
             "compact_rows": [_compact_row(item) for item in items],
             "detail": (
                 f"{len(items)} sessions replay work from before commit {lead.get('sha_short')}. "
-                "Each row is one window; Copy puts that window's /compact on the clipboard."
+                "Review a window for its preservation brief and native command."
             ),
         }
     if stage == "copied":
@@ -8665,8 +8674,8 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
             "label": "Copied",
             "subtitle": f"Paste into {name}"[:46] if name else "Paste it into the tool's prompt",
             "detail": (
-                "Watching this session's log for the compaction to land. Claude Code records it "
-                "when it finishes, about a minute after enter."
+                "Copying has not compacted the chat. Paste into the named chat when it is idle. "
+                "The acknowledgement clears after 10 seconds; monitoring continues in the background."
             ),
         }
     if stage == "compacting":
@@ -8702,17 +8711,17 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
     return {
         **common,
         "label": "Compact now",
-        "subtitle": _fit_name(name, figures) if name else f"{when} · {figures} is finished work",
-        "primary_label": "Copy",
-        "primary_action": "copy_compact",
+        "subtitle": _fit_name(name, figures) if name else f"{when} · {figures} before checkpoint",
+        "primary_label": "Review",
+        "primary_action": "open_url",
         "compact_command": str(lead.get("command") or ""),
         "skip_state": "compact_recommended",
         "skip_session_id": session_id,
         "skip_session_ids": [session_id],
         "detail": (
-            f"{when}. {figures} this turn replays is finished work"
-            f"{f' in {name}' if name else ''}. Compacting now drops the next reply to about "
-            f"{lead.get('after_label')}. Nudged once per commit; Later hides it until the next one."
+            f"{when}. {figures} of observed context predates this checkpoint"
+            f"{f' in {name}' if name else ''}. Estimated context after compaction: "
+            f"{lead.get('after_label')}; actual result may differ. Review what to preserve, then compact in the owning app. Later hides this checkpoint."
         ),
     }
 
@@ -8979,7 +8988,12 @@ def build_companion_state() -> dict[str, object]:
     # (Danny, 2026-09-15). It keeps until the context sheds.
     compact = base.get("compact")
     if isinstance(compact, dict) and compact.get("sessions"):
-        return _compact_companion_state(base, compact)
+        # Keep pending copies in the evidence block, but release the bar after
+        # the acknowledgement so other sessions and monitoring can surface.
+        foreground = [item for item in compact["sessions"]
+                      if item.get("stage") != "copied" or item.get("copy_ack_active")]
+        if foreground:
+            return _compact_companion_state(base, {**compact, **foreground[0], "sessions": foreground})
 
     delivery_receipt = _latest_ready_delivery_receipt()
     if delivery_receipt is not None:

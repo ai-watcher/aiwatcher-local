@@ -61,3 +61,13 @@ It works without a provider key or Enterprise account.
    a refresh, never silently answer about another project.
 7. Verify the evidence dialog at narrow and desktop widths, keyboard Escape,
    session navigation, feedback failure messages and both themes.
+
+## Guided compaction review
+
+Companion's Compact recommendation opens a review for one exact session. It shows the checkout, observed commit boundary, context signal and explicitly estimated benefit. A commit is a checkpoint, not proof that the task or uncommitted work is complete.
+
+The optional **Copy preservation brief** action creates a normal same-chat request using observed session/checkpoint/file metadata. The owning AI supplies the actual objective, decisions, unfinished work, verification and next action from its conversation; AIWatcher does not invent these from filenames. Review that summary, then use **Copy native command** separately. Codex keeps the native `/compact` command; no extra arguments are assumed. AIWatcher neither submits text nor triggers compaction.
+
+A copy receipt is not an execution receipt. The dashboard button resets after two seconds. Companion acknowledges the command copy for ten seconds, then releases the headline to normal monitoring or other actionable sessions. The pending copy remains in local evidence and is still checked on each poll. A later observed compaction boundary can surface normally; missing evidence never becomes a success claim. Review can be reopened to copy again or refresh status. Existing pending copy receipts also release the bar after their acknowledgement expires; no manual state reset is needed.
+
+Manual check: use Review from Companion, verify session identity, optionally copy the preservation message, then copy only the native command. Without running it, confirm the headline releases after ten seconds. Compact in the same owning chat and confirm a boundary and next-reply size are reported only if observed. With two candidates, copying one must not hide the other.

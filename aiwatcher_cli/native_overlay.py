@@ -773,7 +773,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func rowActionLabel(index: Int) -> String {
         let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
-        if kind == "compact" { return "Copy" }
+        if kind == "compact" { return "Review" }
         if kind.hasPrefix("prompt_") { return "Open" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
@@ -1847,7 +1847,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
             rowButtons[index].title = rowActionLabel(index: index)
             rowButtons[index].toolTip = kind == "compact"
-                ? (index < waitingRowCommands.count ? waitingRowCommands[index] : "")
+                ? "Review this chat before compacting"
                 : kind.hasPrefix("prompt_")
                 ? "Open this chat's session review"
                 : (canReturn
@@ -3013,7 +3013,7 @@ def run_native_presence(
     def row_action_label(index: int) -> str:
         kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
         if kind == "compact":
-            return "Copy"
+            return "Review"
         if kind.startswith("prompt_"):
             return "Open"
         can_return = index < len(waiting_row_return) and waiting_row_return[index]

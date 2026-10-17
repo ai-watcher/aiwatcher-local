@@ -482,7 +482,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn('json["compact_rows"]', mac)
         self.assertIn('"compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty', mac)
-        self.assertIn('if kind == "compact" { return "Copy" }', mac)
+        self.assertIn('if kind == "compact" { return "Review" }', mac)
         self.assertIn('rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)', mac)
         self.assertIn('kind == "compact" ? tag :', mac)
         self.assertIn("func copyCompactRow(index: Int)", mac)
@@ -503,7 +503,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('waiting_sessions = payload.get("compact_rows")', tk_source)
         self.assertIn('"compact_recommended"} or not waiting_row_texts', tk_source)
         self.assertIn('{"control_review", "context_review", "compact_recommended"}', tk_source)
-        self.assertIn('if kind == "compact":\n            return "Copy"', tk_source)
+        self.assertIn('if kind == "compact":\n            return "Review"', tk_source)
         self.assertIn("def copy_compact_row(index: int)", tk_source)
         self.assertIn("def set_clipboard_text", tk_source)
         self.assertIn("Copy failed", tk_source)
