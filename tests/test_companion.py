@@ -362,7 +362,7 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             "kind": "permission",
         }}
 
-    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False, prefs=None):
+    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False, prefs=None, delivery_receipts=()):
         companion_prefs = {
             "blocked_sessions": True,
             "fresh_start_context": True,
@@ -376,12 +376,40 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             patch.object(ui, "active_prompt_gate", return_value=gate),
             patch.object(ui, "_cached_session_rows", return_value=list(sessions)),
             patch.object(ui, "session_waiting_signals", return_value=signals or {}),
+            patch.object(ui, "recent_work_receipts", return_value=list(delivery_receipts)),
             # Pinned rather than classified: the real helper reads the live
             # process table, and whether a test machine happens to have a
             # matching window must not decide what these tests assert.
             patch.object(ui, "_waiting_row_return_available", return_value=return_available),
         ):
             return ui.build_companion_state()
+
+    def _delivery_receipt(self, status="confirmed"):
+        return {
+            "receipt_id": "receipt-1",
+            "event": {"status": status, "kind": "push"},
+            "snapshot": {"branch": "feature", "commit_shas": ["a" * 40, "b" * 40]},
+        }
+
+    def test_confirmed_delivery_review_owns_an_advisory_companion_state(self):
+        state = self._state(self._summary(), delivery_receipts=[self._delivery_receipt()])
+        self.assertEqual(state["state"], "delivery_review_ready")
+        self.assertEqual(state["label"], "Delivery review ready")
+        self.assertIn("2 commits", state["subtitle"])
+        self.assertIn("receipt-1", state["primary_url"])
+
+    def test_candidate_delivery_review_never_interrupts(self):
+        state = self._state(
+            self._summary(), delivery_receipts=[self._delivery_receipt(status="candidate")],
+        )
+        self.assertNotEqual(state["state"], "delivery_review_ready")
+
+    def test_waiting_session_outranks_delivery_news(self):
+        state = self._state(
+            self._summary(), sessions=[self._session()], signals=self._signal(),
+            delivery_receipts=[self._delivery_receipt()],
+        )
+        self.assertEqual(state["state"], "session_waiting")
 
     def test_a_waiting_session_takes_over_the_companion(self):
         # It used to read "Watching quietly - 7 days: 3 sessions" while a
@@ -988,6 +1016,15 @@ class CompanionAwayDigestTests(WaitingSessionCompanionTests):
 
 
 class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
+    def setUp(self):
+        import os
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"AIWATCHER_HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        ui._COMPACT_CACHE.clear()
+
     """The meter and the missed-nudge chip: fresh numbers or honest absence."""
 
     def _working_session(self, session_id="w1", *, source_path="/tmp/w1.jsonl", notes=()):
@@ -1114,11 +1151,11 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
     def test_a_commit_with_dead_history_puts_compact_on_the_bar(self):
         state = self._compact_state(self._assessment())
         self.assertEqual(state["state"], "compact_recommended")
-        self.assertEqual(state["primary_action"], "copy_compact")
+        self.assertEqual(state["primary_action"], "open_url")
         # Two words for the title and one for the button: the bar caps them
         # at 18 and 12 characters, and the first version came out as
         # "Compact before the" and "Copy /compac".
-        self.assertEqual(state["primary_label"], "Copy")
+        self.assertEqual(state["primary_label"], "Review")
         self.assertEqual(state["label"], "Compact now")
         self.assertLessEqual(len(state["label"]), 18)
         self.assertLessEqual(len(state["subtitle"]), 46)
@@ -1130,7 +1167,7 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         # boundary fact moves to the tooltip.
         self.assertIn("Claude · aiwatcher-local · 354.0k of 431.0k", state["subtitle"])
         self.assertIn("Committed 3 turns ago", state["detail"])
-        self.assertIn("is finished work", state["detail"])
+        self.assertIn("predates this checkpoint", state["detail"])
         self.assertEqual(state["compact_stage"], "nudge")
         self.assertEqual(state["skip_state"], "compact_recommended")
         self.assertEqual(state["skip_session_ids"], ["w1"])
@@ -1168,7 +1205,7 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         self.assertEqual(state["subtitle"], "Context health calibration · 354.0k of 431.0k")
         self.assertIn("in Context health calibration", state["detail"])
 
-    def test_copy_holds_the_bar_on_that_session_until_the_log_moves(self):
+    def test_copy_briefly_acknowledges_without_claiming_compaction(self):
         sha = "2" * 40
         self._compact_state(self._assessment(sha=sha, title="Context health calibration"))
         update_compact_nudge("w1", sha, decision="copied", action_channel="companion")
@@ -1182,6 +1219,43 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         self.assertEqual(state["skip_state"], "")
         # Still something to do (paste it), so the bubble keeps its count.
         self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+
+    def test_copy_ack_releases_bar_but_keeps_pending_evidence_and_observes_later_boundary(self):
+        sha = "a" * 40
+        assessment = self._assessment(sha=sha)
+        self._compact_state(assessment)
+        update_compact_nudge("w1", sha, decision="copied", action_channel="dashboard")
+        original = compact_nudge("w1", sha)
+        old = {**original, "decided_at": (datetime.now(timezone.utc) - timedelta(seconds=11)).isoformat()}
+        with patch.object(ui, "compact_nudge", return_value=old):
+            state = self._compact_state(assessment)
+        self.assertNotEqual(state["state"], "compact_recommended")
+        self.assertEqual(state["compact"]["sessions"][0]["stage"], "copied")
+        self.assertIsNone(compact_nudge("w1", sha)["after_actual"])
+        landed = self._compact_state(self._assessment(
+            sha=sha, stage="compacted", boundary_seen_at="2026-09-09T12:15:31+00:00"))
+        self.assertEqual(landed["label"], "Compacted")
+        self.assertEqual(compact_nudge("w1", sha)["decision"], "copied")
+
+    def test_old_copied_session_cannot_mask_another_nudge(self):
+        # Regression exercised through the real selector using two sessions.
+        sha = "b" * 40
+        sessions = [self._working_session("w1", source_path="/tmp/w1.jsonl"),
+                    self._working_session("w2", source_path="/tmp/w2.jsonl")]
+        assessments = {sid: self._assessment(sha=sha, session_id=sid) for sid in ("w1", "w2")}
+        boundary = compaction.Boundary(sha=sha, subject="fix", committed_at=datetime.now(timezone.utc))
+        with patch.object(ui.compaction, "head_commit", return_value=boundary), patch.object(
+                ui.compaction, "assess", side_effect=lambda session: assessments[session.session_id]):
+            self._state(self._summary(), sessions=sessions)
+            update_compact_nudge("w1", sha, decision="copied")
+            original = compact_nudge("w1", sha)
+            old = {**original, "decided_at": (datetime.now(timezone.utc) - timedelta(seconds=11)).isoformat()}
+            actual = ui.compact_nudge
+            with patch.object(ui, "compact_nudge", side_effect=lambda sid, key: old if sid == "w1" else actual(sid, key)):
+                state = self._state(self._summary(), sessions=sessions)
+        self.assertEqual(state["primary_session_id"], "w2")
+        self.assertEqual(len(state["compact"]["sessions"]), 2)
+        self.assertIn("/?compact=w2", state["primary_url"])
 
     def test_the_typed_command_moves_the_bar_to_compacting(self):
         sha = "3" * 40
@@ -1269,7 +1343,7 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         self.assertEqual([row["session_id"] for row in rows], ["w1", "w2"])   # most to shed first
         self.assertEqual(rows[0]["text"], "AIWatcher efficacy feature scope · 594.9k of 646.5k")
         self.assertEqual(rows[0]["tag"], "→ ~51.6k")
-        self.assertEqual(rows[0]["action"], "copy_compact")
+        self.assertEqual(rows[0]["action"], "open_url")
         self.assertTrue(rows[1]["command"].startswith("/compact"))
         self.assertEqual(state["skip_session_ids"], ["w1", "w2"])
 
@@ -1298,7 +1372,7 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
             state = self._state(self._summary(), sessions=sessions)
         rows = {row["session_id"]: row for row in state["compact_rows"]}
         self.assertEqual(rows["w1"]["tag"], "copied")
-        self.assertEqual(rows["w1"]["action"], "copy_compact")
+        self.assertEqual(rows["w1"]["action"], "open_url")
         self.assertEqual(rows["w2"]["tag"], "compacting…")
         self.assertEqual(rows["w2"]["action"], "")
         self.assertEqual(state["subtitle"], "1 copied · 1 compacting")

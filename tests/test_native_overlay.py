@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 import inspect
+import os
 import re
+import sys
 
 from aiwatcher_cli import native_overlay
 from aiwatcher_cli.native_overlay import overlay_config
@@ -59,6 +61,54 @@ class AnchoredOriginTests(unittest.TestCase):
 
 
 class NativeOverlayConfigTests(unittest.TestCase):
+    def test_restart_helper_uses_exact_interpreter_and_current_source_root(self) -> None:
+        with (
+            mock.patch.object(sys, "executable", "/venv/bin/python"),
+            mock.patch.object(native_overlay.subprocess, "Popen") as popen,
+            mock.patch("builtins.open", mock.mock_open()),
+        ):
+            self.assertTrue(native_overlay._launch_aiwatcher_restart(
+                "http://127.0.0.1:8899", "top-left", "ai-apps", 45,
+            ))
+
+        command = popen.call_args.args[0]
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(command[:5], ["/venv/bin/python", "-m", "aiwatcher_cli", "restart", "--from-companion"])
+        self.assertIn("--ui-port", command)
+        self.assertEqual(command[command.index("--ui-port") + 1], "8899")
+        self.assertEqual(command[command.index("--interval") + 1], "45")
+        self.assertEqual(kwargs["cwd"], os.path.dirname(os.path.dirname(native_overlay.__file__)))
+        self.assertTrue(kwargs["env"]["PYTHONPATH"].startswith(kwargs["cwd"]))
+        if sys.platform != "win32":
+            self.assertTrue(kwargs["start_new_session"])
+
+    def test_swift_restart_request_launches_only_after_presence_exits(self) -> None:
+        exited = False
+
+        def run_presence(command: list[str], **_kwargs: object) -> mock.Mock:
+            nonlocal exited
+            with open(command[-1], "w", encoding="utf-8") as handle:
+                handle.write("restart\n")
+            exited = True
+            return mock.Mock(returncode=0)
+
+        def launch(*_args: object) -> bool:
+            self.assertTrue(exited)
+            return True
+
+        with (
+            mock.patch.object(native_overlay.sys, "platform", "darwin"),
+            mock.patch.object(native_overlay.shutil, "which", return_value="/usr/bin/swift"),
+            mock.patch.object(native_overlay.subprocess, "run", side_effect=run_presence),
+            mock.patch.object(native_overlay, "_launch_aiwatcher_restart", side_effect=launch) as restart,
+        ):
+            result = native_overlay._run_macos_swift_presence(
+                "http://127.0.0.1:8765", "http://127.0.0.1:8765/?view=prompt", "bottom-right", "always",
+            )
+
+        self.assertEqual(result, 0)
+        restart.assert_called_once_with("http://127.0.0.1:8765", "bottom-right", "always", 30)
+
     def test_velocity_recommends_focus_not_a_fresh_chat(self) -> None:
         config = overlay_config("velocity")
 
@@ -225,6 +275,13 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertNotIn('position.contains("right") ? current.maxX', source)
         self.assertIn("hasPrimaryAction", source)
         self.assertIn("scheduleAutoCollapse", source)
+        self.assertIn('self.primaryButton.title = "Restart"', source)
+        self.assertIn('self.primaryAction = "restart_aiwatcher"', source)
+        self.assertIn('self.subtitleLabel.stringValue = "Start dashboard + Companion"', source)
+        self.assertIn('try Data("restart\\n".utf8).write', source)
+        self.assertIn("NSApp.terminate(nil)", source)
+        self.assertIn('let states = ["offline",', source)
+        self.assertIn("self.consoleButton.isEnabled = false", source)
 
     def test_presence_bars_draw_the_waiting_queue_and_countdown(self) -> None:
         # Both bars render the additive companion-state fields: waiting_sessions
@@ -425,7 +482,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn('json["compact_rows"]', mac)
         self.assertIn('"compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty', mac)
-        self.assertIn('if kind == "compact" { return "Copy" }', mac)
+        self.assertIn('if kind == "compact" { return "Review" }', mac)
         self.assertIn('rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)', mac)
         self.assertIn('kind == "compact" ? tag :', mac)
         self.assertIn("func copyCompactRow(index: Int)", mac)
@@ -446,7 +503,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('waiting_sessions = payload.get("compact_rows")', tk_source)
         self.assertIn('"compact_recommended"} or not waiting_row_texts', tk_source)
         self.assertIn('{"control_review", "context_review", "compact_recommended"}', tk_source)
-        self.assertIn('if kind == "compact":\n            return "Copy"', tk_source)
+        self.assertIn('if kind == "compact":\n            return "Review"', tk_source)
         self.assertIn("def copy_compact_row(index: int)", tk_source)
         self.assertIn("def set_clipboard_text", tk_source)
         self.assertIn("Copy failed", tk_source)
@@ -628,6 +685,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("root.after(3000, refresh_state)", source)
         self.assertIn("has_primary_action", source)
         self.assertIn("schedule_auto_collapse", source)
+        self.assertIn('primary_label_var.set("Restart")', source)
+        self.assertIn('primary_action_var.set("restart_aiwatcher")', source)
+        self.assertIn("_launch_aiwatcher_restart(url, position, visibility, interval)", source)
+        self.assertIn('if state_var.get() == "offline":', source)
         self.assertIn("textvariable=primary_label_var", source)
         self.assertIn("primary_runtime_available_var", source)
         self.assertIn("/api/runtime-return", source)

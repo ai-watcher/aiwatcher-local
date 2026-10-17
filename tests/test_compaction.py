@@ -416,6 +416,22 @@ class CommandTests(unittest.TestCase):
         boundary = compaction.Boundary(sha=SHA, subject="s", committed_at=datetime.now(timezone.utc))
         self.assertEqual(compaction.compact_command("codex-cli", boundary, ["a.py"]), "/compact")
 
+    def test_preservation_brief_is_separate_from_command_and_does_not_invent_intent(self):
+        assessment = compaction.Assessment(
+            session_id="codex-target", tool="codex-cli", model=None, sha=SHA,
+            subject="Fix reader", committed_at="2026-10-16T12:00:00+00:00",
+            turns_since_commit=2, prompts_since_commit=1, latest_turn_tokens=90000,
+            context_at_commit=80000, first_turn_tokens=10000, dead_tokens=70000,
+            since_tokens=10000, after_estimate=20000, files_since=["client/reader.tsx"],
+            command="/compact", priced=False, dead_usd_per_turn=None,
+            recommend=True, reason="observed checkpoint", stage="nudge")
+        brief = compaction.preservation_prompt(assessment)
+        self.assertFalse(brief.startswith("/compact"))
+        for value in ("codex-target", SHA[:12], "client/reader.tsx", "actual objective",
+                      "unfinished/uncommitted", "acceptance criteria", "does not compact", "Do not edit files"):
+            self.assertIn(value, brief)
+        self.assertEqual(assessment.command, "/compact")
+
     def test_many_files_are_counted_not_listed(self) -> None:
         boundary = compaction.Boundary(sha=SHA, subject="s", committed_at=datetime.now(timezone.utc))
         command = compaction.compact_command("claude-code", boundary, [f"f{i}.py" for i in range(7)])

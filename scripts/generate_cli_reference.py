@@ -39,13 +39,13 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Getting started",
         "First run, detection, and health checks.",
-        ["start", "setup", "update", "status", "doctor"],
+        ["start", "restart", "setup", "update", "status", "doctor"],
     ),
     (
         "Daily loop",
         "What ran today, what it cost, and whether it was worth it.",
         ["today", "last", "timeline", "journal", "sessions", "changes", "commit-receipt",
-         "outcome", "report", "tools", "projects"],
+         "delivery-review", "push", "outcome", "report", "tools", "projects"],
     ),
     (
         "Prompt review and launch",
@@ -102,6 +102,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
 # the usage line alone. Optional -- a command with no entry simply renders
 # without an example, so this never blocks a new command from being documented.
 EXAMPLES: dict[str, list[str]] = {
+    "restart": ["aiwatcher restart --open-ui"],
     # Zero-argument commands get no example: it would be identical to the usage
     # line directly above it. Same for status, doctor, hook-status, tools, and
     # projects, which are already absent.

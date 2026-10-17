@@ -496,6 +496,8 @@ let dashboardURL = args.count > 1 ? args[1] : "http://127.0.0.1:8765"
 let promptURL = args.count > 2 ? args[2] : dashboardURL
 let position = args.count > 3 ? args[3] : "bottom-right"
 let visibilityMode = args.count > 4 ? args[4] : "always"
+let intervalSeconds = args.count > 5 ? args[5] : "30"
+let restartRequestPath = args.count > 6 ? args[6] : ""
 
 func withoutTrailingSlash(_ value: String) -> String {
     var output = value
@@ -614,6 +616,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var autoCollapseDeadline: Date? = nil
     var suppressPassiveRefreshUntil: Date? = nil
     var pendingClipboardOverrideSessionID = ""
+    var didExpandOffline = false
     var waitingRowTexts: [String] = []
     var waitingURLs: [String] = []
     var waitingSessionIDs: [String] = []
@@ -770,7 +773,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func rowActionLabel(index: Int) -> String {
         let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
-        if kind == "compact" { return "Copy" }
+        if kind == "compact" { return "Review" }
         if kind.hasPrefix("prompt_") { return "Open" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
@@ -815,11 +818,20 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.skipProjects = []
         self.skipSessionIDs = []
         self.titleLabel.stringValue = "UI offline"
-        self.subtitleLabel.stringValue = "Restart AIWatcher"
-        self.primaryButton.title = "Open"
-        self.primaryAction = "open_url"
+        self.subtitleLabel.stringValue = "Start dashboard + Companion"
+        self.primaryButton.title = "Restart"
+        self.primaryAction = "restart_aiwatcher"
         self.primaryURL = dashboardURL
-        self.updateAppearance()
+        self.planButton.isEnabled = false
+        self.askButton.isEnabled = false
+        self.scanButton.isEnabled = false
+        self.consoleButton.isEnabled = false
+        if !didExpandOffline && collapsed {
+            didExpandOffline = true
+            setCollapsed(false)
+        } else {
+            self.updateAppearance()
+        }
     }
 
     var expandedHeight: CGFloat {
@@ -1214,6 +1226,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openPrimary() {
+        if primaryAction == "restart_aiwatcher" {
+            requestRestart()
+            return
+        }
         if stateName == "proof_pending" {
             acknowledgeFreshStartReceipts()
             openURL(primaryURL)
@@ -1235,6 +1251,26 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             scheduleAutoCollapse(after: 1.5)
         }
         openURL(primaryURL)
+    }
+
+    func requestRestart() {
+        guard !restartRequestPath.isEmpty else { return }
+        self.primaryButton.isEnabled = false
+        self.titleLabel.stringValue = "Restarting AIWatcher"
+        self.subtitleLabel.stringValue = "Dashboard and Companion will reopen"
+        self.updateAppearance()
+        do {
+            try Data("restart\n".utf8).write(to: URL(fileURLWithPath: restartRequestPath), options: .atomic)
+        } catch {
+            self.titleLabel.stringValue = "Restart could not start"
+            self.subtitleLabel.stringValue = "Run aiwatcher restart"
+            self.primaryButton.isEnabled = true
+            self.updateAppearance()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            NSApp.terminate(nil)
+        }
     }
 
     // The command travels in the state payload, so this is a pasteboard write
@@ -1589,7 +1625,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        let states = ["prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest", "compact_recommended"]
+        let states = ["offline", "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest", "compact_recommended"]
         // Only the nudge step of a compaction carries a button. The later
         // steps -- copied, compacting, compacted -- are facts about a thing
         // already done, and a button would ask for it again.
@@ -1611,6 +1647,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func shouldShowWindow() -> Bool {
+        if stateName == "offline" {
+            return true
+        }
         if needsAttentionState() {
             return true
         }
@@ -1808,7 +1847,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
             rowButtons[index].title = rowActionLabel(index: index)
             rowButtons[index].toolTip = kind == "compact"
-                ? (index < waitingRowCommands.count ? waitingRowCommands[index] : "")
+                ? "Review this chat before compacting"
                 : kind.hasPrefix("prompt_")
                 ? "Open this chat's session review"
                 : (canReturn
@@ -1948,6 +1987,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applyState(_ json: [String: Any]) {
+        self.didExpandOffline = false
+        self.planButton.isEnabled = true
+        self.askButton.isEnabled = true
+        self.scanButton.isEnabled = true
+        self.consoleButton.isEnabled = true
+        self.primaryButton.isEnabled = true
         let incomingState = json["state"] as? String ?? "watching"
         if let hold = suppressPassiveRefreshUntil,
            hold > Date(),
@@ -2361,23 +2406,101 @@ def _run_macos_swift_overlay(
         return 2
 
 
-def _run_macos_swift_presence(url: str, prompt_url: str, position: str, visibility: str) -> int:
+def _restart_command(url: str, position: str, visibility: str, interval: int = 30) -> list[str]:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = parsed.port or 8765
+    return [
+        sys.executable,
+        "-m",
+        "aiwatcher_cli",
+        "restart",
+        "--from-companion",
+        "--interval",
+        str(max(15, int(interval))),
+        "--ui-host",
+        host,
+        "--ui-port",
+        str(port),
+        "--presence-position",
+        position,
+        "--presence-visibility",
+        visibility,
+    ]
+
+
+def _launch_aiwatcher_restart(url: str, position: str, visibility: str, interval: int = 30) -> bool:
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    env = os.environ.copy()
+    env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+    kwargs: dict[str, object] = {"start_new_session": sys.platform != "win32"}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    log_path = os.path.join(tempfile.gettempdir(), "aiwatcher-restart.log")
+    try:
+        with open(log_path, "ab") as log:
+            subprocess.Popen(
+                _restart_command(url, position, visibility, interval),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                cwd=package_root,
+                env=env,
+                **kwargs,
+            )
+        return True
+    except OSError as exc:
+        print(f"AIWatcher restart unavailable: {exc}", file=sys.stderr)
+        return False
+
+
+def _consume_restart_request(path: str, url: str, position: str, visibility: str, interval: int = 30) -> bool:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            requested = handle.read().strip() == "restart"
+    except OSError:
+        requested = False
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return requested and _launch_aiwatcher_restart(url, position, visibility, interval)
+
+
+def _run_macos_swift_presence(url: str, prompt_url: str, position: str, visibility: str, interval: int = 30) -> int:
     swift = shutil.which("swift")
     if sys.platform != "darwin" or not swift:
         return 2
     script_path = os.path.join(tempfile.gettempdir(), "aiwatcher-native-presence.swift")
+    request_path = os.path.join(
+        tempfile.gettempdir(),
+        f"aiwatcher-restart-{os.getpid()}-{time.time_ns()}.request",
+    )
     try:
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(MACOS_SWIFT_PRESENCE)
         completed = subprocess.run(
-            [swift, script_path, url, prompt_url, position, visibility],
+            [swift, script_path, url, prompt_url, position, visibility, str(max(15, int(interval))), request_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if _consume_restart_request(request_path, url, position, visibility, interval):
+            return 0
         return int(completed.returncode)
     except OSError as exc:
         print(f"AIWatcher presence unavailable: {exc}", file=sys.stderr)
         return 2
+    finally:
+        try:
+            os.unlink(request_path)
+        except OSError:
+            pass
 
 
 def _run_macos_swift_tray(url: str, prompt_url: str) -> int:
@@ -2654,12 +2777,15 @@ def run_native_presence(
     prompt_url: str | None = None,
     position: str = "bottom-right",
     visibility: str = "always",
+    interval: int = 30,
 ) -> int:
     """Run the collapsed always-available local companion entry point."""
     prompt_url = prompt_url or f"{url.rstrip('/')}/?view=prompt"
     visibility = visibility if visibility in {"always", "ai-apps", "nudges-only"} else "always"
     if sys.platform == "darwin" and shutil.which("swift"):
-        return _run_macos_swift_presence(url, prompt_url, position, visibility)
+        return _run_macos_swift_presence(url, prompt_url, position, visibility, interval)
+    restart_requested = False
+    offline_expanded = False
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -2887,7 +3013,7 @@ def run_native_presence(
     def row_action_label(index: int) -> str:
         kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
         if kind == "compact":
-            return "Copy"
+            return "Review"
         if kind.startswith("prompt_"):
             return "Open"
         can_return = index < len(waiting_row_return) and waiting_row_return[index]
@@ -2906,6 +3032,7 @@ def run_native_presence(
         return "Could not save Skip. Open UI."
 
     def apply_offline_state() -> None:
+        nonlocal offline_expanded
         waiting_row_texts.clear()
         waiting_row_urls.clear()
         waiting_row_session_ids.clear()
@@ -2926,13 +3053,18 @@ def run_native_presence(
         skip_session_ids_var.set("")
         state_var.set("offline")
         title_var.set("UI offline")
-        subtitle_var.set("Restart AIWatcher")
-        primary_label_var.set("Open")
-        primary_action_var.set("open_url")
+        subtitle_var.set("Start dashboard + Companion")
+        primary_label_var.set("Restart")
+        primary_action_var.set("restart_aiwatcher")
         primary_url_var.set(url)
+        if not offline_expanded and collapsed.get():
+            offline_expanded = True
+            set_collapsed(False)
         update_attention_style()
 
     def apply_state(payload: dict[str, object]) -> None:
+        nonlocal offline_expanded
+        offline_expanded = False
         incoming_state = str(payload.get("state") or "watching")
         if (
             suppress_passive_refresh_until.get() > time.time()
@@ -3108,6 +3240,14 @@ def run_native_presence(
         update_attention_style()
 
     def open_primary() -> None:
+        nonlocal restart_requested
+        if primary_action_var.get() == "restart_aiwatcher":
+            restart_requested = True
+            title_var.set("Restarting AIWatcher")
+            subtitle_var.set("Dashboard and Companion will reopen")
+            primary_button.state(["disabled"])
+            root.after(80, root.destroy)
+            return
         if state_var.get() == "proof_pending":
             request = urllib.request.Request(f"{url.rstrip('/')}/api/handoff-receipts-viewed", method="POST")
             saved = False
@@ -3449,7 +3589,7 @@ def run_native_presence(
         # update_attention_style's needs_attention set deliberately excludes
         # it, so "review when ready" never wears the orange treatment.
         states = {
-            "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm",
+            "offline", "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm",
             "session_waiting", "session_finished", "away_digest", "compact_recommended",
         }
         # Only the nudge step of a compaction carries a button; the later
@@ -3565,6 +3705,8 @@ def run_native_presence(
             resize_window(expanded_width, expanded_height + row_height * rows)
 
     def should_show_window() -> bool:
+        if state_var.get() == "offline":
+            return True
         if state_var.get() in {
             "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
             "clipboard_confirm", "session_waiting",
@@ -3702,6 +3844,11 @@ def run_native_presence(
             collapsed_canvas.create_text(
                 27, 10, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
+        offline = state_var.get() == "offline"
+        for button in (plan_button, ask_button, scan_button, console_button):
+            button.state(["disabled"] if offline else ["!disabled"])
+        if not restart_requested:
+            primary_button.state(["!disabled"])
         attention_layout = has_primary_action() and not collapsed.get()
         # Context review queues need both scopes: a row-level Watch button and
         # a Review all button for the full Context Health list.
@@ -3879,6 +4026,8 @@ def run_native_presence(
     refresh_state()
     pulse_attention()
     root.mainloop()
+    if restart_requested:
+        return 0 if _launch_aiwatcher_restart(url, position, visibility, interval) else 2
     return 0
 
 
@@ -4125,6 +4274,7 @@ def main(argv: list[str] | None = None) -> int:
         default="always",
         help="When the Companion presence is visible",
     )
+    parser.add_argument("--interval", type=int, default=30, help="Seconds between Companion scans")
     parser.add_argument("--title", default="Start a fresh AI session")
     parser.add_argument("--body", default="")
     parser.add_argument("--severity", default="warning")
@@ -4138,7 +4288,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.tray:
         return run_native_tray(args.url, prompt_url=args.prompt_url)
     if args.presence:
-        return run_native_presence(args.url, prompt_url=args.prompt_url, position=args.position, visibility=args.visibility)
+        return run_native_presence(
+            args.url,
+            prompt_url=args.prompt_url,
+            position=args.position,
+            visibility=args.visibility,
+            interval=args.interval,
+        )
     return run_native_overlay(
         args.url,
         args.title,

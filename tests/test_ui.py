@@ -172,6 +172,23 @@ class DashboardServeTests(unittest.TestCase):
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
 
+    def test_delivery_reviews_refuse_pages_from_other_localhost_origins(self) -> None:
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/delivery-reviews",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        try:
+            with self.assertRaises(error.HTTPError) as raised:
+                request.urlopen(http_request, timeout=5)
+            body = raised.exception.read().decode("utf-8")
+        finally:
+            thread.join(timeout=5)
+            server.server_close()
+
+        self.assertEqual(raised.exception.code, 403)
+        self.assertIn("dashboard's own origin", body)
+
     def test_ambient_intervention_serves_the_shared_nudge_wording(self) -> None:
         """The overlay renders from this, so the wording ships from
         _PRESENTATIONS rather than from a second copy inside overlay.js. The

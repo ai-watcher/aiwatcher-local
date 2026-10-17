@@ -1088,6 +1088,12 @@ function runtimeReturnPanel(runtime, sourcePath) {
 }
 let watcherCommand = 'aiwatcher companion start';
 let currentData = null;
+let deliveryReviewsCache = [];
+let deliveryReviewsLoading = false;
+let deliveryReviewTransient = null;
+let deliveryReviewPendingView = false;
+let deliveryReviewPrivacy = '';
+let deliveryReviewCoverage = '';
 // The dropdown defaulted to whichever option came first in the markup, which
 // was Codex, while every observed session on this machine is claude-code. Set
 // it from the most recent session instead, and only before the user has touched
@@ -3528,7 +3534,7 @@ function healthReason(row, waitingById) {
   }
   if (compact && compact.actionable && !compact.deferred) {
     return `<b>${esc(compact.dead_label)} of this turn's ${esc(compact.latest_label)} predates commit ${esc(compact.sha_short)}.</b>${whose}`
-      + ` Compacting now drops the next turn to about ${esc(compact.after_label)}.`;
+      + ` Estimated context after compaction: ${esc(compact.after_label)}; actual size may differ.`;
   }
   // Everything below waiting is a pressure verdict, and runwayVerdict is where
   // that is computed. Restating it here would be a second place the deadline
@@ -3602,8 +3608,7 @@ function healthRow(row, waitingById, index, sharedNames) {
   // it is never inlined: the button's title holds it (attribute-escaped) and
   // the handler reads it back from there.
   const action = compact
-    ? `<button class="btn-primary" title="${esc(compact.command)}" onclick="event.stopPropagation(); copyCompactCommand(${esc(jsArg(compact.session_id))}, ${esc(jsArg(compact.sha))}, this.title, this)">Copy /compact</button>
-        <button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(compact.session_id)}')">Review</button>
+    ? `<button class="btn-primary" onclick="event.stopPropagation(); openCompactReview(${esc(jsArg(compact.session_id))})">Review compact</button>
         <button class="btn-quiet" onclick="event.stopPropagation(); deferCompact(${esc(jsArg(compact.session_id))}, ${esc(jsArg(compact.sha))})">Later</button>`
     : quieted
     ? '<button class="btn-quiet" disabled title="Quieted for this project; evidence remains visible here.">Quieted 48h</button>'
@@ -4970,6 +4975,324 @@ function renderWasteTile(optimize) {
     <div class="value">${esc(items)}</div>
     <div class="sub">${impact} &middot; <button class="link-inline" onclick="showView('control')">review on Control</button></div>`;
 }
+
+function deliveryReviewProjects() {
+  const values = [];
+  const seen = new Set();
+  const add = value => {
+    const path = String(value || '').trim();
+    if (!path || path === '__unattributed__' || seen.has(path)) return;
+    seen.add(path);
+    values.push(path);
+  };
+  ((currentData && currentData.projects) || []).forEach(row => add(row.name || row.project_full));
+  ((currentData && currentData.recent_sessions) || []).forEach(row => add(row.project_full || row.raw_cwd));
+  return values;
+}
+
+function deliveryStatusLabel(review) {
+  const event = review.event || {};
+  if (event.status !== 'confirmed') return 'Local candidate';
+  if (event.kind === 'pull_request') return 'Pull request confirmed';
+  if (event.kind === 'push') return 'Push confirmed';
+  return 'Delivery confirmed';
+}
+
+function deliveryDestination(review) {
+  const event = review.event || {};
+  const snapshot = review.snapshot || {};
+  return event.pull_request_url || event.remote_ref || snapshot.upstream || 'Remote destination unknown';
+}
+
+function deliveryReviewCard(review) {
+  const event = review.event || {};
+  const snapshot = review.snapshot || {};
+  const workflow = review.workflow || {};
+  const checks = (review.verifications || []).filter(row => row && row.exact_state);
+  const files = snapshot.changed_files || [];
+  const branch = snapshot.branch || 'detached HEAD';
+  const statusClass = event.status === 'confirmed' ? 'active' : 'ended';
+  const objectiveClaim = review.objective || {};
+  const objectiveText = objectiveClaim.text || review.objective_label || 'Objective unavailable';
+  const objective = objectiveClaim.provenance === 'inferred'
+    ? `${objectiveText} (inferred from linked session; confirm before sharing)`
+    : objectiveText;
+  const objectiveAvailable = Boolean(objectiveClaim.text);
+  const approved = review.approval_valid === true;
+  const hadApproval = Boolean((review.approval || {}).approved_at);
+  const approvalButton = approved
+    ? ''
+    : `<button class="btn-primary" onclick="approveDeliveryReview(${jsArg(review.receipt_id || '')})" ${objectiveAvailable && review.current_state_matches ? '' : 'disabled'}>${hadApproval ? 'Reapprove changed summary' : 'Confirm objective & approve'}</button>`;
+  const copyDisabled = approved && objectiveAvailable ? '' : 'disabled';
+  const approvalStatus = approved
+    ? (objectiveAvailable ? 'Approved for this exact evidence' : 'Approved; re-enter the objective to copy the summary')
+    : (review.current_state_matches ? (objectiveAvailable ? 'Approval required before copying' : 'Enter or infer an objective before approval') : 'Checkout changed; regenerate this review');
+  const verification = checks.length
+    ? `<ul>${checks.slice(0, 5).map(row => `<li><strong>${esc(row.runner || 'Check')}</strong>: ${esc(row.status || 'result unknown')} <span class="sub">(${esc(row.scope || 'unknown scope')})</span></li>`).join('')}</ul>`
+    : '<p>No verification is bound to this exact Git state.</p>';
+  const contribution = workflow.session_count
+    ? `<p>${esc(workflow.session_count)} linked session${workflow.session_count === 1 ? '' : 's'} · ${esc(workflow.user_turns || 0)} user turns · ${esc(workflow.model_calls || 0)} model calls · ${esc(workflow.tool_calls || 0)} tool calls</p>`
+    : '<p>No session is linked by an exact commit receipt.</p>';
+  const fileList = files.length
+    ? `<ul>${files.slice(0, 6).map(path => `<li>${esc(path)}</li>`).join('')}${files.length > 6 ? `<li>+${esc(files.length - 6)} more</li>` : ''}</ul>`
+    : `<p>${snapshot.evidence_available === false ? 'The local Git range is no longer available.' : 'No changed paths were observed.'}</p>`;
+  const attention = review.attention || [];
+  return `<article class="delivery-review-item" data-delivery-receipt="${esc(review.receipt_id || '')}" tabindex="-1">
+    <div class="delivery-review-title">
+      <div><h3>${esc(branch)}</h3><p>${esc(deliveryDestination(review))} · ${esc(String(snapshot.head_sha || '').slice(0, 12))}</p></div>
+      <span class="session-state ${statusClass}">${esc(deliveryStatusLabel(review))}</span>
+    </div>
+    <div class="delivery-review-grid">
+      <div class="delivery-review-block"><h4>Objective</h4><p>${esc(objective)}</p></div>
+      <div class="delivery-review-block"><h4>Delivered range</h4><p><strong>${esc((snapshot.commit_shas || []).length)}</strong> commits · <strong>${esc(snapshot.changed_file_count || files.length)}</strong> files · +${esc(snapshot.lines_added || 0)}/-${esc(snapshot.lines_removed || 0)}</p></div>
+      <div class="delivery-review-block"><h4>Verification</h4>${verification}</div>
+      <div class="delivery-review-block"><h4>Workflow evidence</h4>${contribution}</div>
+    </div>
+    <details class="delivery-review-evidence"><summary>Changed paths and evidence limits</summary>
+      <div class="delivery-review-grid delivery-review-detail-grid">
+        <div class="delivery-review-block"><h4>Changed paths</h4>${fileList}</div>
+        <div class="delivery-review-block"><h4>Needs attention</h4>${attention.length ? `<ul>${attention.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p>No evidence gaps recorded.</p>'}</div>
+      </div>
+    </details>
+    <div class="delivery-review-actions">
+      ${approvalButton}
+      <button class="btn-quiet" onclick="copyDeliverySummary(${jsArg(review.receipt_id || '')})" ${copyDisabled}>Copy PR summary</button>
+      ${event.pull_request_url ? `<a class="btn-quiet" href="${esc(event.pull_request_url)}" target="_blank" rel="noreferrer">Open pull request</a>` : ''}
+      <span class="sub">${esc(approvalStatus)}${event.status === 'confirmed' ? '' : ' · Local candidate; remote delivery is not confirmed'}</span>
+    </div>
+  </article>`;
+}
+
+function deliveryReviewLauncher() {
+  const projects = deliveryReviewProjects();
+  const options = projects.map(path => `<option value="${esc(path)}">${esc(projectName({ project_full: path }))}</option>`).join('');
+  return `<div class="delivery-review-create">
+    <select id="deliveryReviewProject" aria-label="Checkout to review" ${projects.length ? '' : 'disabled'}>
+      ${options || '<option value="">No Git checkout observed</option>'}
+    </select>
+    <input id="deliveryReviewObjective" type="text" maxlength="2000" aria-label="Objective for this review" placeholder="Objective (kept only for this preview)">
+    <button class="btn-quiet" id="deliveryReviewCreateButton" onclick="createDeliveryCandidate()" ${projects.length ? '' : 'disabled'}>Review checkout</button>
+  </div>`;
+}
+
+function renderDeliveryReviews(data) {
+  const section = document.getElementById('deliveryReviews');
+  const body = document.getElementById('deliveryReviewBody');
+  if (!section || !body) return;
+  const oldProject = document.getElementById('deliveryReviewProject');
+  const oldObjective = document.getElementById('deliveryReviewObjective');
+  const projectValue = oldProject ? oldProject.value : '';
+  const objectiveValue = oldObjective ? oldObjective.value : '';
+  const restoreObjectiveFocus = oldObjective && document.activeElement === oldObjective;
+  const selectionStart = restoreObjectiveFocus ? oldObjective.selectionStart : null;
+  const selectionEnd = restoreObjectiveFocus ? oldObjective.selectionEnd : null;
+  section.hidden = false;
+  deliveryReviewsCache = (data && data.reviews) || [];
+  deliveryReviewPrivacy = (data && data.privacy) || deliveryReviewPrivacy;
+  deliveryReviewCoverage = (data && data.automatic_coverage) || deliveryReviewCoverage;
+  const list = deliveryReviewsCache.length
+    ? `<div class="delivery-review-list">${deliveryReviewsCache.map(deliveryReviewCard).join('')}</div>`
+    : '<div class="empty">No delivery evidence recorded yet.</div>';
+  body.innerHTML = `${deliveryReviewLauncher()}${list}<p class="delivery-review-privacy">${esc(deliveryReviewPrivacy || 'Objective text is not retained in AIWatcher state.')}</p>${deliveryReviewCoverage ? `<p class="delivery-review-privacy">${esc(deliveryReviewCoverage)}</p>` : ''}`;
+  const project = document.getElementById('deliveryReviewProject');
+  const objective = document.getElementById('deliveryReviewObjective');
+  if (project && [...project.options].some(option => option.value === projectValue)) project.value = projectValue;
+  if (objective) objective.value = objectiveValue;
+  if (restoreObjectiveFocus && objective) {
+    objective.focus({ preventScroll: true });
+    if (selectionStart !== null && selectionEnd !== null) objective.setSelectionRange(selectionStart, selectionEnd);
+  }
+}
+
+function renderDeliveryReviewTile(review) {
+  const host = document.getElementById('deliveryReviewTile');
+  if (!host) return;
+  if (!review || !review.ready || (review.event || {}).status !== 'confirmed') {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  const snapshot = review.snapshot || {};
+  host.hidden = false;
+  host.className = 'card metric-card metric-green';
+  host.innerHTML = `<div class="label">Delivery review ready</div>
+    <div class="value">${esc((snapshot.commit_shas || []).length)} commit${(snapshot.commit_shas || []).length === 1 ? '' : 's'}</div>
+    <div class="sub">${esc(deliveryStatusLabel(review))} · <button class="link-inline" onclick="openDeliveryReview(${jsArg(review.receipt_id || '')})">review evidence</button></div>`;
+}
+
+function focusDeliveryReview(receiptId) {
+  if (!receiptId) return;
+  const target = [...document.querySelectorAll('[data-delivery-receipt]')]
+    .find(node => node.dataset.deliveryReceipt === receiptId);
+  if (!target) return;
+  window.setTimeout(() => {
+    target.scrollIntoView({ block: 'center', behavior: 'auto' });
+    const header = document.querySelector('header');
+    if (header) {
+      const targetTop = target.getBoundingClientRect().top;
+      const headerBottom = header.getBoundingClientRect().bottom;
+      if (targetTop < headerBottom + 12) {
+        window.scrollBy({ top: targetTop - headerBottom - 12, behavior: 'auto' });
+      }
+    }
+    target.focus({ preventScroll: true });
+  }, 30);
+}
+
+async function markDeliveryReviewViewed(receiptId) {
+  const review = deliveryReviewsCache.find(row => row.receipt_id === receiptId);
+  if (!review || !review.ready) return;
+  try {
+    const response = await fetch('/api/delivery-review-viewed', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ receipt_id: receiptId }),
+    });
+    if (!response.ok) throw new Error('save failed');
+    review.ready = false;
+    review.viewed_at = new Date().toISOString();
+    renderDeliveryReviewTile(deliveryReviewsCache.find(row => row.ready));
+    renderDeliveryReviews({
+      reviews: deliveryReviewsCache,
+      privacy: deliveryReviewPrivacy,
+      automatic_coverage: deliveryReviewCoverage,
+    });
+    focusDeliveryReview(receiptId);
+  } catch (error) {
+    showToast('Could not mark the delivery review as viewed.', 'error');
+  }
+}
+
+async function approveDeliveryReview(receiptId) {
+  const review = deliveryReviewsCache.find(row => row.receipt_id === receiptId);
+  const objective = review && review.objective ? String(review.objective.text || '').trim() : '';
+  if (!review || !objective) {
+    showToast('Enter or infer an objective before approval.', 'error');
+    return;
+  }
+  const ok = window.confirm('Approve this objective and exact Git evidence for the PR summary?');
+  if (!ok) return;
+  try {
+    const response = await fetch('/api/delivery-review-approve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        receipt_id: receiptId,
+        evidence_hash: review.evidence_hash,
+        objective,
+        confirmed: true,
+      }),
+    });
+    const updated = await response.json();
+    if (!response.ok || updated.error) throw new Error(updated.error || 'approval failed');
+    deliveryReviewTransient = updated;
+    deliveryReviewsCache = deliveryReviewsCache.map(row => row.receipt_id === receiptId ? updated : row);
+    renderDeliveryReviews({
+      reviews: deliveryReviewsCache,
+      privacy: deliveryReviewPrivacy,
+      automatic_coverage: deliveryReviewCoverage,
+    });
+    focusDeliveryReview(receiptId);
+    showToast('PR summary approved for this exact evidence.');
+  } catch (error) {
+    showToast(`Could not approve this summary: ${error.message || 'unknown error'}`, 'error');
+  }
+}
+
+async function loadDeliveryReviews(options = {}) {
+  if (deliveryReviewsLoading) {
+    if (options.markViewed) deliveryReviewPendingView = true;
+    return;
+  }
+  deliveryReviewsLoading = true;
+  try {
+    const response = await fetch('/api/delivery-reviews?limit=20');
+    if (!response.ok) throw new Error('load failed');
+    const data = await response.json();
+    if (deliveryReviewTransient) {
+      const rows = data.reviews || [];
+      const includesTransient = rows.some(row =>
+        row.receipt_id === deliveryReviewTransient.receipt_id);
+      data.reviews = includesTransient
+        ? rows.map(row => row.receipt_id === deliveryReviewTransient.receipt_id ? deliveryReviewTransient : row)
+        : [deliveryReviewTransient, ...rows];
+    }
+    renderDeliveryReviews(data);
+    renderDeliveryReviewTile(data.latest_ready);
+    const requested = new URLSearchParams(location.search).get('delivery');
+    if (requested) focusDeliveryReview(requested);
+    const markViewed = options.markViewed || deliveryReviewPendingView;
+    deliveryReviewPendingView = false;
+    if (markViewed) {
+      const visible = requested
+        ? deliveryReviewsCache.filter(row => row.receipt_id === requested && row.ready)
+        : deliveryReviewsCache.filter(row => row.ready);
+      await Promise.all(visible.map(row => markDeliveryReviewViewed(row.receipt_id)));
+    }
+  } catch (error) {
+    renderDeliveryReviewTile(null);
+    const section = document.getElementById('deliveryReviews');
+    const body = document.getElementById('deliveryReviewBody');
+    if (section) section.hidden = false;
+    if (body) body.innerHTML = `${deliveryReviewLauncher()}<div class="empty">Delivery evidence could not be loaded. Try again in a moment.</div>`;
+  } finally {
+    deliveryReviewsLoading = false;
+  }
+}
+
+async function createDeliveryCandidate() {
+  const select = document.getElementById('deliveryReviewProject');
+  const objective = document.getElementById('deliveryReviewObjective');
+  const button = document.getElementById('deliveryReviewCreateButton');
+  if (!select || !select.value) return;
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch('/api/delivery-review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_path: select.value, objective: objective ? objective.value : '' }),
+    });
+    const review = await response.json();
+    if (!response.ok || review.error) throw new Error(review.error || 'review failed');
+    deliveryReviewTransient = review;
+    const existing = deliveryReviewsCache.findIndex(row => row.receipt_id === review.receipt_id);
+    deliveryReviewsCache = existing >= 0
+      ? deliveryReviewsCache.map((row, index) => index === existing ? review : row)
+      : [review, ...deliveryReviewsCache];
+    renderDeliveryReviews({
+      reviews: deliveryReviewsCache,
+      privacy: deliveryReviewPrivacy,
+      automatic_coverage: deliveryReviewCoverage,
+    });
+    renderDeliveryReviewTile(deliveryReviewsCache.find(row => row.ready));
+    focusDeliveryReview(review.receipt_id);
+    showToast(
+      (review.event || {}).status === 'confirmed'
+        ? 'Objective applied to this confirmed review without retaining its text.'
+        : 'Local candidate reviewed. Remote delivery is not yet confirmed.'
+    );
+  } catch (error) {
+    showToast(`Could not review this checkout: ${error.message || 'unknown error'}`, 'error');
+  } finally {
+    if (button && button.isConnected) button.disabled = false;
+  }
+}
+
+function copyDeliverySummary(receiptId) {
+  const review = deliveryReviewsCache.find(row => row.receipt_id === receiptId);
+  if (!review || !review.approval_valid || !(review.objective || {}).text) {
+    showToast('Approve the exact summary and keep its objective visible before copying.', 'error');
+    return false;
+  }
+  return copyText(review.summary_text || '', 'PR summary copied');
+}
+
+function openDeliveryReview(receiptId) {
+  const url = new URL(location.href);
+  url.searchParams.set('view', 'receipts');
+  url.searchParams.set('delivery', receiptId);
+  history.pushState({ view: 'receipts' }, '', url);
+  showView('receipts', false);
+  focusDeliveryReview(receiptId);
+  markDeliveryReviewViewed(receiptId);
+}
 /* Prove's claim, and the coverage behind it.
  *
  * The surface was two tables of receipts: a log, which answers "what happened",
@@ -5592,6 +5915,50 @@ function copyTextFallback(text) {
   area.remove();
   return ok;
 }
+// A same-session preparation message is distinct from the native command.
+function renderCompactReview(item) {
+  const active = ['nudge', 'copied'].includes(item.stage);
+  const status = { nudge: 'Ready to review', copied: 'Command copied; compaction not yet observed. Monitoring continues.', compacting: 'Compaction command observed; waiting for completion.', compacted: 'Compaction boundary observed; waiting for the next measured reply.', confirmed: 'New context size observed.' }[item.stage] || 'Status unknown; refresh before acting.';
+  return `<section class="detail-section compact-review">
+    <h3>${esc(item.title || item.name || item.session_id)}</h3>
+    <p><strong>Target:</strong> ${esc(item.tool_name || item.tool)} / ${esc(item.model || 'model unknown')} · ${esc(item.project || '')} · ${esc(item.session_id)}</p>
+    <p><strong>Checkout:</strong> <code>${esc(item.checkout || 'unknown')}</code></p>
+    <p><strong>Checkpoint:</strong> ${esc(item.sha_short)} · ${esc(item.subject || 'subject unavailable')} · ${esc(item.committed_at || 'time unknown')}</p>
+    <p><strong>Why now:</strong> ${esc(item.dead_label)} of ${esc(item.latest_label)} observed context predates checkpoint ${esc(item.sha_short)}. A commit is an anchor; unfinished work may still exist.</p>
+    <p><strong>Potential benefit:</strong> estimated ${esc(item.after_label)} context after compaction. This is a heuristic, not measured savings, reclaimed RAM, or disk space.</p>
+    <p><strong>Status:</strong> ${esc(status)}</p>
+    ${item.stage === 'confirmed' ? `<p><strong>Observed result:</strong> ${esc(item.before_shed_label || 'previous size unknown')} → ${esc(item.after_shed_label || item.latest_label)} context per reply.</p>` : ''}
+    ${active ? `<ol>
+      <li>Open this exact chat and wait for its current turn to finish. Confirm the identity above.</li>
+      <li>Optional: paste the preservation brief below as a normal message. Review its summary before compacting.</li>
+      <li>Copy the native command separately, paste it into that same chat, and submit it. Supported commands depend on your tool and surface.</li>
+      <li>Continue when the tool finishes. AIWatcher watches for a log boundary and the next measured reply; missing evidence remains unconfirmed.</li>
+    </ol>
+    <details class="aiw-details"><summary>Session-specific preservation brief</summary><div class="details-body"><pre class="prompt-text">${esc(item.preservation_prompt)}</pre></div></details>
+    <div class="copy-row">
+      <button class="btn-quiet" data-text="${esc(item.preservation_prompt)}" onclick="copyText(this.dataset.text, 'Preservation brief copied. Paste as a normal message first.')">Copy preservation brief</button>
+      <button class="btn-primary" title="${esc(item.command)}" onclick="copyCompactCommand(${esc(jsArg(item.session_id))}, ${esc(jsArg(item.sha))}, this.title, this)">Copy native command</button>
+    </div>
+    <p>Copying does not execute either step. The Companion clears its copy acknowledgement after 10 seconds and keeps monitoring.</p>` : '<p>No command is offered while compaction is underway or already observed.</p>'}
+    <button class="btn-quiet" onclick="openCompactReview(${esc(jsArg(item.session_id))})">Refresh status</button>
+    <button class="btn-quiet" onclick="selectSession(${esc(jsArg(item.session_id))})">Inspect session evidence</button>
+  </section>`;
+}
+async function openCompactReview(sessionId) {
+  const token = openDrawer('Compact this chat', 'Local evidence · actions stay in the owning app');
+  setDrawerContent('<div class="loading">Checking the current compact evidence…</div>');
+  try {
+    const response = await fetch('/api/companion-state');
+    if (!response.ok) throw new Error('Could not refresh compact evidence.');
+    const state = await response.json();
+    if (!isCurrentDrawer(token)) return;
+    const item = ((state.compact || {}).sessions || []).find(row => row.session_id === sessionId);
+    setDrawerContent(item ? renderCompactReview(item)
+      : '<div class="empty">This chat no longer has a current compact recommendation. No command was copied. Review its session evidence if needed.</div>');
+  } catch (error) {
+    if (isCurrentDrawer(token)) setDrawerContent(`<div class="empty">${esc(error.message)} Reopen Review to retry. No command was copied.</div>`);
+  }
+}
 async function copyCompactCommand(sessionId, sha, command, button) {
   let copied = false;
   try {
@@ -5604,10 +5971,12 @@ async function copyCompactCommand(sessionId, sha, command, button) {
     showToast('Could not reach the clipboard. The command is in the button\'s tooltip.', 'error');
     return;
   }
-  showToast('Copied. Paste /compact into the tool.');
+  showToast('Command copied. Paste into the reviewed chat; compaction is not yet confirmed.');
   if (button) {
+    const label = button.textContent;
     button.textContent = 'Copied';
     button.disabled = true;
+    window.setTimeout(() => { button.textContent = label; button.disabled = false; }, 2000);
   }
   try {
     await fetch('/api/compact-decision', {
@@ -5744,7 +6113,10 @@ function showView(view, updateUrl = true) {
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
   if (view === 'sessions') setSessionsView(sessionsViewMode, false);
   if (view === 'receipts' && reportLoadedForDays !== days) loadReport();
-  if (view === 'receipts') markFreshStartReceiptsViewed();
+  if (view === 'receipts') {
+    markFreshStartReceiptsViewed();
+    loadDeliveryReviews({ markViewed: true });
+  }
 }
 function showSettingsPanel(panel) {
   const selected = panel || 'general';
@@ -6696,6 +7068,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   renderPresenceTile(data.presence);
   renderWasteTile(data.optimize);
   renderControlStrip(data);
+  loadDeliveryReviews();
   // Routed from the payload rather than a stored client flag: the server
   // already knows whether anything is gated and whether the screen was
   // dismissed, and a second source of truth here would drift from it. Only on
@@ -6965,7 +7338,9 @@ function applyHashTarget(requestedView) {
   // Deep link from `aiwatcher watch --notify` (issue #31): ?session=<id>
   // opens straight to that session's review instead of the overview.
   const deepLinkSession = new URLSearchParams(location.search).get('session');
-  if (deepLinkSession) selectSession(deepLinkSession);
+  const compactSession = new URLSearchParams(location.search).get('compact');
+  if (compactSession) openCompactReview(compactSession);
+  else if (deepLinkSession) selectSession(deepLinkSession);
 })();
 window.addEventListener('popstate', () => {
   const requestedParam = new URLSearchParams(location.search).get('view') || 'home';
