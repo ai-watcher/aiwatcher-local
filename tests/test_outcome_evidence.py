@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.git_identity import resolve_git_identity
+from aiwatcher_cli.delivery_review import build_work_receipt
 from aiwatcher_cli.handoff import build_handoff_capsule
 from aiwatcher_cli.outcome_evidence import (
     OutcomeEvidence,
@@ -57,6 +58,184 @@ def commit_file(temp_dir: str, filename: str, content: str, message: str, *, whe
 
 
 class OutcomeEvidenceTests(unittest.TestCase):
+    def test_successful_transcript_push_creates_one_confirmed_delivery_review(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            base = commit_file(temp_dir, "app.py", "base\n", "base", when=now - timedelta(minutes=2))
+            run(["git", "switch", "-c", "feature"], temp_dir)
+            head = commit_file(temp_dir, "feature.py", "feature\n", "feature", when=now - timedelta(minutes=1))
+            source = Path(temp_dir, "session.jsonl")
+            source.write_text("".join(json.dumps(row) + "\n" for row in [
+                {
+                    "uuid": "call", "type": "assistant", "sessionId": "session-push",
+                    "cwd": temp_dir, "timestamp": now.isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_use", "id": "push-1", "name": "Bash",
+                        "input": {"command": "git push origin feature"},
+                    }]},
+                },
+                {
+                    "uuid": "result", "type": "user", "sessionId": "session-push",
+                    "cwd": temp_dir, "timestamp": (now + timedelta(seconds=2)).isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": "push-1", "is_error": False, "content": "private",
+                    }]},
+                    "toolUseResult": {
+                        "stdout": f"To github.com:owner/repo.git\n {base[:8]}..{head[:8]} feature -> feature",
+                        "stderr": "", "interrupted": False,
+                    },
+                },
+            ]), encoding="utf-8")
+            state_file = os.path.join(temp_dir, "state.json")
+            session = LocalSession(
+                session_id="session-push", tool="claude-code", project_path=temp_dir,
+                raw_cwd=temp_dir, source_path=str(source), started_at=now,
+                updated_at=now + timedelta(seconds=2),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                build_outcome_evidence(session)
+                build_outcome_evidence(session)
+                events = local_state.recent_delivery_events()
+                receipts = local_state.recent_work_receipts()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["status"], "confirmed")
+        self.assertEqual(events[0]["head_sha"], head)
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["event"]["kind"], "push")
+
+    def test_new_branch_push_uses_confirmed_remote_tracking_ref(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now - timedelta(minutes=2))
+            run(["git", "switch", "-c", "feature"], temp_dir)
+            head = commit_file(temp_dir, "feature.py", "feature\n", "feature", when=now - timedelta(minutes=1))
+            remote = Path(temp_dir, "remote.git")
+            run(["git", "init", "--bare", str(remote)], temp_dir)
+            run(["git", "remote", "add", "origin", str(remote)], temp_dir)
+            run(["git", "push", "--set-upstream", "origin", "feature"], temp_dir)
+            source = Path(temp_dir, "session.jsonl")
+            source.write_text("".join(json.dumps(row) + "\n" for row in [
+                {
+                    "uuid": "call", "type": "assistant", "sessionId": "session-new-push",
+                    "cwd": temp_dir, "timestamp": now.isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_use", "id": "push-new", "name": "Bash",
+                        "input": {"command": "git push --set-upstream origin feature"},
+                    }]},
+                },
+                {
+                    "uuid": "result", "type": "user", "sessionId": "session-new-push",
+                    "cwd": temp_dir, "timestamp": (now + timedelta(seconds=2)).isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": "push-new", "is_error": False,
+                        "content": "private",
+                    }]},
+                    "toolUseResult": {
+                        "stdout": "", "stderr": " * [new branch] feature -> feature", "interrupted": False,
+                    },
+                },
+            ]), encoding="utf-8")
+            state_file = os.path.join(temp_dir, "state.json")
+            session = LocalSession(
+                session_id="session-new-push", tool="claude-code", project_path=temp_dir,
+                raw_cwd=temp_dir, source_path=str(source), started_at=now,
+                updated_at=now + timedelta(seconds=2),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                build_outcome_evidence(session)
+                events = local_state.recent_delivery_events()
+
+        self.assertEqual(events[0]["head_sha"], head)
+        self.assertEqual(events[0]["remote_ref"], "feature")
+
+    def test_push_of_alternate_source_ref_is_not_labelled_as_current_branch(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            base = commit_file(temp_dir, "app.py", "base\n", "base", when=now - timedelta(minutes=2))
+            run(["git", "switch", "-c", "other"], temp_dir)
+            other = commit_file(temp_dir, "other.py", "other\n", "other", when=now - timedelta(minutes=1))
+            run(["git", "switch", "master"], temp_dir)
+            source = Path(temp_dir, "session.jsonl")
+            source.write_text("".join(json.dumps(row) + "\n" for row in [
+                {
+                    "uuid": "call", "type": "assistant", "sessionId": "session-alt-push",
+                    "cwd": temp_dir, "timestamp": now.isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_use", "id": "push-alt", "name": "Bash",
+                        "input": {"command": "git push origin other:feature"},
+                    }]},
+                },
+                {
+                    "uuid": "result", "type": "user", "sessionId": "session-alt-push",
+                    "cwd": temp_dir, "timestamp": (now + timedelta(seconds=2)).isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": "push-alt", "is_error": False,
+                        "content": "private",
+                    }]},
+                    "toolUseResult": {
+                        "stdout": f" {base[:8]}..{other[:8]} other -> feature",
+                        "stderr": "", "interrupted": False,
+                    },
+                },
+            ]), encoding="utf-8")
+            state_file = os.path.join(temp_dir, "state.json")
+            session = LocalSession(
+                session_id="session-alt-push", tool="claude-code", project_path=temp_dir,
+                raw_cwd=temp_dir, source_path=str(source), started_at=now,
+                updated_at=now + timedelta(seconds=2),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                build_outcome_evidence(session)
+                events = local_state.recent_delivery_events()
+
+        self.assertEqual(events, [])
+
+    def test_environment_selected_gh_repo_cannot_create_pr_receipt(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now - timedelta(minutes=2))
+            run(["git", "switch", "-c", "feature"], temp_dir)
+            commit_file(temp_dir, "feature.py", "feature\n", "feature", when=now - timedelta(minutes=1))
+            source = Path(temp_dir, "session.jsonl")
+            source.write_text("".join(json.dumps(row) + "\n" for row in [
+                {"timestamp": now.isoformat(), "type": "session_meta", "payload": {"id": "session-pr-env", "cwd": temp_dir}},
+                {"timestamp": now.isoformat(), "type": "response_item", "payload": {
+                    "type": "function_call", "name": "exec_command", "call_id": "pr-env",
+                    "arguments": json.dumps({
+                        "cmd": "GH_REPO=other/other gh pr create --fill", "workdir": temp_dir,
+                    }),
+                }},
+                {"timestamp": (now + timedelta(seconds=2)).isoformat(), "type": "response_item", "payload": {
+                    "type": "function_call_output", "call_id": "pr-env",
+                    "output": json.dumps({
+                        "exit_code": 0, "output": "https://github.com/other/other/pull/99",
+                    }),
+                }},
+            ]), encoding="utf-8")
+            state_file = os.path.join(temp_dir, "state.json")
+            session = LocalSession(
+                session_id="session-pr-env", tool="codex-cli", project_path=temp_dir,
+                raw_cwd=temp_dir, source_path=str(source), started_at=now,
+                updated_at=now + timedelta(seconds=2),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                build_work_receipt(
+                    temp_dir, event_kind="push", event_status="confirmed",
+                    event_source="test", event_source_id="prior-push",
+                    remote="origin", remote_ref="feature", sessions=[],
+                )
+                build_outcome_evidence(session)
+                events = local_state.recent_delivery_events()
+                receipts = local_state.recent_work_receipts()
+
+        self.assertEqual([row["kind"] for row in events], ["push"])
+        self.assertEqual([row["event"]["kind"] for row in receipts], ["push"])
+
     def test_command_checkout_selection_is_conservative_when_worktrees_conflict(self) -> None:
         from aiwatcher_cli.command_evidence import CommandEvidence
 
