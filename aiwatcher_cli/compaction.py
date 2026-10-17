@@ -346,6 +346,33 @@ def compact_command(
     )
 
 
+
+def preservation_prompt(assessment: Assessment) -> str:
+    """Optional same-chat checkpoint, separate from the native slash command.
+
+    Only observed metadata is embedded; the source AI supplies intent from
+    its own conversation. A commit is an anchor, never completion proof.
+    """
+    title = " ".join((assessment.title or assessment.session_id).split())[:160]
+    files = ", ".join(" ".join(str(path).split())[:180] for path in assessment.files_since[:12]) or "No file paths observed"
+    if len(assessment.files_since) > 12:
+        files += f"; {len(assessment.files_since) - 12} more paths omitted"
+    return (
+        "Prepare a concise continuation checkpoint in this same chat before I compact it. "
+        "Do not edit files, run cleanup, or start new work.\n"
+        f"AIWatcher target: {title}; session {assessment.session_id}; tool {assessment.tool}.\n"
+        f"Observed checkpoint: {assessment.sha[:12]} ({' '.join(assessment.subject.split())[:240]}). "
+        "This commit does not prove the task is complete or all changes are committed.\n"
+        f"Observed paths touched since checkpoint: {files}.\n"
+        "Use this conversation to preserve the actual objective and latest requested outcome; "
+        "completed work versus unfinished/uncommitted work; decisions and constraints; "
+        "failed approaches and blockers; important file paths and verification results; "
+        "and the smallest next action with its acceptance criteria. Label missing facts as unknown. "
+        "Keep secrets out. End with what must survive compaction and wait for me. "
+        "This checkpoint itself does not compact the chat; I will invoke the native /compact separately."
+    )
+
+
 def assess(session: LocalSession) -> Assessment | None:
     """Is now a good moment for this session to compact, and what would it shed?
 

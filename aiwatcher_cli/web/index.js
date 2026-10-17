@@ -3519,7 +3519,7 @@ function healthReason(row, waitingById) {
   }
   if (compact && compact.actionable && !compact.deferred) {
     return `<b>${esc(compact.dead_label)} of this turn's ${esc(compact.latest_label)} predates commit ${esc(compact.sha_short)}.</b>${whose}`
-      + ` Compacting now drops the next turn to about ${esc(compact.after_label)}.`;
+      + ` Estimated context after compaction: ${esc(compact.after_label)}; actual size may differ.`;
   }
   // Everything below waiting is a pressure verdict, and runwayVerdict is where
   // that is computed. Restating it here would be a second place the deadline
@@ -3593,8 +3593,7 @@ function healthRow(row, waitingById, index, sharedNames) {
   // it is never inlined: the button's title holds it (attribute-escaped) and
   // the handler reads it back from there.
   const action = compact
-    ? `<button class="btn-primary" title="${esc(compact.command)}" onclick="event.stopPropagation(); copyCompactCommand(${esc(jsArg(compact.session_id))}, ${esc(jsArg(compact.sha))}, this.title, this)">Copy /compact</button>
-        <button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(compact.session_id)}')">Review</button>
+    ? `<button class="btn-primary" onclick="event.stopPropagation(); openCompactReview(${esc(jsArg(compact.session_id))})">Review compact</button>
         <button class="btn-quiet" onclick="event.stopPropagation(); deferCompact(${esc(jsArg(compact.session_id))}, ${esc(jsArg(compact.sha))})">Later</button>`
     : quieted
     ? '<button class="btn-quiet" disabled title="Quieted for this project; evidence remains visible here.">Quieted 48h</button>'
@@ -5901,6 +5900,48 @@ function copyTextFallback(text) {
   area.remove();
   return ok;
 }
+// A same-session preparation message is distinct from the native command.
+function renderCompactReview(item) {
+  const active = ['nudge', 'copied'].includes(item.stage);
+  const status = { nudge: 'Ready to review', copied: 'Command copied; compaction not yet observed. Monitoring continues.', compacting: 'Compaction command observed; waiting for completion.', compacted: 'Compaction boundary observed; waiting for the next measured reply.', confirmed: 'New context size observed.' }[item.stage] || 'Status unknown; refresh before acting.';
+  return `<section class="detail-section compact-review">
+    <h3>${esc(item.title || item.name || item.session_id)}</h3>
+    <p><strong>Target:</strong> ${esc(item.tool_name || item.tool)} · ${esc(item.project || '')} · ${esc(item.session_id)}</p>
+    <p><strong>Checkout:</strong> <code>${esc(item.checkout || 'unknown')}</code></p>
+    <p><strong>Why now:</strong> ${esc(item.dead_label)} of ${esc(item.latest_label)} observed context predates checkpoint ${esc(item.sha_short)}. A commit is an anchor; unfinished work may still exist.</p>
+    <p><strong>Potential benefit:</strong> estimated ${esc(item.after_label)} context after compaction. This is a heuristic, not measured savings, reclaimed RAM, or disk space.</p>
+    <p><strong>Status:</strong> ${esc(status)}</p>
+    ${active ? `<ol>
+      <li>Open this exact chat and wait for its current turn to finish. Confirm the identity above.</li>
+      <li>Optional: paste the preservation brief below as a normal message. Review its summary before compacting.</li>
+      <li>Copy the native command separately, paste it into that same chat, and submit it. Supported commands depend on your tool and surface.</li>
+      <li>Continue when the tool finishes. AIWatcher watches for a log boundary and the next measured reply; missing evidence remains unconfirmed.</li>
+    </ol>
+    <details class="aiw-details"><summary>Session-specific preservation brief</summary><div class="details-body"><pre class="prompt-text">${esc(item.preservation_prompt)}</pre></div></details>
+    <div class="copy-row">
+      <button class="btn-quiet" data-text="${esc(item.preservation_prompt)}" onclick="copyText(this.dataset.text, 'Preservation brief copied. Paste as a normal message first.')">Copy preservation brief</button>
+      <button class="btn-primary" title="${esc(item.command)}" onclick="copyCompactCommand(${esc(jsArg(item.session_id))}, ${esc(jsArg(item.sha))}, this.title, this)">Copy native command</button>
+    </div>
+    <p>Copying does not execute either step. The Companion clears its copy acknowledgement after 10 seconds and keeps monitoring.</p>` : '<p>No command is offered while compaction is underway or already observed.</p>'}
+    <button class="btn-quiet" onclick="openCompactReview(${esc(jsArg(item.session_id))})">Refresh status</button>
+    <button class="btn-quiet" onclick="selectSession(${esc(jsArg(item.session_id))})">Inspect session evidence</button>
+  </section>`;
+}
+async function openCompactReview(sessionId) {
+  const token = openDrawer('Compact this chat', 'Local evidence · actions stay in the owning app');
+  setDrawerContent('<div class="loading">Checking the current compact evidence…</div>');
+  try {
+    const response = await fetch('/api/companion-state');
+    if (!response.ok) throw new Error('Could not refresh compact evidence.');
+    const state = await response.json();
+    if (!isCurrentDrawer(token)) return;
+    const item = ((state.compact || {}).sessions || []).find(row => row.session_id === sessionId);
+    setDrawerContent(item ? renderCompactReview(item)
+      : '<div class="empty">This chat no longer has a current compact recommendation. No command was copied. Review its session evidence if needed.</div>');
+  } catch (error) {
+    if (isCurrentDrawer(token)) setDrawerContent(`<div class="empty">${esc(error.message)} Reopen Review to retry. No command was copied.</div>`);
+  }
+}
 async function copyCompactCommand(sessionId, sha, command, button) {
   let copied = false;
   try {
@@ -5913,10 +5954,12 @@ async function copyCompactCommand(sessionId, sha, command, button) {
     showToast('Could not reach the clipboard. The command is in the button\'s tooltip.', 'error');
     return;
   }
-  showToast('Copied. Paste /compact into the tool.');
+  showToast('Command copied. Paste into the reviewed chat; compaction is not yet confirmed.');
   if (button) {
+    const label = button.textContent;
     button.textContent = 'Copied';
     button.disabled = true;
+    window.setTimeout(() => { button.textContent = label; button.disabled = false; }, 2000);
   }
   try {
     await fetch('/api/compact-decision', {
@@ -7278,7 +7321,9 @@ function applyHashTarget(requestedView) {
   // Deep link from `aiwatcher watch --notify` (issue #31): ?session=<id>
   // opens straight to that session's review instead of the overview.
   const deepLinkSession = new URLSearchParams(location.search).get('session');
-  if (deepLinkSession) selectSession(deepLinkSession);
+  const compactSession = new URLSearchParams(location.search).get('compact');
+  if (compactSession) openCompactReview(compactSession);
+  else if (deepLinkSession) selectSession(deepLinkSession);
 })();
 window.addEventListener('popstate', () => {
   const requestedParam = new URLSearchParams(location.search).get('view') || 'home';
