@@ -758,11 +758,22 @@ def _packet_verification(evidence: dict[str, object], *, limit: int = 5) -> list
 
 def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -> str:
     packet = _handoff_packet(packet_text)
+    canonical = packet.get("canonical_brief")
+    if packet.get("contract") == "fresh_start_continuation_v3" and isinstance(canonical, str) and canonical.strip():
+        # A model may suggest a checkpoint, never rewrite captured intent,
+        # provenance, evidence qualifiers or the ask-before-editing boundary.
+        lines = [canonical.strip().replace("AIWatcher Fresh Start brief", "AIWatcher AI-assisted Fresh Start brief", 1)]
+        suggestion = parsed.get("next_ask")
+        if (packet.get("objective") and packet.get("next_outcome")
+                and isinstance(suggestion, str) and 0 < len(suggestion.strip()) <= 420):
+            extra = ["", "Optional AI suggestion (unverified; does not change the confirmed scope)", suggestion.strip()]
+            if len("\n".join([*lines, *extra]).split()) <= MAX_HANDOFF_WORDS:
+                lines.extend(extra)
+        return "\n".join(lines)
     source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
     evidence = packet.get("evidence") if isinstance(packet.get("evidence"), dict) else {}
     checkout = packet.get("checkout") if isinstance(packet.get("checkout"), dict) else {}
     packet_objective = _clean_line(packet.get("objective"), limit=360)
-    model_goal = _clean_line(parsed.get("goal"), limit=360)
     next_ask = _clean_line(parsed.get("next_ask"), limit=420)
     risks = _clean_list(parsed.get("risks_and_constraints") or parsed.get("risks"), limit=4)
     uncertainties = _clean_list(parsed.get("uncertainties"), limit=4)
@@ -837,19 +848,19 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     if not remaining:
         remaining = ["No additional blocker was captured; preserve unrelated changes and verify before broadening scope."]
 
-    if verification_state["next_action"]:
-        first_action = str(verification_state["next_action"])
-    elif not packet_objective:
+    if not packet_objective:
         first_action = (
-            "Inspect the checkout and evidence above, then ask one focused question to confirm the intended outcome before editing."
+            "Inspect source identity and checkout read-only, then ask one focused question to confirm the intended outcome before editing or choosing verification."
         )
+    elif verification_state["next_action"]:
+        first_action = str(verification_state["next_action"])
     else:
         first_action = next_ask or "Inspect the listed evidence and continue the smallest verified checkpoint."
 
     lines = [
         "AIWatcher AI-assisted Fresh Start brief",
         "Objective",
-        f"- {model_goal if packet_objective and model_goal else packet_objective or 'Objective not captured; confirmation is required before editing.'}",
+        f"- {packet_objective or 'Objective not captured; confirmation is required before editing.'}",
         *_section("Where", [*source_lines, *checkout_lines]),
         *_section("What changed", changed_lines or ["No commit, file, or decision evidence was available."]),
         *_section("Verification", verification),
@@ -860,7 +871,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
             "Preserve unrelated changes; stop before destructive, production, or unrelated work.",
         ]),
     ]
-    return bound_handoff_words("\n".join(lines).strip(), max_words=300)
+    return bound_handoff_words("\n".join(lines).strip(), max_words=MAX_HANDOFF_WORDS)
 
 
 def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str) -> bool:
@@ -919,8 +930,20 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
         str(source.get("project") or ""),
         str(source.get("session_id") or ""),
     ]
-    response_text = json.dumps(parsed, sort_keys=True).lower()
-    concrete = [anchor for anchor in anchors if len(anchor) >= 4 and anchor.lower() in response_text]
+    def string_values(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value.lower()]
+        if isinstance(value, list):
+            return [text for item in value for text in string_values(item)]
+        if isinstance(value, dict):
+            return [text for item in value.values() for text in string_values(item)]
+        return []
+
+    # Compare actual field values, not JSON's escaped representation of
+    # Windows paths or non-ASCII project names. Keys are not evidence.
+    response_values = string_values(parsed)
+    concrete = [anchor for anchor in anchors if len(anchor) >= 4
+                and any(anchor.lower() in value for value in response_values)]
     return bool(concrete)
 
 
@@ -1103,8 +1126,8 @@ def _compose(
     status = build_ai_assist_status(config)
     if not status.get("ready") or status.get("mode") == "off":
         raise AiAssistUnavailable(str(status.get("setup_hint") or "AI Assist is not ready."))
-    if spec.id == "optimize_cleanup" and len(normalized) > spec.max_input_chars:
-        raise AiAssistUnavailable("Optimize evidence is too large; use a smaller review batch. No identities or guardrails were silently truncated.")
+    if spec.id in {"optimize_cleanup", "fresh_start"} and len(normalized) > spec.max_input_chars:
+        raise AiAssistUnavailable("Evidence is too large; use the complete local brief or a smaller evidence packet. No identities or guardrails were silently truncated.")
     trimmed = normalized[:spec.max_input_chars]
     messages = [
         {"role": "system", "content": spec.system_prompt},
@@ -1138,6 +1161,10 @@ def _compose(
     final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
     bounded_text = final_text
     if len(bounded_text) > spec.max_result_chars:
+        if spec.id == "fresh_start":
+            raise AiAssistRejected("The complete handoff exceeds the AI output limit; using the local brief without truncating evidence or guardrails.",
+                                   provider=response.get("provider"), mode=response.get("mode"),
+                                   model=response.get("model"), usage=response.get("usage") or {})
         bounded_text = bounded_text[:spec.max_result_chars]
         line_break = bounded_text.rfind("\n")
         if line_break > spec.max_result_chars // 2:

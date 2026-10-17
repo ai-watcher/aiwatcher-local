@@ -2701,7 +2701,8 @@ class DashboardWindowTests(unittest.TestCase):
                     "status": "needs_action",
                     "summary": "1 cleanup opportunity found.",
                     "impact_label": "~1.4M context at risk",
-                    "top": {"project_full": "/repo/app"},
+                    "top": {"project_full": "/repo/app", "kind": "session_cluster", "session_count": 53},
+                    "candidate_count": 5,
                     "candidates": [],
                 },
                 "intervention_receipts": [],
@@ -2715,6 +2716,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["label"], "Optimize")
         self.assertEqual(state["primary_url"], "/?view=control#optimizeWorkspace")
         self.assertEqual(state["skip_state"], "optimize_available")
+        self.assertIn("5 review groups", state["subtitle"])
+        self.assertIn("53 older session records", state["subtitle"])
+        self.assertIn("Organization only", state["subtitle"])
 
     def test_companion_state_exposes_ask_deep_link(self) -> None:
         with (
@@ -3338,7 +3342,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_ai_assisted_optimize_cleanup_prompt_uses_cache(self) -> None:
         candidate = {
             "id": "sessions:/repo/app",
-            "review_contract_version": 2,
+            "review_contract_version": ui.OPTIMIZE_REVIEW_CONTRACT_VERSION,
             "kind": "session_cluster",
             "title": "Archive completed or stale chats",
             "project": "repo/app",
@@ -3404,7 +3408,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_ai_assist_provider_auth_failure_marks_key_rejected(self) -> None:
         candidate = {
             "id": "sessions:/repo/app",
-            "review_contract_version": 2,
+            "review_contract_version": ui.OPTIMIZE_REVIEW_CONTRACT_VERSION,
             "kind": "session_cluster",
             "title": "Archive completed or stale chats",
             "project": "repo/app",
@@ -3457,7 +3461,7 @@ class DashboardWindowTests(unittest.TestCase):
     def _cleanup_candidate(self) -> dict:
         candidate = {
             "id": "sessions:/repo/app",
-            "review_contract_version": 2,
+            "review_contract_version": ui.OPTIMIZE_REVIEW_CONTRACT_VERSION,
             "kind": "session_cluster",
             "title": "Archive completed or stale chats",
             "project": "repo/app",
@@ -5288,7 +5292,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["ai_assist_result"]["status"], "used")
         self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
         packet = json.loads(improve.call_args.kwargs["local_brief"])
-        self.assertEqual(packet["contract"], "fresh_start_continuation_v2")
+        self.assertEqual(packet["contract"], "fresh_start_continuation_v3")
         self.assertEqual(packet["source"]["session_id"], "ai-fast")
         self.assertTrue(str(packet["source"]["project"]).replace("\\", "/").endswith("/repo/fast"))
         self.assertTrue(packet["objective_and_context"])
@@ -5648,7 +5652,7 @@ class DashboardWindowTests(unittest.TestCase):
             ({"objective": "  "}, "metadata_only", False),
             ({"include_prompt_excerpt": True, "costliest_prompt": None}, "metadata_only", False),
             ({"objective": "Ship it"}, "partial", True),
-            ({"include_prompt_excerpt": True, "costliest_prompt": prompt}, "partial", True),
+            ({"include_prompt_excerpt": True, "costliest_prompt": prompt}, "metadata_only", False),
             ({"objective": "Ship it", "include_prompt_excerpt": True, "costliest_prompt": prompt}, "strong", True),
         ]
         for capsule, level, known in cases:
@@ -5737,7 +5741,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertFalse(capsule["include_prompt_excerpt"])
         self.assertTrue(capsule["ai_assist_prompt_excerpt_requested"])
         self.assertFalse(capsule["ai_assist_prompt_excerpt_included"])
-        self.assertIn("local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative", capsule["next_brief"])
+        self.assertIn("observations are timestamped snapshots; candidate associations", capsule["next_brief"])
         self.assertEqual(runs[0]["workflow"], "fresh_start")
         self.assertEqual(runs[0]["status"], "used")
         self.assertTrue(runs[0]["cache_hit"])

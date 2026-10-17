@@ -271,3 +271,30 @@ test('abandoned session detail rejection is handled even if the summary is still
   await done;
   assert.equal(h.node('drawerTitle').textContent, 'Fresh Start');
 });
+
+test('Fresh Start form and payload capture next outcome separately from objective', () => {
+  const values = {handoffType:'coding', handoffObjective:'Fix reader rendering', handoffNextOutcome:'Demonstrate the regression fix',
+    handoffSources:'client/src/pages/blog-post.tsx', handoffConstraints:'Do not deploy', handoffAcceptance:'Reader renders code blocks'};
+  const context = vm.createContext({document:{getElementById:id => values[id] === undefined ? null : {value:values[id]}}});
+  for (const name of ['splitLines', 'handoffOptionsFromForm', 'handoffPayload']) vm.runInContext(functionSource(name), context);
+  const options = context.handoffOptionsFromForm();
+  const payload = context.handoffPayload('source', 'generic', false, options);
+  assert.equal(payload.objective, 'Fix reader rendering');
+  assert.equal(payload.next_outcome, 'Demonstrate the regression fix');
+  assert.equal(payload.prompt, false);
+});
+
+test('Fresh Start does not copy an old goal after the form has changed', async () => {
+  const copies = [], notices = [];
+  const context = vm.createContext({drawerRequestToken:1,
+    document:{getElementById:() => ({value:'old brief', dataset:{options:JSON.stringify({objective:'old goal'})}})},
+    handoffOptionsFromForm:() => ({objective:'new goal'}),
+    copyText:async text => {copies.push(text); return true;},
+    showToast:message => notices.push(message),
+    fetch:() => {throw new Error('No receipt should be written before regeneration');},
+  });
+  vm.runInContext(functionSource('copyFreshStartFromDrawer'), context);
+  await context.copyFreshStartFromDrawer('source', false);
+  assert.equal(copies.length, 0);
+  assert.match(notices[0], /Regenerate the brief before copying/);
+});

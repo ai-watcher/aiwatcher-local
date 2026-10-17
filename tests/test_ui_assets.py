@@ -636,7 +636,7 @@ class TrimmedHomeTest(unittest.TestCase):
             "companionFreshStartContext",
             "deliveryReviewCreateButton", "deliveryReviewObjective", "deliveryReviewProject",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
-            "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
+            "handoffObjective", "handoffNextOutcome", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
             "planDerivedZone", "promptBrief", "promptReceipts", "todayDigest",
         }

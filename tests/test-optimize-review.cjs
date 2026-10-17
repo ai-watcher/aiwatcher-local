@@ -25,6 +25,7 @@ function harness() {
     document: {getElementById: node, querySelectorAll: () => []},
     currentData: {optimize: {candidates: []}},
     esc: String, renderOptimizeReviewEvidence: item => `identity:${item.id}`,
+    optimizeAiButton: () => '',
     showToast() {}, window: {setTimeout() {}},
     copyText: async text => {copies.push(text);},
     postJson: (url, payload) => { const d = deferred(); requests.push({url, payload, ...d}); return d.promise; },
@@ -68,6 +69,18 @@ test('progress and failure states do not expose cached copy controls', () => {
   assert.match(error, /Retry evidence refresh/);
   assert.doesNotMatch(error, /Copy cleanup prompt/);
   assert.match(h.context.renderOptimizeWorkspace({candidates:[{id:'legacy'}]}), /Updating Optimize evidence/);
+});
+test('current contract renders bounded coverage while older confirmation contract waits', () => {
+  const h = harness();
+  const current = {candidate_count: 11, omitted_candidate_count: 10,
+    candidates: [{id:'worktree:/tmp/example', kind:'worktree', review_contract_version:3, project_full:'/tmp/example'}]};
+  const html = h.context.renderOptimizeWorkspace(current);
+  assert.match(html, /1 of 11/);
+  assert.match(html, /not every folder on this machine/);
+  assert.match(html, /10 additional candidates/);
+  assert.match(html, /Copy displayed review items/);
+  assert.doesNotMatch(html, /Updating Optimize evidence/);
+  assert.match(h.context.renderOptimizeWorkspace({candidates:[{review_contract_version:2}]}), /Updating Optimize evidence/);
 });
 test('cancel cancels a pending summary without recording anything', async () => {
   const h = harness(), pending = h.context.openOptimizeReview('a');

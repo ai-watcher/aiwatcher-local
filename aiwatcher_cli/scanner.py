@@ -2149,8 +2149,9 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
             f"{column} AS {column}" if column in columns else f"NULL AS {column}"
             for column in ("name", "title", "first_user_message", "preview")
         ]
+        rollout_column = "rollout_path" if "rollout_path" in columns else "NULL AS rollout_path"
         rows = conn.execute(
-            f"SELECT id, cwd, {', '.join(selected_title_columns)}, model, tokens_used, "
+            f"SELECT id, cwd, {', '.join(selected_title_columns)}, {rollout_column}, model, tokens_used, "
             "created_at_ms, updated_at_ms, archived FROM threads ORDER BY created_at_ms DESC"
         ).fetchall()
         for row in rows:
@@ -2185,7 +2186,7 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
                     tokens_out=0,
                     cost_usd=0.0,
                     agent_calls=1 if tokens else 0,
-                    source_path=str(codex_db),
+                    source_path=str(_validated_codex_rollout_path(row["rollout_path"]) or codex_db),
                     notes=[
                         "tokens_used is Codex's cumulative thread total",
                         "Codex cost is subscription/plan-based, not estimated as API spend",
@@ -3040,7 +3041,10 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             break
         prior_entry = resume_sessions.get(str(path))
         prior = prior_entry[0] if prior_entry else None
-        session_id = prior.session_id if prior else path.stem
+        filename_id = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", path.stem, re.IGNORECASE)
+        # A bounded tail may not contain session_meta. Retain the stable thread
+        # ID from its rollout filename so SQLite and JSONL don't count twice.
+        session_id = prior.session_id if prior else filename_id.group(1) if filename_id else path.stem
         project_path: str | None = prior.project_path if prior else None
         # The cwd exactly as Codex wrote it. project_path below is the same
         # value already folded to a git root, which erases the one thing that

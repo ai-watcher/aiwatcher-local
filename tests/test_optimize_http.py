@@ -21,7 +21,7 @@ class OptimizeConfirmationTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": self.tmp.name + "/state.json"})
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.item = {"id": "sessions:/test", "review_contract_version": 2, "kind": "session_cluster", "project_full": "/test", "session_count": 2}
+        self.item = {"id": "sessions:/test", "review_contract_version": ui.OPTIMIZE_REVIEW_CONTRACT_VERSION, "kind": "session_cluster", "project_full": "/test", "session_count": 2}
         self.item["evidence_hash"] = ui._optimize_candidate_evidence_hash(self.item)
         self.summary = patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [self.item]}})
         self.summary.start()

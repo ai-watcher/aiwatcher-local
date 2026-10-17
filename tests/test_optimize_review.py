@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -68,7 +69,64 @@ class OptimizeReviewTests(unittest.TestCase):
         self.assertEqual({r["session_id"] for r in item["sessions"]}, {"old-a", "old-b"})
         self.assertIn("latest user ask and final response", item["cleanup_prompt"])
         self.assertIn("confirmation question", item["cleanup_prompt"])
+        self.assertIn("Immediately before any separately authorized", item["cleanup_prompt"])
+        self.assertIn("Wait for explicit user confirmation of that exact final action summary", item["cleanup_prompt"])
+        composed = ai_assist._structured_optimize_cleanup_text(
+            {"next_verification": ["Confirm the latest owning-app status"]},
+            local_prompt=item["cleanup_prompt"],
+        )
+        self.assertIn(item["cleanup_prompt"], composed)
+        self.assertIn("Distinguish reversible archiving from permanent deletion", composed)
         self.assertNotIn("lower risk", item["cleanup_prompt"])
+
+    def test_confirmation_instruction_changes_invalidate_cached_prompts(self):
+        item = {"id": "candidate", "kind": "session_cluster"}
+        before = ui._optimize_candidate_evidence_hash(item)
+        with patch.object(ui, "_optimize_candidate_prompt", return_value="Updated final confirmation instructions"):
+            self.assertNotEqual(before, ui._optimize_candidate_evidence_hash(item))
+
+    def test_arbitrary_named_temporary_worktree_is_discovered_without_owner_in_scan(self):
+        root = Path(self.tmp.name)
+        owner = root / 'owner'
+        checkout = root / 'project-promotion-copy'
+        owner.mkdir()
+        def git(*args):
+            subprocess.run(['git', '-C', str(owner), *args], check=True, capture_output=True)
+        git('init', '-b', 'main')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-m', 'baseline')
+        git('worktree', 'add', '-b', 'codex/promotion', str(checkout))
+        with patch.object(ui, '_agent_workspace_scan_roots', return_value=[root]), patch.object(ui, '_worktree_rows', return_value=[]):
+            found = ui._agent_workspace_rows(set())
+        candidate = next(r for r in found if r['path'] == str(checkout.resolve()))
+        self.assertEqual(candidate['source'], 'git_worktree')
+        self.assertEqual(candidate['branch'], 'codex/promotion')
+        self.assertEqual(Path(candidate['common_git_directory']), owner.resolve() / '.git')
+        self.assertNotIn(str(owner.resolve()), [r['path'] for r in found])
+
+    def test_same_project_path_does_not_hide_stale_workspace_and_recent_raw_cwd_preserves_it(self):
+        path = Path(self.tmp.name) / 'scratch'
+        path.mkdir()
+        workspace = {'path': str(path), 'agent_owned': True, 'source': 'git_worktree',
+                     'branch': 'codex/review', 'mtime': self.now - timedelta(days=2)}
+        old = LocalSession(session_id='old', tool='codex-cli', project_path=str(path), updated_at=self.now-timedelta(days=2))
+        recent = LocalSession(session_id='recent', tool='codex-cli', project_path='/owner', raw_cwd=str(path), updated_at=self.now)
+        with patch.object(ui, '_agent_workspace_rows', return_value=[workspace]), patch.object(ui, 'safe_runtime_processes', return_value=[]), patch.object(ui, 'recent_optimize_decisions', return_value=[]):
+            inventory = ui.build_optimize_inventory([old])
+            item = inventory['top']
+            self.assertEqual(item['kind'], 'worktree')
+            self.assertIn('not a complete machine inventory', item['cleanup_prompt'])
+            self.assertIn('squash/rebase/cherry-pick', item['cleanup_prompt'])
+            self.assertIn('After that confirmation, execute', item['cleanup_prompt'])
+            composed = ai_assist._structured_optimize_cleanup_text({}, local_prompt=item['cleanup_prompt'])
+            self.assertIn(item['cleanup_prompt'], composed)
+            self.assertEqual(ui.build_optimize_inventory([old, recent])['candidates'], [])
+
+    def test_symlinked_scratch_directory_is_not_followed(self):
+        root = Path(self.tmp.name)
+        target = root / 'target'
+        target.mkdir()
+        (root / 'codex-linked').symlink_to(target, target_is_directory=True)
+        self.assertEqual(ui._scan_agent_workspace_root(root, set()), [])
 
     def test_large_group_is_a_bounded_explicit_review_sample(self):
         item = self.inventory([self.session(f"s-{i}") for i in range(20)])["top"]
@@ -144,7 +202,7 @@ class OptimizeReviewTests(unittest.TestCase):
         self.assertEqual(result["status"], "refreshing")
 
     def test_ai_composition_is_paused_before_any_model_call_during_refresh(self):
-        item = {"id": "candidate", "review_contract_version": 2}
+        item = {"id": "candidate", "review_contract_version": ui.OPTIMIZE_REVIEW_CONTRACT_VERSION}
         summary = {"cache": {"refreshing": True}, "optimize": {"candidates": [item]}}
         with patch.object(ui, "build_summary_cached", return_value=summary), patch.object(ui, "compose_optimize_cleanup_prompt") as compose:
             result = ui.build_ai_assisted_optimize_cleanup_prompt("candidate")
