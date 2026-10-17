@@ -406,6 +406,12 @@ user-facing error when the date is invalid.
 
 Session evidence keeps attribution and code-state authority separate:
 
+- **Settings → General → Delivery tracking** enables automatic repository setup
+  once. AIWatcher configures Git repositories observed in local session metadata
+  and keeps its own marked post-commit block current. Branches and linked
+  worktrees share the repository hook. Custom or pre-existing hooks are left
+  unchanged and surfaced for review. Companion and dashboard refreshes process
+  newly observed repositories in bounded, recent-first batches.
 - Post-commit hooks persist SHA, commit time, branch, HEAD, and stable checkout
   identity even when no cost receipt can be calculated. A receipt is bound to
   a session only when an explicit session ID is available.

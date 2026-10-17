@@ -166,6 +166,15 @@ never returns secret values and never calls a model.
 `/api/companion-preferences` returns local Companion notification preferences
 for Settings, including whether advisory Fresh Start context reviews appear in
 the Companion and whether completed runs stay quiet or expand the bar.
+`POST /api/delivery-tracking` enables or stops automatic repository hook
+management with `{"enabled": true | false}`. Enabling immediately configures
+Git repositories found in local session metadata; later dashboard refreshes
+configure newly observed repositories. One repository hook covers its branches
+and linked worktrees. Custom or pre-existing hooks are left unchanged and
+reported as needing attention. Disabling stops future management and leaves
+installed hooks active. Discovery is processed in bounded, recent-first batches;
+the response reports deferred candidate directories. This route is same-origin
+only.
 `/api/delivery-reviews` returns recent privacy-safe delivery receipts. Changed
 paths are reconstructed only while the exact local Git range remains available;
 objective text is never rehydrated from AIWatcher state. A receipt is `ready`

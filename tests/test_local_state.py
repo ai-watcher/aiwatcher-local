@@ -745,6 +745,7 @@ class LocalStateTests(unittest.TestCase):
         self.assertNotIn("sk-secret", json.dumps(settings))
         self.assertTrue(settings["update_auto_check"])
         self.assertIn("fresh_start_context", settings["companion_preferences"])
+        self.assertFalse(settings["delivery_tracking"]["enabled"])
 
     def test_ai_assist_cache_is_cleared_when_the_provider_changes(self) -> None:
         # Cached output belongs to the provider that produced it. Switching

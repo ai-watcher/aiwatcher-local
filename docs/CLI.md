@@ -18,7 +18,7 @@ explicitly. See [Privacy](../README.md#privacy) for the full contract.
 
 ## Contents
 
-- [Getting started](#getting-started) -- `start`, `restart`, `setup`, `update`, `status`, `doctor`
+- [Getting started](#getting-started) -- `start`, `restart`, `setup`, `delivery-tracking`, `update`, `status`, `doctor`
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `delivery-review`, `push`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
@@ -97,6 +97,29 @@ aiwatcher setup [--all]
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--all` | flag |  | Show every optional setup and hook command |
+
+### `aiwatcher delivery-tracking`
+
+Enable one-time setup that tracks commits across observed repositories, branches, and worktrees
+
+```sh
+aiwatcher delivery-tracking [--json] {enable,status,disable}
+```
+
+Examples:
+
+```sh
+aiwatcher delivery-tracking enable
+aiwatcher delivery-tracking status
+```
+
+| Argument | Accepts | Description |
+| --- | --- | --- |
+| `delivery_tracking_action` | `enable`, `status`, `disable` | Enable automatic setup, inspect coverage, or stop future automatic management |
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | flag |  | Emit delivery-tracking coverage as JSON |
 
 ### `aiwatcher update`
 

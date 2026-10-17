@@ -57,6 +57,23 @@ LEGACY_DEFAULT_AI_ASSIST_WORKFLOWS = ["fresh_start", "prompt_plan", "optimize_cl
 FINISHED_SESSION_NOTICE_MODES = {"badge_only", "expanded"}
 
 
+def default_delivery_tracking_settings() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "enabled_at": None,
+    }
+
+
+def _normalize_delivery_tracking_settings(value: Any) -> dict[str, Any]:
+    settings = default_delivery_tracking_settings()
+    if not isinstance(value, dict):
+        return settings
+    settings["enabled"] = _safe_bool(value.get("enabled"), False)
+    enabled_at = value.get("enabled_at")
+    settings["enabled_at"] = str(enabled_at)[:80] if enabled_at else None
+    return settings
+
+
 def default_companion_preferences() -> dict[str, Any]:
     return {
         "blocked_sessions": True,
@@ -416,6 +433,7 @@ def _empty_state() -> dict[str, Any]:
         # still be true, and a per-session log would grow without ever being
         # read past its head.
         "session_waiting": {},
+        "delivery_tracking": default_delivery_tracking_settings(),
         "companion_preferences": default_companion_preferences(),
         "ai_assist": default_ai_assist_config(),
         "ai_assist_runs": [],
@@ -500,6 +518,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
+    data["delivery_tracking"] = _normalize_delivery_tracking_settings(data.get("delivery_tracking"))
     data["companion_preferences"] = _normalize_companion_preferences(data.get("companion_preferences"))
     data["ai_assist"] = _normalize_ai_assist_config(data.get("ai_assist"))
     data.setdefault("ai_assist_runs", [])
@@ -1662,6 +1681,36 @@ def companion_preferences() -> dict[str, Any]:
     return _normalize_companion_preferences(data.get("companion_preferences"))
 
 
+def delivery_tracking_settings() -> dict[str, Any]:
+    """Return the one-time automatic delivery-tracking preference."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return default_delivery_tracking_settings()
+    return _normalize_delivery_tracking_settings(data.get("delivery_tracking"))
+
+
+def record_delivery_tracking_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Enable or stop future automatic hook management."""
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    with _locked_state():
+        data = _load()
+        existing = _normalize_delivery_tracking_settings(data.get("delivery_tracking"))
+        enabled = _safe_bool(settings.get("enabled"), existing["enabled"])
+        enabled_at = existing.get("enabled_at")
+        if enabled and not existing.get("enabled"):
+            enabled_at = datetime.now(timezone.utc).isoformat()
+        config = _normalize_delivery_tracking_settings({
+            "enabled": enabled,
+            "enabled_at": enabled_at,
+        })
+        data["delivery_tracking"] = config
+        _save(data)
+    return config
+
+
 def record_companion_preferences(settings: dict[str, Any]) -> dict[str, Any]:
     """Persist local Companion notification preferences."""
     if not isinstance(settings, dict):
@@ -1772,6 +1821,7 @@ def dashboard_settings() -> dict[str, Any]:
         "ai_assist": _redact_ai_assist_config(_normalize_ai_assist_config(data.get("ai_assist"))),
         "update_auto_check": bool(isinstance(update_block, dict) and update_block.get("enabled")),
         "companion_preferences": _normalize_companion_preferences(data.get("companion_preferences")),
+        "delivery_tracking": _normalize_delivery_tracking_settings(data.get("delivery_tracking")),
     }
 
 
