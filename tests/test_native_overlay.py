@@ -60,6 +60,70 @@ class AnchoredOriginTests(unittest.TestCase):
         )
 
 
+class CompanionExpressionTests(unittest.TestCase):
+    def test_completion_outranks_unrelated_active_work(self) -> None:
+        self.assertEqual(
+            native_overlay._companion_expression(
+                "session_finished", working=True, needs_attention=False, phase=2, reduce_motion=False,
+            ),
+            (0, -1, "#7fdbff"),
+        )
+
+    def test_reduced_motion_keeps_working_identity_but_centres_gaze(self) -> None:
+        self.assertEqual(
+            native_overlay._companion_expression(
+                "watching", working=True, needs_attention=False, phase=2, reduce_motion=True,
+            ),
+            (0, 0, "#78f0c2"),
+        )
+
+    def test_reduce_motion_environment_override_is_explicit(self) -> None:
+        with mock.patch.dict(os.environ, {"AIWATCHER_REDUCE_MOTION": "yes"}):
+            self.assertTrue(native_overlay._reduce_motion_requested())
+        with mock.patch.dict(os.environ, {"AIWATCHER_REDUCE_MOTION": "off"}):
+            self.assertFalse(native_overlay._reduce_motion_requested())
+
+    def test_macos_reduce_motion_preference_is_detected(self) -> None:
+        result = mock.Mock(stdout="1\n")
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(native_overlay.sys, "platform", "darwin"),
+            mock.patch.object(native_overlay.subprocess, "run", return_value=result) as run,
+        ):
+            self.assertTrue(native_overlay._reduce_motion_requested())
+        self.assertEqual(
+            run.call_args.args[0],
+            ["defaults", "read", "com.apple.universalaccess", "reduceMotion"],
+        )
+
+    def test_compact_face_and_every_gaze_fit_inside_the_52px_bubble(self) -> None:
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        panel_match = re.search(
+            r"collapsedFacePanel\.frame = CGRect\(x: ([\d.]+), y: ([\d.]+), width: ([\d.]+), height: ([\d.]+)\)",
+            mac,
+        )
+        self.assertIsNotNone(panel_match)
+        panel_x, panel_y, panel_width, panel_height = map(float, panel_match.groups())
+        mark_height = 22.0
+        mark_width = 429.0 * mark_height / 349.0
+        self.assertGreaterEqual(panel_x, 0)
+        self.assertGreaterEqual(panel_y, 0)
+        self.assertLessEqual(panel_x + panel_width, mark_width)
+        self.assertLessEqual(panel_y + panel_height, mark_height)
+
+        eye_frames = re.findall(
+            r"collapsed(?:Left|Right)Eye\.frame = CGRect\(x: ([\d.]+), y: ([\d.]+), width: ([\d.]+), height: ([\d.]+)\)",
+            mac,
+        )
+        self.assertEqual(len(eye_frames), 2)
+        for raw_x, raw_y, raw_width, raw_height in eye_frames:
+            eye_x, eye_y, eye_width, eye_height = map(float, (raw_x, raw_y, raw_width, raw_height))
+            self.assertGreaterEqual(eye_x - 1.0, 0)
+            self.assertGreaterEqual(eye_y - 0.9, 0)
+            self.assertLessEqual(eye_x + 1.0 + eye_width, panel_width)
+            self.assertLessEqual(eye_y + 0.8 + eye_height, panel_height)
+
+
 class NativeOverlayConfigTests(unittest.TestCase):
     def test_restart_helper_uses_exact_interpreter_and_current_source_root(self) -> None:
         with (
@@ -585,6 +649,44 @@ class NativeOverlayConfigTests(unittest.TestCase):
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("orbit_angle_var", tk_source)
         self.assertIn('style="arc", outline="#43d9a3"', tk_source)
+
+    def test_the_companion_mark_has_evidence_driven_expression(self) -> None:
+        # The product logo remains the product logo; only the compact Companion
+        # adds a tiny viewport and eyes. Gaze follows real state: active work
+        # scans left/down/right, attention looks toward the badge, completion
+        # looks up, and offline looks down. Significant transitions get one
+        # short focus-lock rather than perpetual decorative movement.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("collapsedFacePanel", mac)
+        self.assertIn("collapsedLeftEye", mac)
+        self.assertIn("collapsedRightEye", mac)
+        self.assertIn("func updateWatcherExpression(blink: Bool = false)", mac)
+        self.assertIn("CGPoint(x: 1.0, y: 0.8)", mac)
+        self.assertIn("CGPoint(x: 0.0, y: -0.8)", mac)
+        self.assertIn('stateName == "session_finished"', mac)
+        self.assertIn('stateName == "offline"', mac)
+        self.assertIn("func playWatcherTransition", mac)
+        self.assertIn('forKey: "watcher-focus-lock"', mac)
+        transition = mac.split("func playWatcherTransition")[1].split("func scheduleExpression")[0]
+        self.assertIn("if !collapsed { return }", transition)
+        self.assertNotIn("brandMarkView", transition)
+        self.assertIn("func scheduleExpression", mac)
+        self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
+        self.assertIn("self.collapsed && self.window.isVisible && !reduceMotion", mac)
+        self.assertIn("self.scheduleExpression(after: activelyScanning ? 1.1 : 8.0)", mac)
+        self.assertIn("brandMarkView.layer?.addSublayer(expandedMark.mark)", mac)
+        self.assertIn("collapsedMarkView.layer?.addSublayer(collapsedFacePanel)", mac)
+        self.assertIn("self.workingCount = 0", mac.split("func applyOfflineState")[1][:900])
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("expression_phase_var", tk_source)
+        self.assertIn("focus_lock_ticks_var", tk_source)
+        self.assertIn("_companion_expression(", tk_source)
+        self.assertIn("reduce_motion = _reduce_motion_requested()", tk_source)
+        self.assertIn("root.after(8000 if reduce_motion else 800", tk_source)
+        self.assertIn("entered_attention or activity_changed or completed or recovered", tk_source)
+        self.assertIn("capstyle=tk.ROUND", tk_source)
+        self.assertIn("working_count_var.set(0)", tk_source.split("def apply_offline_state")[1][:900])
 
     def test_the_marks_ring_says_running(self) -> None:
         # The ring speaks the dashboard favicon's vocabulary: orange for
