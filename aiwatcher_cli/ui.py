@@ -171,7 +171,6 @@ from .scanner import (
     LocalSession,
     discover_tools,
     display_model_name,
-    extract_opening_prompt,
     model_usage_totals,
     populate_session_identities,
     scan_all,
@@ -3575,6 +3574,8 @@ def build_ai_assisted_handoff_detail(
 ) -> dict[str, object]:
     """Return an AI-composed Fresh Start brief with receipt.
 
+    `local_brief_override` is accepted for older clients but ignored; only
+    server-enriched evidence may seed the model call.
     `automatic` marks a run started by the user's auto-compose setting rather
     than a click, so the receipt and ledger do not claim a confirmation.
     """
@@ -8662,10 +8663,19 @@ def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> d
         ],
         "detail": detail_text,
     }
-# path -> (size, compaction markers, every record's window closed). The poll
+# path -> (file signature, compaction markers, every record's window closed). The poll
 # runs every few seconds while a session works, and most of those polls find
 # a transcript that grew but holds nothing new to measure.
-_OUTCOME_SCAN: dict[str, tuple[int, int, bool]] = {}
+_OUTCOME_SCAN: dict[str, tuple[tuple[int, ...], int, bool]] = {}
+
+
+def _remember_outcome_scan(path: str, signature: tuple[int, ...], markers: int, closed: bool) -> None:
+    # Every insertion, including the common no-marker/closed-window fast path,
+    # must obey the same bound.
+    _OUTCOME_SCAN.pop(path, None)
+    _OUTCOME_SCAN[path] = (signature, markers, closed)
+    while len(_OUTCOME_SCAN) > 64:
+        _OUTCOME_SCAN.pop(next(iter(_OUTCOME_SCAN)))
 
 
 def _record_compaction_outcomes(rows: list[SessionPresence], sessions: list[LocalSession]) -> None:
@@ -8686,18 +8696,18 @@ def _record_compaction_outcomes(rows: list[SessionPresence], sessions: list[Loca
         if not path or not path.endswith(".jsonl") or "claude" not in session.tool.lower():
             continue
         try:
-            size = os.path.getsize(path)
+            info = os.stat(path)
+            signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
             cached = _OUTCOME_SCAN.get(path)
-            if cached is not None and cached[0] == size:
+            if cached is not None and cached[0] == signature:
                 continue
             markers = compaction_outcomes.compaction_markers(path)
-            if markers == 0 or (cached is not None and cached[1] == markers and cached[2]):
-                _OUTCOME_SCAN[path] = (size, markers, True)
+            appended = cached is not None and cached[0][:2] == signature[:2] and signature[2] > cached[0][2]
+            if markers == 0 or (appended and cached[1] == markers and cached[2]):
+                _remember_outcome_scan(path, signature, markers, True)
                 continue
             records = compaction_outcomes.record_session(session.session_id, path)
-            if len(_OUTCOME_SCAN) > 64:
-                _OUTCOME_SCAN.clear()
-            _OUTCOME_SCAN[path] = (size, markers, all(record.get("closed_by") for record in records))
+            _remember_outcome_scan(path, signature, markers, all(record.get("closed_by") for record in records))
         except Exception:  # noqa: BLE001 - a measurement nobody sees must never break the Companion's poll
             continue
 
