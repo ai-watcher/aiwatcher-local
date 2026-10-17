@@ -392,8 +392,6 @@ def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8) -> list[st
 
 def _brief_memory_summary(
     *,
-    project_label: str,
-    project_reliable: bool,
     objective_text: str | None,
     profile: dict[str, object],
     evidence: object,
@@ -785,8 +783,6 @@ def build_handoff_capsule(
         ]
 
     memory_summary = _brief_memory_summary(
-        project_label=project_label,
-        project_reliable=project_reliable,
         objective_text=objective_text,
         profile=profile,
         evidence=evidence,

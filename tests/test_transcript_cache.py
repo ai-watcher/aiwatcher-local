@@ -124,6 +124,28 @@ class TranscriptCacheTests(unittest.TestCase):
                 pass
         self.assertFalse(any(key[-1] == 'broken' for key in transcript_cache._CACHE))
 
+    def test_eof_during_a_concurrent_truncate_cannot_spin_or_report_partial_totals(self):
+        self.append({'n': 1})
+        real_open = open
+        class TruncatedFile:
+            def __init__(self, *args, **kwargs):
+                self.handle = real_open(*args, **kwargs)
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.handle.close()
+            def read(self, *args):
+                return b''
+            def readline(self, *args):
+                return b''
+        with patch.object(transcript_cache, 'open', TruncatedFile):
+            self.assertIsNone(self.total())
+            with self.assertRaises(OSError):
+                transcript_cache.count_pattern(str(self.path), re.compile(b'marker'))
+        self.assertEqual(len(transcript_cache._CACHE), 0)
+
     def test_bounds_apply_to_entries_and_retained_record_counts(self):
         self.append({'n': 1}, {'n': 2})
         with patch.object(transcript_cache, 'MAX_ENTRIES', 3):

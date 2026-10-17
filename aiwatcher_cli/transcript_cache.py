@@ -106,6 +106,8 @@ def folded_jsonl(
                     while handle.tell() < sig[2]:
                         start = handle.tell()
                         raw = handle.readline(min(MAX_LINE_BYTES + 1, sig[2] - start))
+                        if not raw:
+                            raise OSError("Transcript changed while reading")
                         if len(raw) > MAX_LINE_BYTES:
                             raise _LimitExceeded()
                         try:
@@ -150,6 +152,8 @@ def count_pattern(path: str, pattern: Any, *, overlap: int = 64) -> int:
                 entry = _prepare(handle, entry, sig, lambda: {"count": 0, "tail": b""})
                 while handle.tell() < sig[2]:
                     chunk = handle.read(min(CHUNK_BYTES, sig[2] - handle.tell()))
+                    if not chunk:
+                        raise OSError("Transcript changed while reading")
                     tail = entry.value["tail"]
                     data = tail + chunk
                     entry.value["count"] += sum(match.end() > len(tail) for match in pattern.finditer(data))
@@ -158,5 +162,8 @@ def count_pattern(path: str, pattern: Any, *, overlap: int = 64) -> int:
                 _remember(key, entry, handle, sig)
             return entry.value["count"]
         except OSError:
+            _CACHE.pop(key, None)
+            raise
+        except BaseException:
             _CACHE.pop(key, None)
             raise
