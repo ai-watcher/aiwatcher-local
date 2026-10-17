@@ -14,6 +14,8 @@ import time
 from typing import Any
 
 from .local_state import clear_watcher_heartbeat, get_ui_server, get_watcher_status, state_path
+from .runtime_lifecycle import runtime_lock_status
+from .updater import install_identity
 
 
 AUTOSTART_LABEL = "com.aiwatcher.local.companion"
@@ -308,16 +310,43 @@ def start_companion(
     current = get_watcher_status()
     if current.get("running"):
         if current.get("mode") == "companion":
-            return {"ok": True, "already_running": True, **current}
-        return {
-            "ok": False,
-            "already_running": False,
-            "message": (
-                f"A legacy ambient watch is already running (PID {current.get('pid')}). "
-                "Stop it before starting the companion so nudges are not duplicated."
-            ),
-            **current,
-        }
+            owner = runtime_lock_status("companion")
+            desired = install_identity()
+            owner_root = str(owner.get("source_root") or "")
+            desired_root = str(desired.get("source_root") or "")
+            same_install = (
+                bool(owner.get("active"))
+                and str(owner.get("install_kind") or "") == str(desired.get("install_kind") or "")
+                and bool(owner_root)
+                and bool(desired_root)
+                and os.path.realpath(owner_root) == os.path.realpath(desired_root)
+            )
+            if same_install:
+                return {"ok": True, "already_running": True, **current}
+            stopped = stop_companion()
+            if not stopped.get("ok"):
+                return {
+                    "ok": False,
+                    "already_running": False,
+                    "message": (
+                        "A Companion from a different AIWatcher install is running and could not be replaced: "
+                        f"{stopped.get('message', 'unknown error')}"
+                    ),
+                    **current,
+                }
+        else:
+            return {
+                "ok": False,
+                "already_running": False,
+                "message": (
+                    f"A legacy ambient watch is already running (PID {current.get('pid')}). "
+                    "Stop it before starting the companion so nudges are not duplicated."
+                ),
+                **current,
+            }
+
+    # A different-install Companion was stopped above. Continue through the
+    # normal singleton launch path instead of returning the old heartbeat.
 
     cleanup_orphan_companion_processes()
     log_path = companion_log_path()

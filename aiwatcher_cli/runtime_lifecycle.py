@@ -42,6 +42,10 @@ def _metadata_path(name: str) -> Path:
     return lock_path.with_suffix(".json")
 
 
+def _preference_path() -> Path:
+    return state_path().parent / ".runtime-preferred.json"
+
+
 def _try_file_lock(handle: BinaryIO) -> bool:
     try:
         handle.seek(0)
@@ -85,6 +89,55 @@ def _write_metadata(path: Path, record: dict[str, Any]) -> None:
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(payload)
         handle.flush()
+
+
+def _write_metadata_atomic(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    payload = json.dumps(record, sort_keys=True).encode("utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def record_preferred_runtime(
+    identity: dict[str, Any],
+    *,
+    python_executable: str,
+) -> dict[str, Any]:
+    """Remember which install an explicit local lifecycle command selected."""
+    source_value = str(identity.get("source_root") or "").strip()
+    executable_value = str(python_executable or "").strip()
+    if not source_value or not executable_value:
+        raise ValueError("A preferred runtime needs a source root and Python executable.")
+    source_root = os.path.abspath(source_value)
+    executable = os.path.abspath(executable_value)
+    record = {
+        "install_kind": str(identity.get("install_kind") or ""),
+        "source_root": source_root,
+        "python_executable": executable,
+        "version": str(identity.get("version") or ""),
+        "selected_at": datetime.now(timezone.utc).isoformat(),
+        "selected_by_pid": os.getpid(),
+    }
+    _write_metadata_atomic(_preference_path(), record)
+    return record
+
+
+def preferred_runtime() -> dict[str, Any]:
+    """Return the last runtime explicitly selected by `start` or `restart`."""
+    return _read_metadata(_preference_path())
 
 
 @dataclass

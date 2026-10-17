@@ -123,7 +123,10 @@ aiwatcher restart --open-ui
 ```
 
 The restart matters because a running Console or Companion keeps using the code
-that was loaded when its process started.
+that was loaded when its process started. For source development, run the command
+anywhere inside the intended AIWatcher checkout. That checkout takes ownership
+even when the shell's `aiwatcher` command still points at another installation;
+its `.venv` is used when present.
 
 Use the update command that matches how AIWatcher was installed:
 
@@ -413,7 +416,7 @@ Start with the first command that fails, then use the matching row.
 | `No module named pip3` | Use `python3 -m pip`, not `python3 -m pip3`; the module name is `pip`. |
 | `python3` or `py` is missing | Install Python 3.10+ from your package manager or [python.org](https://www.python.org/downloads/), then open a new terminal. |
 | Companion says `UI offline` | Expand the Companion and click **Restart**, or run `aiwatcher restart --open-ui`. |
-| Dashboard opens an older checkout | Stop the old process, change to the intended workspace if using a source clone, and restart. Run `aiwatcher doctor` for install details. |
+| Dashboard opens an older checkout | Change to the intended AIWatcher source checkout and run `aiwatcher restart --open-ui`. The requested checkout replaces the older singleton dashboard and Companion. Run `aiwatcher runtime status` to verify all three product roles have one owner. |
 | Upgrade reports no change | Compare `pipx list` with the [PyPI release page](https://pypi.org/project/aiwatcher-local/). GitHub `main` can be newer than PyPI. |
 | Hook does not appear to run | Restart or reload the AI tool, send a test prompt, then run `aiwatcher hook-status`. Use manual `preflight` when the surface does not expose the hook. |
 

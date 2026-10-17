@@ -118,6 +118,29 @@ class RuntimeLockTests(unittest.TestCase):
                 self.assertIsNotNone(ownership)
                 ownership.release()
 
+    def test_explicit_runtime_preference_round_trips_outside_role_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = str(Path(temp_dir) / "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                saved = runtime_lifecycle.record_preferred_runtime(
+                    {
+                        "install_kind": "source",
+                        "source_root": str(Path(temp_dir) / "checkout-b"),
+                        "version": "0.1.1",
+                    },
+                    python_executable=str(Path(temp_dir) / "checkout-b" / ".venv" / "bin" / "python"),
+                )
+                loaded = runtime_lifecycle.preferred_runtime()
+
+        self.assertEqual(loaded, saved)
+        self.assertEqual(loaded["install_kind"], "source")
+        self.assertEqual(loaded["source_root"], str(Path(temp_dir) / "checkout-b"))
+        self.assertIn("selected_at", loaded)
+
+    def test_runtime_preference_rejects_missing_launch_identity(self) -> None:
+        with self.assertRaises(ValueError):
+            runtime_lifecycle.record_preferred_runtime({}, python_executable="")
+
 
 class RuntimeStatusTests(unittest.TestCase):
     def test_runtime_status_groups_product_roles_and_keeps_mcp_optional(self) -> None:

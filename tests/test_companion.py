@@ -131,16 +131,61 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertIn("Scan Now", status["detail"])
 
     def test_existing_companion_is_reused(self) -> None:
-        with patch.object(
-            companion,
-            "get_watcher_status",
-            return_value={"running": True, "mode": "companion", "pid": 123},
-        ) as get_status:
+        identity = {"install_kind": "source", "source_root": "/checkout-b"}
+        with (
+            patch.object(
+                companion,
+                "get_watcher_status",
+                return_value={"running": True, "mode": "companion", "pid": 123},
+            ) as get_status,
+            patch.object(companion, "runtime_lock_status", return_value={"active": True, **identity}),
+            patch.object(companion, "install_identity", return_value=identity),
+        ):
             result = companion.start_companion(interval_seconds=3600)
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["already_running"])
         get_status.assert_called_once_with()
+
+    def test_companion_from_a_different_install_is_replaced_not_reused(self) -> None:
+        process = Mock(pid=321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
+                patch.object(
+                    companion,
+                    "get_watcher_status",
+                    side_effect=[
+                        {"running": True, "mode": "companion", "pid": 123},
+                        {"running": True, "mode": "companion", "pid": 321},
+                    ],
+                ),
+                patch.object(
+                    companion,
+                    "runtime_lock_status",
+                    return_value={
+                        "active": True,
+                        "install_kind": "source",
+                        "source_root": "/checkout-a",
+                    },
+                ),
+                patch.object(
+                    companion,
+                    "install_identity",
+                    return_value={"install_kind": "source", "source_root": "/checkout-b"},
+                ),
+                patch.object(companion, "stop_companion", return_value={"ok": True, "stopped": True}) as stop,
+                patch.object(companion.subprocess, "Popen", return_value=process),
+                patch.object(companion, "cleanup_orphan_companion_processes", return_value=[]),
+                patch.object(companion.time, "sleep"),
+            ):
+                result = companion.start_companion(interval_seconds=30)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["already_running"])
+        self.assertEqual(result["pid"], 321)
+        stop.assert_called_once_with()
 
     def test_legacy_watch_must_stop_before_companion_starts(self) -> None:
         with patch.object(

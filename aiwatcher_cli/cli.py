@@ -141,6 +141,8 @@ from .runtime_lifecycle import (
     ROLE_ACQUIRE_TIMEOUT_SECONDS,
     RuntimeLock,
     acquire_runtime_lock,
+    preferred_runtime,
+    record_preferred_runtime,
     runtime_lock_status,
 )
 from .runtime_nudge import (
@@ -186,7 +188,7 @@ from .scanner import (
 )
 from .session_health import analyze_session_health
 from .session_presence import presence_for_session
-from .updater import apply_updates, check_for_updates, install_identity
+from .updater import apply_updates, check_for_updates, install_identity, installed_source_root
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
@@ -3743,6 +3745,123 @@ def _loopback_host(value: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+_RUNTIME_HANDOFF_ENV = "AIWATCHER_RUNTIME_HANDOFF"
+
+
+def _aiwatcher_checkout_from(path: Path) -> Path | None:
+    """Find an intentional AIWatcher source checkout at or above `path`."""
+    try:
+        start = path.expanduser().resolve()
+    except OSError:
+        return None
+    for candidate in (start, *start.parents):
+        project_file = candidate / "pyproject.toml"
+        module_file = candidate / "aiwatcher_cli" / "__main__.py"
+        if not project_file.is_file() or not module_file.is_file():
+            continue
+        try:
+            project_text = project_file.read_text(encoding="utf-8")[:131_072]
+        except OSError:
+            continue
+        if re.search(r"(?m)^\s*name\s*=\s*['\"]aiwatcher-local['\"]\s*$", project_text):
+            return candidate
+    return None
+
+
+def _checkout_python(source_root: Path) -> str:
+    candidates = (
+        source_root / ".venv" / "bin" / "python",
+        source_root / ".venv" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.absolute())
+    return os.path.abspath(sys.executable)
+
+
+def _runtime_handoff_spec(
+    *,
+    source_root: Path,
+    python_executable: str,
+    arguments: Sequence[str],
+) -> dict[str, object] | None:
+    try:
+        root = source_root.expanduser().resolve()
+    except OSError:
+        return None
+    executable = Path(python_executable).expanduser()
+    if not executable.is_absolute() or not executable.is_file():
+        return None
+    if not (root / "aiwatcher_cli" / "__main__.py").is_file():
+        return None
+    current_root = installed_source_root().expanduser().resolve()
+    if root == current_root:
+        return None
+    if os.environ.get(_RUNTIME_HANDOFF_ENV) == str(root):
+        return None
+    env = os.environ.copy()
+    env[_RUNTIME_HANDOFF_ENV] = str(root)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    return {
+        "command": [str(executable), "-m", "aiwatcher_cli", *arguments],
+        "cwd": str(root),
+        "env": env,
+    }
+
+
+def _requested_checkout_handoff(
+    arguments: Sequence[str],
+    args: argparse.Namespace,
+) -> dict[str, object] | None:
+    if getattr(args, "command", None) not in {"start", "restart"}:
+        return None
+    if bool(getattr(args, "from_companion", False)):
+        return None
+    checkout = _aiwatcher_checkout_from(Path.cwd())
+    if checkout is None:
+        return None
+    return _runtime_handoff_spec(
+        source_root=checkout,
+        python_executable=_checkout_python(checkout),
+        arguments=arguments,
+    )
+
+
+def _preferred_runtime_handoff(
+    arguments: Sequence[str],
+    args: argparse.Namespace,
+) -> dict[str, object] | None:
+    if getattr(args, "command", None) != "restart" or not bool(getattr(args, "from_companion", False)):
+        return None
+    preference = preferred_runtime()
+    source_root = str(preference.get("source_root") or "").strip()
+    python_executable = str(preference.get("python_executable") or "").strip()
+    if not source_root or not python_executable:
+        return None
+    return _runtime_handoff_spec(
+        source_root=Path(source_root),
+        python_executable=python_executable,
+        arguments=arguments,
+    )
+
+
+def _run_runtime_handoff(spec: dict[str, object]) -> int:
+    command = spec.get("command")
+    cwd = spec.get("cwd")
+    env = spec.get("env")
+    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+        return 2
+    if not isinstance(cwd, str) or not isinstance(env, dict):
+        return 2
+    print(f"Using the explicitly selected AIWatcher runtime at {cwd}.")
+    try:
+        completed = subprocess.run(command, cwd=cwd, env=env, check=False)
+    except OSError as exc:
+        print(f"Could not start the selected AIWatcher runtime: {exc}", file=sys.stderr)
+        return 2
+    return int(completed.returncode)
 
 
 def command_restart(args: argparse.Namespace) -> int:
@@ -10776,6 +10895,9 @@ def main(argv: list[str] | None = None) -> int:
         handler = handlers[arguments[0]]
         return int(handler(hook_args))
     args = build_parser().parse_args(arguments)
+    requested_handoff = _requested_checkout_handoff(arguments, args)
+    if requested_handoff is not None:
+        return _run_runtime_handoff(requested_handoff)
     companion_action = getattr(args, "companion_action", None)
     lifecycle_action = args.command in {"start", "restart"} or (
         args.command == "companion" and (
@@ -10785,18 +10907,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not lifecycle_action:
         return int(args.func(args))
+    identity = install_identity()
     lifecycle = acquire_runtime_lock(
         "lifecycle",
-        metadata={"command": " ".join(arguments), **install_identity()},
+        metadata={"command": " ".join(arguments), **identity},
         timeout=10,
     )
     if lifecycle is None:
         print("Another AIWatcher start, stop, or restart is still in progress.", file=sys.stderr)
         return 2
+    released = False
     try:
+        if args.command in {"start", "restart"} and not bool(getattr(args, "from_companion", False)):
+            try:
+                record_preferred_runtime(identity, python_executable=sys.executable)
+            except (OSError, ValueError) as exc:
+                print(f"Could not remember the selected AIWatcher runtime: {exc}", file=sys.stderr)
+        preferred_handoff = _preferred_runtime_handoff(arguments, args)
+        if preferred_handoff is not None:
+            lifecycle.release()
+            released = True
+            return _run_runtime_handoff(preferred_handoff)
         return int(args.func(args))
     finally:
-        lifecycle.release()
+        if not released:
+            lifecycle.release()
 
 
 if __name__ == "__main__":

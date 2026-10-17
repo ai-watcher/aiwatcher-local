@@ -180,13 +180,16 @@ class StartCommandCliTests(unittest.TestCase):
         ownership = Mock()
         with (
             patch.object(cli, "build_parser", return_value=parser),
+            patch.object(cli, "_requested_checkout_handoff", return_value=None),
             patch.object(cli, "install_identity", return_value={}),
+            patch.object(cli, "record_preferred_runtime") as record_preference,
             patch.object(cli, "acquire_runtime_lock", return_value=ownership) as acquire,
         ):
             result = cli.main(["start"])
 
         self.assertEqual(result, 0)
         acquire.assert_called_once()
+        record_preference.assert_called_once_with({}, python_executable=sys.executable)
         handler.assert_called_once()
         ownership.release.assert_called_once_with()
 
@@ -196,6 +199,7 @@ class StartCommandCliTests(unittest.TestCase):
         parser.parse_args.return_value = SimpleNamespace(command="restart", func=handler)
         with (
             patch.object(cli, "build_parser", return_value=parser),
+            patch.object(cli, "_requested_checkout_handoff", return_value=None),
             patch.object(cli, "install_identity", return_value={}),
             patch.object(cli, "acquire_runtime_lock", return_value=None),
             patch("sys.stderr", new_callable=io.StringIO) as stderr,
@@ -205,6 +209,85 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertEqual(result, 2)
         handler.assert_not_called()
         self.assertIn("still in progress", stderr.getvalue())
+
+    def test_explicit_restart_hands_off_to_the_checkout_in_the_current_directory(self) -> None:
+        parser = Mock()
+        handler = Mock(return_value=0)
+        args = SimpleNamespace(command="restart", func=handler, from_companion=False)
+        parser.parse_args.return_value = args
+        spec = {
+            "command": ["/checkout-b/.venv/bin/python", "-m", "aiwatcher_cli", "restart"],
+            "cwd": "/checkout-b",
+            "env": {},
+        }
+        with (
+            patch.object(cli, "build_parser", return_value=parser),
+            patch.object(cli, "_requested_checkout_handoff", return_value=spec),
+            patch.object(cli, "_run_runtime_handoff", return_value=0) as handoff,
+            patch.object(cli, "acquire_runtime_lock") as acquire,
+        ):
+            result = cli.main(["restart"])
+
+        self.assertEqual(result, 0)
+        handoff.assert_called_once_with(spec)
+        acquire.assert_not_called()
+        handler.assert_not_called()
+
+    def test_delayed_companion_restart_honors_the_last_explicit_runtime(self) -> None:
+        parser = Mock()
+        handler = Mock(return_value=0)
+        args = SimpleNamespace(command="restart", func=handler, from_companion=True)
+        parser.parse_args.return_value = args
+        ownership = Mock()
+        spec = {
+            "command": ["/checkout-b/.venv/bin/python", "-m", "aiwatcher_cli", "restart", "--from-companion"],
+            "cwd": "/checkout-b",
+            "env": {},
+        }
+        with (
+            patch.object(cli, "build_parser", return_value=parser),
+            patch.object(cli, "_requested_checkout_handoff", return_value=None),
+            patch.object(cli, "install_identity", return_value={"source_root": "/checkout-a"}),
+            patch.object(cli, "acquire_runtime_lock", return_value=ownership),
+            patch.object(cli, "_preferred_runtime_handoff", return_value=spec),
+            patch.object(cli, "_run_runtime_handoff", return_value=0) as handoff,
+            patch.object(cli, "record_preferred_runtime") as record_preference,
+        ):
+            result = cli.main(["restart", "--from-companion"])
+
+        self.assertEqual(result, 0)
+        ownership.release.assert_called_once_with()
+        handoff.assert_called_once_with(spec)
+        record_preference.assert_not_called()
+        handler.assert_not_called()
+
+    def test_runtime_handoff_uses_the_requested_checkouts_virtualenv(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkout = Path(temp_dir) / "checkout-b"
+            module = checkout / "aiwatcher_cli"
+            python = checkout / ".venv" / "bin" / "python"
+            module.mkdir(parents=True)
+            python.parent.mkdir(parents=True)
+            (module / "__main__.py").write_text("", encoding="utf-8")
+            python.write_text("", encoding="utf-8")
+            with (
+                patch.object(cli, "installed_source_root", return_value=Path(temp_dir) / "checkout-a"),
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                os.environ.pop(cli._RUNTIME_HANDOFF_ENV, None)
+                spec = cli._runtime_handoff_spec(
+                    source_root=checkout,
+                    python_executable=str(python),
+                    arguments=["restart", "--open-ui"],
+                )
+
+        self.assertIsNotNone(spec)
+        self.assertEqual(
+            spec["command"],
+            [str(python), "-m", "aiwatcher_cli", "restart", "--open-ui"],
+        )
+        self.assertEqual(spec["cwd"], str(checkout.resolve()))
+        self.assertTrue(str(spec["env"]["PYTHONPATH"]).startswith(str(checkout.resolve())))
 
     def test_companion_heartbeat_refuses_a_second_role_owner(self) -> None:
         with (
