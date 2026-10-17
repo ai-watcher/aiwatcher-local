@@ -173,6 +173,96 @@ class SurfaceCoverageCliTests(unittest.TestCase):
 
 
 class StartCommandCliTests(unittest.TestCase):
+    def test_restart_replaces_dashboard_then_companion_with_requested_settings(self) -> None:
+        calls: list[str] = []
+        identity = {"install_kind": "source", "source_root": "/repo"}
+        old_dashboard = {**identity, "pid": 100}
+        new_dashboard = {**identity, "pid": 200}
+        with (
+            patch.object(
+                cli,
+                "_start_dashboard_server",
+                side_effect=lambda **_kwargs: calls.append("dashboard") or "http://127.0.0.1:8899/",
+            ) as start_dashboard,
+            patch.object(cli, "stop_companion", side_effect=lambda: calls.append("stop") or {"ok": True}),
+            patch.object(
+                cli,
+                "start_companion",
+                side_effect=lambda **_kwargs: calls.append("start") or {"ok": True, "pid": 4321},
+            ) as start_companion,
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli, "_running_dashboard_identity", side_effect=[old_dashboard, new_dashboard]),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                interval=45,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8899,
+                ui_port_attempts=7,
+                presence_position="top-left",
+                presence_visibility="ai-apps",
+                from_companion=False,
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["dashboard", "stop", "start"])
+        start_dashboard.assert_called_once_with(host="127.0.0.1", port=8899, port_attempts=7, restart=True)
+        start_companion.assert_called_once_with(
+            interval_seconds=45,
+            presence=True,
+            presence_position="top-left",
+            presence_visibility="ai-apps",
+        )
+
+    def test_restart_rejects_non_loopback_dashboard_host(self) -> None:
+        with (
+            patch.object(cli, "_start_dashboard_server") as start_dashboard,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_restart(SimpleNamespace(ui_host="0.0.0.0", ui_port=8765))
+
+        self.assertEqual(result, 2)
+        start_dashboard.assert_not_called()
+        self.assertIn("loopback", stderr.getvalue())
+
+    def test_restart_leaves_companion_running_when_dashboard_never_becomes_healthy(self) -> None:
+        with (
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "local_action_server_available", return_value=False),
+            patch.object(cli.time_module, "sleep"),
+            patch.object(cli, "stop_companion") as stop_companion,
+            patch.object(cli, "start_companion") as start_companion,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                ui_host="127.0.0.1", ui_port=8765, ui_port_attempts=1, from_companion=False,
+            ))
+
+        self.assertEqual(result, 2)
+        stop_companion.assert_not_called()
+        start_companion.assert_not_called()
+        self.assertIn("did not become healthy", stderr.getvalue())
+
+    def test_restart_does_not_accept_the_old_same_install_dashboard_pid(self) -> None:
+        identity = {"install_kind": "source", "source_root": "/repo", "pid": 100}
+        with (
+            patch.object(cli, "_running_dashboard_identity", return_value=identity),
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli.time_module, "sleep"),
+            patch.object(cli, "stop_companion") as stop_companion,
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                ui_host="127.0.0.1", ui_port=8765, ui_port_attempts=1, from_companion=False,
+            ))
+
+        self.assertEqual(result, 2)
+        stop_companion.assert_not_called()
+
     def test_start_runs_scan_and_starts_visible_companion_by_default(self) -> None:
         coverage = [
             SurfaceCoverage(
@@ -219,6 +309,7 @@ class StartCommandCliTests(unittest.TestCase):
         )
         open_presence.assert_called_once_with(
             cli._watch_ui_base_url(),
+            interval=30,
             position="bottom-right",
             visibility="always",
         )
@@ -248,6 +339,43 @@ class StartCommandCliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         start_companion.assert_not_called()
+
+    def test_start_preserves_an_existing_companion_interval_in_the_presence(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(
+                cli, "start_companion",
+                return_value={"ok": True, "already_running": True, "pid": 123, "interval_seconds": 45},
+            ),
+            patch.object(
+                cli, "_refresh_existing_native_companion_presence",
+                return_value=(True, "native companion presence PID 456"),
+            ) as refresh_presence,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=False,
+                no_presence=False,
+                presence_position="bottom-right",
+                presence_visibility="always",
+                no_ui=False,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+            ))
+
+        self.assertEqual(result, 0)
+        refresh_presence.assert_called_once_with(
+            cli._watch_ui_base_url(),
+            exclude_pid=123,
+            interval=45,
+            position="bottom-right",
+            visibility="always",
+        )
 
     def test_start_can_skip_dashboard_ui(self) -> None:
         with (
@@ -383,6 +511,7 @@ class StartCommandCliTests(unittest.TestCase):
         stop_presence.assert_called_once_with()
         open_presence.assert_called_once_with(
             "http://127.0.0.1:8896",
+            interval=30,
             position="bottom-right",
             visibility="ai-apps",
         )
@@ -409,13 +538,17 @@ class StartCommandCliTests(unittest.TestCase):
         stop_presence.assert_called_once_with()
         open_presence.assert_called_once_with(
             "http://127.0.0.1:8896",
+            interval=30,
             position="bottom-right",
             visibility="always",
         )
 
     def test_companion_start_refreshes_presence_when_daemon_already_runs(self) -> None:
         with (
-            patch.object(cli, "start_companion", return_value={"ok": True, "already_running": True, "pid": 999}),
+            patch.object(
+                cli, "start_companion",
+                return_value={"ok": True, "already_running": True, "pid": 999, "interval_seconds": 45},
+            ),
             patch.object(
                 cli,
                 "_refresh_existing_native_companion_presence",
@@ -436,6 +569,7 @@ class StartCommandCliTests(unittest.TestCase):
         refresh_presence.assert_called_once_with(
             cli._watch_ui_base_url(),
             exclude_pid=999,
+            interval=45,
             position="bottom-right",
             visibility="always",
         )
@@ -1012,16 +1146,14 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn(["pull", "--ff-only", "origin", "main"], calls)
         self.assertNotIn("aiwatcher start --open-ui", output)
-        self.assertIn("`aiwatcher companion stop`, then `aiwatcher companion start`", output)
-        self.assertIn("aiwatcher ui --restart --port 8799", output)
+        self.assertIn("aiwatcher restart --open-ui --ui-port 8799", output)
         self.assertIn("http://127.0.0.1:8799", output)
 
     def test_update_apply_points_at_start_when_nothing_is_running(self) -> None:
         result, output, _calls = self._apply_update(dashboard=False, companion=False)
         self.assertEqual(result, 0)
         self.assertIn("aiwatcher start --open-ui", output)
-        self.assertNotIn("companion stop", output)
-        self.assertNotIn("ui --restart", output)
+        self.assertNotIn("aiwatcher restart", output)
 
 
 class ProjectAttributionCliTests(unittest.TestCase):
@@ -1588,7 +1720,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIsNone(started["resource"])
         start_companion.assert_not_called()
-        refresh_presence.assert_called_once_with("http://127.0.0.1:8896", exclude_pid=999)
+        refresh_presence.assert_called_once_with("http://127.0.0.1:8896", exclude_pid=999, interval=30)
         self.assertIn("Companion presence refreshed for http://127.0.0.1:8896", stdout.getvalue())
 
     def test_ui_startup_can_open_the_bound_dashboard_url(self) -> None:
@@ -1783,8 +1915,8 @@ class PromptPreflightTests(unittest.TestCase):
         impact = result["estimated_impact"]
         self.assertFalse(impact["available"])
         rendered = cli.render_preflight(result)
-        self.assertIn("Quantified savings unavailable", rendered)
-        self.assertNotIn("Estimated savings:", rendered)
+        self.assertIn("Scenario comparison unavailable", rendered)
+        self.assertNotIn("Modeled difference:", rendered)
 
     def test_quantified_ranges_require_enough_history_over_time(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
@@ -1800,7 +1932,9 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertTrue(impact["available"])
         self.assertGreaterEqual(impact["sample_count"], cli.MIN_SAVINGS_SESSIONS)
         self.assertGreaterEqual(impact["history_span_days"], cli.MIN_SAVINGS_HISTORY_DAYS)
-        self.assertIn("planning ranges", cli.render_preflight(result).lower())
+        rendered = cli.render_preflight(result)
+        self.assertIn("fixed risk and scope multipliers", rendered.lower())
+        self.assertIn("not measured savings", rendered.lower())
 
     def test_codex_cumulative_totals_are_not_used_for_savings(self) -> None:
         rows = [
@@ -4543,15 +4677,14 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         self.assertIsNone(cli._hero_savings_label(result))
 
-    def test_hero_savings_label_shows_compact_dollar_range_when_available(self) -> None:
+    def test_hero_savings_label_uses_directional_heuristic_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
         with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_savings_label(result)
         self.assertIsNotNone(label)
-        self.assertIn("avoidable", label)
-        self.assertTrue(label.startswith("~$"))
+        self.assertEqual(label, "Heuristic only")
 
     def test_gate_html_shows_guardrail_chips_and_savings_badge_above_the_fold(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
@@ -4565,7 +4698,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
 
         self.assertIn('class="pill savings"', page)
-        self.assertIn("avoidable", page)
+        self.assertIn("Heuristic only", page)
         self.assertIn('class="guardrails"', page)
         self.assertIn("Scope narrowed", page)
         self.assertIn("Confirm before destructive changes", page)
@@ -4579,15 +4712,14 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         self.assertIsNone(cli._hero_pressure_label(result))
 
-    def test_hero_pressure_label_shows_tokens_and_tool_calls_when_available(self) -> None:
+    def test_hero_pressure_label_avoids_false_precision_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
         with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_pressure_label(result)
         self.assertIsNotNone(label)
-        self.assertIn("tokens", label)
-        self.assertIn("tool calls avoided", label)
+        self.assertEqual(label, "Lower pressure in scoped scenario")
 
     def test_gate_html_shows_pressure_caption_next_to_savings_badge(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
@@ -4601,13 +4733,13 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
 
         self.assertIn('class="pressure-caption"', page)
-        self.assertIn("tool calls avoided", page)
+        self.assertIn("Lower pressure in scoped scenario", page)
         # The compact caption must sit right after the savings badge (both in
         # the header), not down in the "What AIWatcher noticed" detail card --
         # that's still where the full sentence (_impact_summary) lives.
         self.assertLess(page.index('class="pressure-caption"'), page.index("What AIWatcher noticed"))
         self.assertGreater(page.index('class="pressure-caption"'), page.index('class="pill savings"'))
-        self.assertIn("Estimated avoidable pressure:", page)
+        self.assertIn("Modeled scenario direction:", page)
 
     def test_gate_html_shows_recommended_route_before_details(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -5919,6 +6051,64 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(len(updated["hooks"]["UserPromptSubmit"]), 1)
         self.assertIn("Stop", updated["hooks"])
 
+    def test_codex_hook_replacement_preserves_sibling_command_and_handler_metadata(self) -> None:
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "matcher": "trusted",
+                    "hooks": [
+                        {"type": "command", "command": "other-check"},
+                        {"type": "command", "command": "old-aiwatcher codex-hook --gate"},
+                    ],
+                }],
+                "Stop": [{"hooks": [{"type": "command", "command": "finish"}]}],
+            }
+        }
+
+        merged = cli._merge_codex_hook(settings, "/durable/aiwatcher", gate=True)
+        self.assertEqual(len(merged["hooks"]["UserPromptSubmit"]), 2)
+        self.assertEqual(merged["hooks"]["UserPromptSubmit"][0]["matcher"], "trusted")
+        self.assertEqual(
+            merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "other-check",
+        )
+        installed = merged["hooks"]["UserPromptSubmit"][1]["hooks"][0]
+        self.assertEqual(installed["command"], "/durable/aiwatcher codex-hook --gate")
+        self.assertEqual(installed["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+
+        updated, removed = cli._remove_codex_hook(merged)
+        self.assertTrue(removed)
+        self.assertEqual(updated["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], "other-check")
+        self.assertIn("Stop", updated["hooks"])
+
+    def test_hook_health_distinguishes_missing_source_executable_and_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_source = os.path.join(temp_dir, "gone")
+            issues = cli._hook_command_health_issues(
+                f"PYTHONPATH={missing_source}:${{PYTHONPATH:-}} python3 -m aiwatcher_cli codex-hook"
+            )
+            self.assertTrue(any("PYTHONPATH directory no longer exists" in issue for issue in issues))
+
+            with patch.object(cli.shutil, "which", return_value=None):
+                issues = cli._hook_command_health_issues("missing-aiwatcher codex-hook")
+            self.assertTrue(any("executable is missing" in issue for issue in issues))
+
+            failed = subprocess.CompletedProcess(["python"], 1, "", "No module named aiwatcher_cli")
+            with (
+                patch.object(cli.shutil, "which", return_value="/usr/bin/python3"),
+                patch.object(cli.subprocess, "run", return_value=failed),
+            ):
+                issues = cli._hook_command_health_issues("python3 -m aiwatcher_cli codex-hook")
+            self.assertTrue(any("cannot load AIWatcher" in issue for issue in issues))
+
+    def test_doctor_hook_label_reports_unhealthy_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "hooks.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"command": "PYTHONPATH=/definitely/gone python3 -m aiwatcher_cli codex-hook"}, handle)
+            label = cli._hook_file_health_label(path, "codex-hook")
+        self.assertIn("unhealthy", label)
+        self.assertIn("PYTHONPATH directory no longer exists", label)
+
     def test_read_stdin_text_decodes_utf8_regardless_of_platform_default(self) -> None:
         payload = json.dumps({"prompt": "Scan macro signals — short–term and long–term effect"})
         stdin = SimpleNamespace(buffer=io.BytesIO(payload.encode("utf-8")))
@@ -6488,8 +6678,15 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("scoped execution brief", output["user_message"].lower())
         self.assertIn("Task\nRefactor the entire codebase", output["user_message"])
 
-    def test_public_hook_command_uses_module_entrypoint(self) -> None:
-        command = cli._cli_command_for_current_file()
+    def test_public_hook_command_prefers_durable_console_entrypoint(self) -> None:
+        with patch.object(cli.shutil, "which", return_value="/home/me/.local/bin/aiwatcher"):
+            command = cli._cli_command_for_current_file()
+        self.assertEqual(command, "/home/me/.local/bin/aiwatcher")
+        self.assertNotIn("PYTHONPATH=", command)
+
+    def test_public_hook_command_falls_back_to_module_entrypoint(self) -> None:
+        with patch.object(cli.shutil, "which", return_value=None):
+            command = cli._cli_command_for_current_file()
         self.assertIn("-m aiwatcher_cli", command)
         self.assertIn("PYTHONPATH=", command)
         self.assertNotIn("collector/cli.py", command)
@@ -6502,6 +6699,7 @@ class IntegrationConfigTests(unittest.TestCase):
         with (
             patch.object(cli.sys, "executable", r"C:\Users\example\Python\python.exe"),
             patch.object(cli.os, "name", "nt"),
+            patch.object(cli.shutil, "which", return_value=None),
         ):
             command = cli._cli_command_for_current_file()
         self.assertNotIn("\\", command)
@@ -6511,6 +6709,7 @@ class IntegrationConfigTests(unittest.TestCase):
         with (
             patch.object(cli.sys, "executable", r"C:\Program Files\Python\python.exe"),
             patch.object(cli.os, "name", "nt"),
+            patch.object(cli.shutil, "which", return_value=None),
         ):
             command = cli._cli_command_for_current_file()
         self.assertIn("'C:/Program Files/Python/python.exe'", command)
@@ -6741,8 +6940,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 warnings = cli._configured_aiwatcher_source_warnings()
 
         self.assertEqual(len(warnings), 1)
-        self.assertIn("different AIWatcher checkout", warnings[0])
-        self.assertIn("Reinstall it from this repo", warnings[0])
+        self.assertIn("PYTHONPATH directory no longer exists", warnings[0])
         self.assertIn("install-codex-hook", warnings[0])
 
     def test_hook_status_warns_when_command_gate_points_at_different_checkout(self) -> None:

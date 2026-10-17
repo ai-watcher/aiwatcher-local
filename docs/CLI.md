@@ -18,8 +18,8 @@ explicitly. See [Privacy](../README.md#privacy) for the full contract.
 
 ## Contents
 
-- [Getting started](#getting-started) -- `start`, `setup`, `update`, `status`, `doctor`
-- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
+- [Getting started](#getting-started) -- `start`, `restart`, `setup`, `update`, `status`, `doctor`
+- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `delivery-review`, `push`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
@@ -56,6 +56,35 @@ aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
 | `--no-presence` | flag |  | Start the Companion without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
 | `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible: always, only during AI app work, or only for nudges |
+
+### `aiwatcher restart`
+
+Cleanly restart the dashboard UI and Companion together
+
+```sh
+aiwatcher restart [--interval INTERVAL] [--open-ui]
+                  [--ui-host UI_HOST] [--ui-port UI_PORT]
+                  [--ui-port-attempts UI_PORT_ATTEMPTS]
+                  [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+                  [--presence-visibility {always,ai-apps,nudges-only}]
+```
+
+Example:
+
+```sh
+aiwatcher restart --open-ui
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local Companion scans |
+| `--open-ui` | flag |  | Open the dashboard after restarting it |
+| `--ui-host` | text | `127.0.0.1` | Dashboard loopback address to bind |
+| `--ui-port` | integer | `8765` | Preferred dashboard port |
+| `--ui-port-attempts` | integer | `20` | How many sequential dashboard ports to try |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
+| `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible after restart |
+| `--from-companion` | flag |  | ==SUPPRESS== |
 
 ### `aiwatcher setup`
 
@@ -249,6 +278,43 @@ aiwatcher commit-receipt --repo ../my-service --json
 | `--json` | flag |  | Emit the receipt as JSON |
 | `--quiet-if-empty` | flag |  | Print nothing when there is no receipt to show; used by the git hook |
 | `--session-id` | text |  | Bind the commit receipt to an explicitly known AI session |
+
+### `aiwatcher delivery-review`
+
+Preview an evidence-backed local delivery candidate without claiming it was pushed
+
+```sh
+aiwatcher delivery-review [--repo REPO] [--session-id SESSION_ID]
+                          [--objective OBJECTIVE] [--json]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--repo` | text |  | Git checkout to review; defaults to the working directory |
+| `--session-id` | text |  | Bind the review to an explicitly known AI session |
+| `--objective` | text |  | Objective to include transiently; only its hash is retained |
+| `--json` | flag |  | Emit the transient review as JSON |
+
+### `aiwatcher push`
+
+Run git push and create a ready review only when the delivered current HEAD is confirmed
+
+```sh
+aiwatcher push [--repo REPO] [--session-id SESSION_ID]
+               [--objective OBJECTIVE] [--json]
+               ...
+```
+
+| Argument | Accepts | Description |
+| --- | --- | --- |
+| `push_args` | everything after `--` | Arguments for git push, after `--`; for example `-- --set-upstream origin feature` |
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--repo` | text |  | Git checkout to push; defaults to the working directory |
+| `--session-id` | text |  | Bind the delivery to an explicitly known AI session |
+| `--objective` | text |  | Objective to include transiently; only its hash is retained |
+| `--json` | flag |  | Emit the transient review as JSON after a confirmed push |
 
 ### `aiwatcher outcome`
 
@@ -1265,7 +1331,7 @@ aiwatcher ui --port 9000 --restart
 | `--port` | integer | `8765` | Port to serve the dashboard on |
 | `--port-attempts` | integer | `20` | How many sequential ports to try when the requested port is busy |
 | `--no-port-fallback` | flag |  | Fail instead of trying the next available port |
-| `--restart` | flag |  | Stop an existing local process on the requested port before starting |
+| `--restart` | flag |  | Restart the verified recorded AIWatcher dashboard before starting |
 | `--open`, `--open-ui` | flag |  | Open the dashboard in a browser after binding the final port |
 | `--no-watch` | flag |  | Do not start Ambient Watch alongside the dashboard |
 | `--watch-interval` | integer | `60` | Seconds between Ambient Watch scans when started with the UI |

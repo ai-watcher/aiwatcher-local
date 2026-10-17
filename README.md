@@ -40,8 +40,8 @@ AI coding work:
   context.
 - **During the run:** notice loops, context pressure, idle sessions, and work
   waiting on you.
-- **After the run:** connect AI sessions to commits, outcomes, receipts, and
-  improvement signals.
+- **After the run:** connect AI sessions to commits, exact-state checks, and a
+  confirmed push or pull request without guessing that local work was delivered.
 
 No signup is required, and the default install keeps data on your machine.
 
@@ -63,6 +63,9 @@ context:
   for continuing work in a new session.
 - **Prove what was worth it:** connect local AI sessions to commits, outcomes,
   receipts, and API-equivalent usage.
+- **Review delivered work:** after an observed push or pull request, get a
+  concise evidence review of the Git range, exact-state checks, linked sessions,
+  and unresolved gaps.
 - **Keep trust visible:** label what is automatic, what is inferred, and what
   the current tool surface cannot prove.
 
@@ -108,8 +111,7 @@ the existing installation instead:
 
 ```console
 pipx upgrade aiwatcher-local
-aiwatcher companion stop
-aiwatcher ui --restart --open
+aiwatcher restart --open-ui
 ```
 
 The restart matters because a running Console or Companion keeps using the code
@@ -129,8 +131,7 @@ Use the update command that matches how AIWatcher was installed:
 After any update, restart both local processes:
 
 ```console
-aiwatcher companion stop
-aiwatcher ui --restart --open
+aiwatcher restart --open-ui
 ```
 
 Merging code into GitHub `main` does not update PyPI installations. PyPI users
@@ -194,6 +195,40 @@ aiwatcher install-claude-command-gate --write --scope user
 Normal package upgrades do not require reinstalling unchanged hook files. Do
 restart the Console and Companion after an upgrade, and reload the AI client if
 hook configuration changed or `hook-status` does not show the test invocation.
+
+Hook installers prefer the durable `aiwatcher` executable on your `PATH`.
+`aiwatcher doctor` reports a hook as unhealthy when its executable or embedded
+source checkout has disappeared; reinstall the hook with the same gated command
+to repair it without disabling Prompt Gate.
+
+## Review A Delivery
+
+Capture verification against the exact Git state, then push through AIWatcher:
+
+```console
+aiwatcher run -- python -m unittest
+aiwatcher push -- --set-upstream origin feature/my-change
+```
+
+After a confirmed push, Home and Companion show **Delivery review ready**. Open
+**Prove** to inspect the delivered commit range, checks tied to that exact HEAD
+and dirty-tree fingerprint, sessions linked by commit receipts, and anything
+that still needs confirmation. Enter or confirm the objective there before
+approving the exact evidence and copying the bounded PR summary. Copy remains
+disabled until that approval is recorded. The objective text stays in that
+browser preview only; refresh and AIWatcher asks for it again rather than
+retaining prompt text. The approval stores only the objective hash, evidence
+hash, and timestamp, and becomes stale when the checkout HEAD or evidence changes.
+When an exact commit receipt links a delivery to a local session, Prove may
+re-read the first user prompt and show it as **inferred**; it remains explicitly
+unconfirmed until the developer accepts or replaces it and approves the summary.
+
+The Prove view can also review a checkout before it is pushed. That result is
+labelled **Local candidate** and never triggers a delivery-ready signal. The
+objective is used for that preview only; AIWatcher retains its hash, not the
+text. Ordinary successful `git push` or `gh pr create` commands observed in a
+supported structured terminal transcript can also produce confirmed evidence.
+Failed, backgrounded, opaque, or ambiguous commands cannot.
 
 ## Other Install Methods
 
@@ -364,7 +399,7 @@ Start with the first command that fails, then use the matching row.
 | `No module named pipx` | Install pipx first. On Linux with PEP 668, use `apt`, `dnf`, or the official pipx guide rather than system pip. |
 | `No module named pip3` | Use `python3 -m pip`, not `python3 -m pip3`; the module name is `pip`. |
 | `python3` or `py` is missing | Install Python 3.10+ from your package manager or [python.org](https://www.python.org/downloads/), then open a new terminal. |
-| Companion says `UI offline` | Run `aiwatcher companion stop`, then `aiwatcher ui --restart --open`. |
+| Companion says `UI offline` | Expand the Companion and click **Restart**, or run `aiwatcher restart --open-ui`. |
 | Dashboard opens an older checkout | Stop the old process, change to the intended workspace if using a source clone, and restart. Run `aiwatcher doctor` for install details. |
 | Upgrade reports no change | Compare `pipx list` with the [PyPI release page](https://pypi.org/project/aiwatcher-local/). GitHub `main` can be newer than PyPI. |
 | Hook does not appear to run | Restart or reload the AI tool, send a test prompt, then run `aiwatcher hook-status`. Use manual `preflight` when the surface does not expose the hook. |
@@ -436,6 +471,8 @@ aiwatcher companion stop
 | `aiwatcher preflight "..."` | Review a prompt manually |
 | `aiwatcher sessions` | Review recent local AI sessions |
 | `aiwatcher changes --days 30` | See AI-attributed commit evidence |
+| `aiwatcher delivery-review` | Preview a local checkout without claiming delivery |
+| `aiwatcher push -- [git push args]` | Push and create a review only when the remote HEAD is confirmed |
 | `aiwatcher outcome useful` | Mark the latest session outcome |
 | `aiwatcher update` | Check the running source or package installation for updates |
 

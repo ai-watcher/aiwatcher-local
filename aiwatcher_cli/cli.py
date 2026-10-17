@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import ipaddress
 import json
 import os
 import re
@@ -54,6 +55,7 @@ from .command_evidence import (
     verification_scope_for_cwd,
 )
 from .evidence_capture import record_missing_evidence_snapshots
+from .delivery_review import DeliveryReviewUnavailable, build_work_receipt, format_work_receipt
 from . import compaction, compaction_outcomes, prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
@@ -1582,7 +1584,7 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
             "history_span_days": history_span_days,
             "required_sessions": MIN_SAVINGS_SESSIONS,
             "required_history_days": MIN_SAVINGS_HISTORY_DAYS,
-            "direction": "A narrower prompt with checkpoints should reduce context and tool-call pressure, but AIWatcher cannot quantify savings yet.",
+            "direction": "A narrower prompt with checkpoints may reduce execution pressure, but AIWatcher cannot model a comparison from the available history yet.",
         }
 
     base_tokens = stats["p75_tokens"] or 120_000
@@ -2074,7 +2076,7 @@ def _workflow_reward_label(impact: dict[str, object], workflow: dict[str, str]) 
         token_label = _number_range_label(*tokens) if isinstance(tokens, list) and len(tokens) == 2 else ""
         value_label = _range_label(*api_value, money) if isinstance(api_value, list) and len(api_value) == 2 else ""
         if token_label and value_label:
-            return f"Potential avoided pressure before execution: {token_label} tokens and {value_label} API-equivalent."
+            return "Heuristic scenario: the scoped prompt is modeled to use less execution pressure; no measured savings are claimed."
     if workflow.get("mode") == "fork_task":
         return "Likely reward: isolates exploratory context before it pollutes the main task."
     if workflow.get("mode") == "use_subagents":
@@ -2456,7 +2458,7 @@ def render_preflight(result: dict[str, object]) -> str:
             "Expected impact",
             str(impact.get("direction", "A narrower prompt should reduce execution pressure.")),
             (
-                "Quantified savings unavailable: "
+                "Scenario comparison unavailable: "
                 f"AIWatcher needs at least {impact.get('required_sessions', MIN_SAVINGS_SESSIONS)} comparable sessions "
                 f"spanning {impact.get('required_history_days', MIN_SAVINGS_HISTORY_DAYS)} days. "
                 f"Current basis: {impact.get('basis', 'local history unavailable')}."
@@ -2465,12 +2467,12 @@ def render_preflight(result: dict[str, object]) -> str:
     elif int(result.get("score", 0)) > 0 and original and safer and savings:
         lines.extend([
             "",
-            "Estimated impact",
-            f"Original prompt: {_number_range_label(*original['tokens'])} tokens | {_number_range_label(*original['model_calls'])} model calls | {_number_range_label(*original['tool_calls'])} tool calls | {_range_label(*original['api_value_usd'], money)} API-equivalent",
-            f"Safer prompt: {_number_range_label(*safer['tokens'])} tokens | {_number_range_label(*safer['model_calls'])} model calls | {_number_range_label(*safer['tool_calls'])} tool calls | {_range_label(*safer['api_value_usd'], money)} API-equivalent",
-            f"Estimated savings: {_number_range_label(*savings['tokens'])} tokens | {_number_range_label(*savings['model_calls'])} model calls | {_number_range_label(*savings['tool_calls'])} tool calls | {_range_label(*savings['api_value_usd'], money)} API-equivalent",
-            f"Planning confidence: {impact.get('confidence', 'low')} ({impact.get('basis', 'local history unavailable')})",
-            "These are planning ranges, not guaranteed billing savings.",
+            "Heuristic scenario comparison",
+            "Broad-prompt scenario: higher execution pressure.",
+            "Scoped-prompt scenario: lower execution pressure with explicit checkpoints.",
+            "Modeled direction: scope reduction may lower tokens and tool activity; magnitude is not measured.",
+            f"History basis: {impact.get('basis', 'local history unavailable')}",
+            "Method: fixed risk and scope multipliers over historical percentiles; this is not measured savings or a billing forecast.",
         ])
     if workflow:
         lines.extend([
@@ -2489,21 +2491,19 @@ def render_preflight(result: dict[str, object]) -> str:
 def _impact_summary(result: dict[str, object]) -> str:
     impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
     if not impact:
-        return "AIWatcher can identify risk, but no local history exists yet for savings estimates."
+        return "AIWatcher can identify risk, but no local history exists yet for a heuristic scenario comparison."
     if not impact.get("available", False):
         return (
             f"{impact.get('direction', 'A narrower prompt should reduce execution pressure.')} "
-            f"Measured savings need at least {impact.get('required_sessions', MIN_SAVINGS_SESSIONS)} comparable sessions "
+            f"Scenario modeling needs at least {impact.get('required_sessions', MIN_SAVINGS_SESSIONS)} comparable sessions "
             f"over {impact.get('required_history_days', MIN_SAVINGS_HISTORY_DAYS)} days."
         )
     savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
     if not savings:
-        return "AIWatcher found comparable sessions, but could not calculate a savings range."
+        return "AIWatcher found comparable sessions, but could not calculate a modeled difference."
     return (
-        f"Estimated avoidable pressure: {_number_range_label(*savings['tokens'])} tokens, "
-        f"{_number_range_label(*savings['tool_calls'])} tool calls, "
-        f"{_range_label(*savings['api_value_usd'], money)} API-equivalent. "
-        f"Confidence: {impact.get('confidence', 'low')}."
+        "Modeled scenario direction: the scoped prompt may use less execution pressure. "
+        "Magnitude is not shown because measured results require linked post-intervention evidence."
     )
 
 
@@ -2537,7 +2537,7 @@ def _hero_savings_label(result: dict[str, object]) -> str | None:
     api_value = savings.get("api_value_usd")
     if not isinstance(api_value, list) or len(api_value) != 2:
         return None
-    return f"~{_range_label(*api_value, money)} avoidable"
+    return "Heuristic only"
 
 
 def _hero_pressure_label(result: dict[str, object]) -> str | None:
@@ -2556,7 +2556,7 @@ def _hero_pressure_label(result: dict[str, object]) -> str | None:
         return None
     if not isinstance(tool_calls, list) or len(tool_calls) != 2:
         return None
-    return f"{_number_range_label(*tokens)} tokens · {_number_range_label(*tool_calls)} tool calls avoided"
+    return "Lower pressure in scoped scenario"
 
 
 def _prompt_gate_route(result: dict[str, object]) -> dict[str, str]:
@@ -3658,24 +3658,32 @@ def command_start(args: argparse.Namespace) -> int:
             if presence_requested:
                 position = str(getattr(args, "presence_position", "bottom-right"))
                 visibility = str(getattr(args, "presence_visibility", "always"))
+                interval = int(
+                    result.get("interval_seconds")
+                    if result.get("already_running") and result.get("interval_seconds")
+                    else getattr(args, "interval", 30)
+                )
                 base_url = _watch_ui_base_url()
                 companion_pid = result.get("pid") if isinstance(result.get("pid"), int) else None
                 if result.get("already_running"):
                     ok, detail = _refresh_existing_native_companion_presence(
                         base_url,
                         exclude_pid=companion_pid,
+                        interval=interval,
                         position=position,
                         visibility=visibility,
                     )
                     if not ok and "not running" in detail:
                         ok, detail = _open_native_companion_presence(
                             base_url,
+                            interval=interval,
                             position=position,
                             visibility=visibility,
                         )
                 else:
                     ok, detail = _open_native_companion_presence(
                         base_url,
+                        interval=interval,
                         position=position,
                         visibility=visibility,
                     )
@@ -3702,6 +3710,89 @@ def command_start(args: argparse.Namespace) -> int:
             else:
                 print("Could not open the browser automatically; use the Dashboard UI URL above.", file=sys.stderr)
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
+    return 0
+
+
+def _loopback_host(value: str) -> bool:
+    host = value.strip().lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def command_restart(args: argparse.Namespace) -> int:
+    """Replace the dashboard and Companion as one local lifecycle action."""
+    if getattr(args, "from_companion", False) and os.name != "nt":
+        try:
+            os.setsid()
+        except OSError:
+            # The launcher normally creates a new session already.
+            pass
+
+    host = str(getattr(args, "ui_host", "127.0.0.1"))
+    port = int(getattr(args, "ui_port", DEFAULT_UI_PORT))
+    if not _loopback_host(host):
+        print("Restart only binds the dashboard to a loopback address.", file=sys.stderr)
+        return 2
+    if not 1 <= port <= 65535:
+        print("Dashboard port must be between 1 and 65535.", file=sys.stderr)
+        return 2
+
+    previous_dashboard = _running_dashboard_identity()
+    previous_pid = previous_dashboard.get("pid") if previous_dashboard else None
+    ui_url = _start_dashboard_server(
+        host=host,
+        port=port,
+        port_attempts=int(getattr(args, "ui_port_attempts", 20)),
+        restart=True,
+    )
+    if not ui_url:
+        return 2
+    current_identity = install_identity()
+    for _ in range(50):
+        running_dashboard = _running_dashboard_identity()
+        replacement_pid = running_dashboard.get("pid") if running_dashboard else None
+        replaced_previous = not isinstance(previous_pid, int) or (
+            isinstance(replacement_pid, int) and replacement_pid != previous_pid
+        )
+        if (
+            local_action_server_available()
+            and _same_install_identity(running_dashboard, current_identity)
+            and replaced_previous
+        ):
+            break
+        time_module.sleep(0.1)
+    else:
+        print("Dashboard did not become healthy; Companion was left running.", file=sys.stderr)
+        return 2
+
+    stop_result = stop_companion()
+    if not stop_result.get("ok"):
+        print(f"Companion could not stop: {stop_result.get('message', 'unknown error')}", file=sys.stderr)
+        return 2
+
+    start_result = start_companion(
+        interval_seconds=int(getattr(args, "interval", 30)),
+        presence=True,
+        presence_position=str(getattr(args, "presence_position", "bottom-right")),
+        presence_visibility=str(getattr(args, "presence_visibility", "always")),
+    )
+    if not start_result.get("ok"):
+        print(f"Companion could not restart: {start_result.get('message', 'unknown error')}", file=sys.stderr)
+        return 2
+
+    print(f"Dashboard restarted: {ui_url}")
+    print(f"Companion restarted (PID {start_result.get('pid')}).")
+    if getattr(args, "open_ui", False):
+        try:
+            opened = webbrowser.open(ui_url)
+        except Exception:
+            opened = False
+        if not opened:
+            print("Could not open the browser automatically; use the Dashboard URL above.", file=sys.stderr)
     return 0
 
 
@@ -3811,12 +3902,12 @@ def _print_post_update_restart_advice() -> None:
         print("Start AIWatcher with `aiwatcher start --open-ui` to run the new code.")
         return
     print("Processes already running keep the old code until restarted; `aiwatcher start` reuses them.")
-    if companion:
-        print("- Companion: `aiwatcher companion stop`, then `aiwatcher companion start`")
-    if dashboard:
-        url = _watch_ui_base_url()
-        port = urlparse(url).port or DEFAULT_UI_PORT
-        print(f"- Dashboard: `aiwatcher ui --restart --port {port}` replaces the one at {url}")
+    url = _watch_ui_base_url()
+    port = urlparse(url).port or DEFAULT_UI_PORT
+    print(
+        f"Run `aiwatcher restart --open-ui --ui-port {port}` to replace both local processes "
+        f"currently using {url}."
+    )
 
 
 def _ui_server_base_url(server: dict[str, Any]) -> str:
@@ -4237,12 +4328,14 @@ def command_companion(args: argparse.Namespace) -> int:
             ok, detail = _refresh_existing_native_companion_presence(
                 base_url,
                 exclude_pid=os.getpid(),
+                interval=int(getattr(args, "interval", 30)),
                 position=str(getattr(args, "presence_position", "bottom-right")),
                 visibility=str(getattr(args, "presence_visibility", "always")),
             )
             if not ok and "not running" in detail:
                 ok, detail = _open_native_companion_presence(
                     base_url,
+                    interval=int(getattr(args, "interval", 30)),
                     position=str(getattr(args, "presence_position", "bottom-right")),
                     visibility=str(getattr(args, "presence_visibility", "always")),
                 )
@@ -4268,16 +4361,19 @@ def command_companion(args: argparse.Namespace) -> int:
             if presence_requested:
                 position = str(getattr(args, "presence_position", "bottom-right"))
                 visibility = str(getattr(args, "presence_visibility", "always"))
+                interval = int(result.get("interval_seconds") or getattr(args, "interval", 30))
                 companion_pid = result.get("pid") if isinstance(result.get("pid"), int) else None
                 ok, detail = _refresh_existing_native_companion_presence(
                     _watch_ui_base_url(),
                     exclude_pid=companion_pid,
+                    interval=interval,
                     position=position,
                     visibility=visibility,
                 )
                 if not ok and "not running" in detail:
                     ok, detail = _open_native_companion_presence(
                         _watch_ui_base_url(),
+                        interval=interval,
                         position=position,
                         visibility=visibility,
                     )
@@ -5692,6 +5788,7 @@ def _stop_native_companion_tray() -> None:
 def _open_native_companion_presence(
     base_url: str,
     *,
+    interval: int = 30,
     position: str = "bottom-right",
     visibility: str = "always",
 ) -> tuple[bool, str]:
@@ -5730,6 +5827,8 @@ def _open_native_companion_presence(
                 position,
                 "--visibility",
                 visibility,
+                "--interval",
+                str(max(15, int(interval))),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -5757,6 +5856,7 @@ def _refresh_existing_native_companion_presence(
     base_url: str,
     *,
     exclude_pid: int | None = None,
+    interval: int = 30,
     position: str = "bottom-right",
     visibility: str = "always",
 ) -> tuple[bool, str]:
@@ -5766,7 +5866,9 @@ def _refresh_existing_native_companion_presence(
     if existing_pid is None and not stopped_orphans:
         return False, "native companion presence not running"
     _stop_native_companion_presence()
-    ok, detail = _open_native_companion_presence(base_url, position=position, visibility=visibility)
+    ok, detail = _open_native_companion_presence(
+        base_url, interval=interval, position=position, visibility=visibility,
+    )
     if ok:
         if stopped_orphans:
             return True, f"{detail}; cleaned {len(stopped_orphans)} old companion process(es)"
@@ -7094,6 +7196,76 @@ def _verification_state_binding(before: dict[str, str | None], after: dict[str, 
     return "git_state" if all(before[key] == after[key] for key in keys) else "git_state_changed"
 
 
+def _git_output(repo: str, args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=4,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _push_targets_current_head(
+    repo: str,
+    push_args: list[str],
+    *,
+    branch: str,
+    upstream: str | None,
+) -> bool:
+    """Return whether a successful push would explicitly cover this branch.
+
+    The post-push ref equality check proves the remote state, while this check
+    prevents an unrelated tag, deletion, or alternate-remote push from taking
+    credit for an upstream that happened to be current already.
+    """
+    if not branch or any(value in {"--dry-run", "-n", "--delete", "-d", "--tags", "--mirror", "--all"}
+                         for value in push_args):
+        return False
+    options_with_value = {"--receive-pack", "--exec", "-o", "--push-option"}
+    positional: list[str] = []
+    skip = False
+    for value in push_args:
+        if skip:
+            skip = False
+            continue
+        if value in options_with_value:
+            skip = True
+            continue
+        if value.startswith("--receive-pack=") or value.startswith("--exec=") or value.startswith("--push-option="):
+            continue
+        if value.startswith("-"):
+            continue
+        positional.append(value)
+
+    upstream_remote, separator, upstream_ref = (upstream or "").partition("/")
+    if not positional:
+        return bool(separator and upstream_ref == branch)
+    remote = positional[0]
+    refspecs = positional[1:]
+    if not refspecs:
+        return bool(separator and remote == upstream_remote and upstream_ref == branch)
+
+    for raw_refspec in refspecs:
+        refspec = raw_refspec.removeprefix("+")
+        if not refspec or refspec.startswith(":"):
+            continue
+        source, has_target, target = refspec.partition(":")
+        target = target if has_target else source
+        source_head = _git_output(repo, ["rev-parse", "--verify", f"{source}^{{commit}}"])
+        target_branch = target.removeprefix("refs/heads/")
+        if source_head == _git_output(repo, ["rev-parse", "HEAD"]) and target_branch == branch:
+            return not separator or remote == upstream_remote or "--set-upstream" in push_args or "-u" in push_args
+    return False
+
+
 def command_run(args: argparse.Namespace) -> int:
     command = list(args.command)
     if command and command[0] == "--":
@@ -7165,6 +7337,105 @@ def command_run(args: argparse.Namespace) -> int:
     else:
         print("\nNo local AI session was detected after this command.")
     return int(completed.returncode)
+
+
+def command_delivery_review(args: argparse.Namespace) -> int:
+    """Build an explicit local candidate without claiming remote delivery."""
+    repo = os.path.abspath(args.repo or os.getcwd())
+    try:
+        receipt = build_work_receipt(
+            repo,
+            objective_text=args.objective,
+            event_kind="explicit_review",
+            event_status="candidate",
+            event_source="explicit_local_review",
+            session_id=args.session_id,
+        )
+    except DeliveryReviewUnavailable as exc:
+        print(f"Delivery review unavailable: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(receipt.to_json(), indent=2))
+    else:
+        print(format_work_receipt(receipt), end="")
+    return 0
+
+
+def command_push(args: argparse.Namespace) -> int:
+    """Run git push and create a confirmed review only for the pushed HEAD."""
+    repo = os.path.abspath(args.repo or os.getcwd())
+    identity = resolve_git_identity(repo)
+    if identity is None:
+        print("Not a Git checkout.", file=sys.stderr)
+        return 2
+    repo = identity.checkout_path
+    push_args = list(args.push_args)
+    if push_args and push_args[0] == "--":
+        push_args = push_args[1:]
+    before_head = _git_output(repo, ["rev-parse", "HEAD"])
+    branch = _git_output(repo, ["branch", "--show-current"])
+    before_upstream = _git_output(repo, ["rev-parse", "--abbrev-ref", "@{upstream}"])
+    if not before_head:
+        print("The checkout has no readable HEAD commit.", file=sys.stderr)
+        return 2
+    targets_current_head = _push_targets_current_head(
+        repo, push_args, branch=branch or "", upstream=before_upstream,
+    )
+
+    command = ["git", "-C", repo, "push", *push_args]
+    try:
+        completed = subprocess.run(command, check=False)
+    except OSError as exc:
+        print(f"Could not run git push: {exc}", file=sys.stderr)
+        return 2
+    if completed.returncode != 0:
+        print("AIWatcher did not create a delivery review because the push did not succeed.", file=sys.stderr)
+        return int(completed.returncode)
+    if not targets_current_head:
+        print(
+            "Push succeeded, but its arguments did not prove that the current branch was delivered. "
+            "No ready review was created; run `aiwatcher delivery-review` for a local candidate.",
+            file=sys.stderr,
+        )
+        return 0
+
+    after_head = _git_output(repo, ["rev-parse", "HEAD"])
+    upstream = _git_output(repo, ["rev-parse", "--abbrev-ref", "@{upstream}"])
+    upstream_head = _git_output(repo, ["rev-parse", "@{upstream}"]) if upstream else None
+    if not after_head or after_head != before_head or upstream_head != after_head or not upstream:
+        print(
+            "Push succeeded, but AIWatcher could not prove that the current HEAD is the delivered upstream ref. "
+            "No ready review was created; run `aiwatcher delivery-review` for a local candidate.",
+            file=sys.stderr,
+        )
+        return 0
+    remote, separator, remote_ref = upstream.partition("/")
+    if not separator or not remote or not remote_ref:
+        print("Push succeeded, but its remote destination could not be identified. No ready review was created.", file=sys.stderr)
+        return 0
+    source_id = "wrapped-push-" + uuid.uuid4().hex
+    try:
+        receipt = build_work_receipt(
+            repo,
+            objective_text=args.objective,
+            event_kind="push",
+            event_status="confirmed",
+            event_source="wrapped_git_push",
+            event_source_id=source_id,
+            event_head_sha=after_head,
+            session_id=args.session_id,
+            remote=remote,
+            remote_ref=remote_ref,
+        )
+    except DeliveryReviewUnavailable as exc:
+        print(f"Push succeeded, but the delivery review is unavailable: {exc}", file=sys.stderr)
+        return 0
+    if args.json:
+        print(json.dumps(receipt.to_json(), indent=2))
+    else:
+        print()
+        print(format_work_receipt(receipt), end="")
+    return 0
 
 
 def command_preflight(args: argparse.Namespace) -> int:
@@ -8104,6 +8375,11 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
 
 
 def _cli_command_for_current_file() -> str:
+    installed = shutil.which("aiwatcher")
+    if installed:
+        if os.name == "nt":
+            installed = installed.replace("\\", "/")
+        return shlex.quote(installed)
     executable = sys.executable
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     if os.name == "nt":
@@ -8321,16 +8597,7 @@ def _merge_codex_hook(settings: dict[str, object], command: str, *, gate: bool =
     event_hooks = hooks.get("UserPromptSubmit")
     if not isinstance(event_hooks, list):
         event_hooks = []
-    event_hooks = [
-        item for item in event_hooks
-        if not (
-            isinstance(item, dict)
-            and any(
-                isinstance(hook, dict) and "codex-hook" in str(hook.get("command", ""))
-                for hook in item.get("hooks", [])
-            )
-        )
-    ]
+    event_hooks, _removed = _filter_nested_command_hooks(event_hooks, "codex-hook")
     codex_command_hook: dict[str, object] = {
         "type": "command",
         "command": _hook_command(command, "codex-hook", gate=gate),
@@ -8351,17 +8618,8 @@ def _remove_codex_hook(settings: dict[str, object]) -> tuple[dict[str, object], 
     event_hooks = hooks.get("UserPromptSubmit")
     if not isinstance(event_hooks, list):
         return settings, False
-    filtered = [
-        item for item in event_hooks
-        if not (
-            isinstance(item, dict)
-            and any(
-                isinstance(hook, dict) and "codex-hook" in str(hook.get("command", ""))
-                for hook in item.get("hooks", [])
-            )
-        )
-    ]
-    if len(filtered) == len(event_hooks):
+    filtered, removed = _filter_nested_command_hooks(event_hooks, "codex-hook")
+    if not removed:
         return settings, False
     if filtered:
         hooks["UserPromptSubmit"] = filtered
@@ -8372,6 +8630,30 @@ def _remove_codex_hook(settings: dict[str, object]) -> tuple[dict[str, object], 
     else:
         settings.pop("hooks", None)
     return settings, True
+
+
+def _filter_nested_command_hooks(
+    event_hooks: list[object], marker: str,
+) -> tuple[list[object], bool]:
+    """Remove only matching inner commands, retaining siblings and metadata."""
+    filtered: list[object] = []
+    removed = False
+    for item in event_hooks:
+        if not isinstance(item, dict) or not isinstance(item.get("hooks"), list):
+            filtered.append(item)
+            continue
+        kept_hooks = []
+        for hook in item["hooks"]:
+            matches = isinstance(hook, dict) and marker in str(hook.get("command", ""))
+            if matches:
+                removed = True
+            else:
+                kept_hooks.append(hook)
+        if kept_hooks:
+            replacement = dict(item)
+            replacement["hooks"] = kept_hooks
+            filtered.append(replacement)
+    return filtered, removed
 
 
 def _claude_settings_path(scope: str, project_dir: str | None = None) -> str:
@@ -8918,12 +9200,12 @@ def command_doctor(_args: argparse.Namespace) -> int:
     print(f"Platform: {sys.platform}")
     print(f"Claude history: {'detected' if detected.get('claude-code') else 'not detected'}")
     print(f"Codex history: {'detected' if detected.get('codex-cli') else 'not detected'}")
-    print(f"Claude project hook: {'installed' if _file_contains(claude_project, 'claude-hook') else 'not installed'}")
-    print(f"Claude user hook: {'installed' if _file_contains(claude_user, 'claude-hook') else 'not installed'}")
-    print(f"Codex project hook: {'installed' if _file_contains(codex_project, 'codex-hook') else 'not installed'}")
-    print(f"Codex user hook: {'installed' if _file_contains(codex_user, 'codex-hook') else 'not installed'}")
-    print(f"Cursor project hook: {'installed' if _file_contains(cursor_project, 'cursor-hook') else 'not installed'}")
-    print(f"Cursor user hook: {'installed' if _file_contains(cursor_user, 'cursor-hook') else 'not installed'}")
+    print(f"Claude project hook: {_hook_file_health_label(claude_project, 'claude-hook')}")
+    print(f"Claude user hook: {_hook_file_health_label(claude_user, 'claude-hook')}")
+    print(f"Codex project hook: {_hook_file_health_label(codex_project, 'codex-hook')}")
+    print(f"Codex user hook: {_hook_file_health_label(codex_user, 'codex-hook')}")
+    print(f"Cursor project hook: {_hook_file_health_label(cursor_project, 'cursor-hook')}")
+    print(f"Cursor user hook: {_hook_file_health_label(cursor_user, 'cursor-hook')}")
     print(f"Codex shell wrapper: {'installed' if _file_contains(shell_rc, CODEX_WRAPPER_MARKER_START) else 'not installed'}")
     print(f"Codex MCP config: {'referenced' if _file_contains(codex_config, 'aiwatcher') else 'not detected'}")
     print(f"Local state: {state_path()}")
@@ -8953,70 +9235,138 @@ def _file_text(path: str) -> str:
         return ""
 
 
+def _matching_hook_commands(text: str, marker: str) -> list[str]:
+    if marker not in text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [line.strip() for line in text.splitlines() if marker in line]
+    found: list[str] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            command = value.get("command")
+            if isinstance(command, str) and marker in command:
+                found.append(command)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(parsed)
+    return found
+
+
+def _hook_command_parts(command: str) -> tuple[dict[str, str], list[str]]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return {}, []
+    assignments: dict[str, str] = {}
+    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        name, value = tokens.pop(0).split("=", 1)
+        assignments[name] = value
+    return assignments, tokens
+
+
+def _hook_command_health_issues(command: str, *, package_root: str | None = None) -> list[str]:
+    assignments, tokens = _hook_command_parts(command)
+    if not tokens:
+        return ["the configured command cannot be parsed"]
+    issues: list[str] = []
+    source_value = assignments.get("PYTHONPATH", "")
+    source_prefix = source_value.split("${PYTHONPATH", 1)[0].rstrip(":;")
+    normalized_source = source_prefix.replace("\\", "/")
+    normalized_root = (package_root or "").replace("\\", "/")
+    if source_prefix:
+        if not os.path.isdir(source_prefix):
+            issues.append(f"its PYTHONPATH directory no longer exists ({source_prefix})")
+        elif normalized_root and normalized_source != normalized_root:
+            issues.append(f"it points at a different AIWatcher checkout ({source_prefix})")
+
+    executable = tokens[0]
+    resolved = executable if os.path.isfile(executable) else shutil.which(executable)
+    if not resolved:
+        issues.append(f"its executable is missing ({executable})")
+        return issues
+    if issues:
+        return issues
+
+    env = os.environ.copy()
+    if source_value:
+        env["PYTHONPATH"] = source_value.replace("${PYTHONPATH:-}", env.get("PYTHONPATH", ""))
+    probe = [resolved, "-c", "import aiwatcher_cli"] if tokens[1:3] == ["-m", "aiwatcher_cli"] else [resolved, "--help"]
+    try:
+        result = subprocess.run(
+            probe, cwd=os.path.abspath(os.sep), env=env, check=False,
+            capture_output=True, text=True, timeout=3,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        issues.append(f"its executable could not be checked ({exc})")
+    else:
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "package load failed").strip().splitlines()[-1]
+            issues.append(f"it cannot load AIWatcher ({detail[:180]})")
+    return issues
+
+
+def _hook_file_health_label(path: str, marker: str) -> str:
+    commands = _matching_hook_commands(_file_text(path), marker)
+    if not commands:
+        return "not installed"
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    issues = [
+        issue
+        for command in commands
+        for issue in _hook_command_health_issues(command, package_root=package_root)
+    ]
+    if not issues:
+        return "installed and executable"
+    if all("different AIWatcher checkout" in issue for issue in issues):
+        return f"installed; source-bound elsewhere ({issues[0]})"
+    return f"unhealthy ({issues[0]})"
+
+
 def _configured_aiwatcher_source_warnings() -> list[str]:
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if os.name == "nt":
-        package_root = package_root.replace("\\", "/")
-
-    def matching_commands(text: str, marker: str) -> list[str]:
-        if marker not in text:
-            return []
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return [
-                line.strip()
-                for line in text.splitlines()
-                if marker in line
-            ]
-        found: list[str] = []
-
-        def visit(value: object) -> None:
-            if isinstance(value, dict):
-                command = value.get("command")
-                if isinstance(command, str) and marker in command:
-                    found.append(command)
-                for child in value.values():
-                    visit(child)
-            elif isinstance(value, list):
-                for child in value:
-                    visit(child)
-
-        visit(parsed)
-        return found
 
     checks = [
         ("Claude project hook", _claude_settings_path("project"), "claude-hook",
-         "python -m aiwatcher_cli install-claude-hook --write --scope project --gate"),
+         "aiwatcher install-claude-hook --write --scope project --gate"),
         ("Claude user hook", _claude_settings_path("user"), "claude-hook",
-         "python -m aiwatcher_cli install-claude-hook --write --scope user --gate"),
+         "aiwatcher install-claude-hook --write --scope user --gate"),
         ("Claude project command gate", _claude_settings_path("project"), "claude-pretooluse-hook",
-         "python -m aiwatcher_cli install-claude-command-gate --write --scope project"),
+         "aiwatcher install-claude-command-gate --write --scope project"),
         ("Claude user command gate", _claude_settings_path("user"), "claude-pretooluse-hook",
-         "python -m aiwatcher_cli install-claude-command-gate --write --scope user"),
+         "aiwatcher install-claude-command-gate --write --scope user"),
         ("Codex project hook", _codex_hooks_path("project"), "codex-hook",
-         "python -m aiwatcher_cli install-codex-hook --write --scope project --gate"),
+         "aiwatcher install-codex-hook --write --scope project --gate"),
         ("Codex user hook", _codex_hooks_path("user"), "codex-hook",
-         "python -m aiwatcher_cli install-codex-hook --write --scope user --gate"),
+         "aiwatcher install-codex-hook --write --scope user --gate"),
         ("Cursor project hook", _cursor_hooks_path("project"), "cursor-hook",
-         "python -m aiwatcher_cli install-cursor-hook --write --scope project --gate"),
+         "aiwatcher install-cursor-hook --write --scope project --gate"),
         ("Cursor user hook", _cursor_hooks_path("user"), "cursor-hook",
-         "python -m aiwatcher_cli install-cursor-hook --write --scope user --gate"),
+         "aiwatcher install-cursor-hook --write --scope user --gate"),
     ]
     warnings: list[str] = []
     for label, path, marker, repair in checks:
         text = _file_text(path)
-        commands = matching_commands(text, marker)
+        commands = _matching_hook_commands(text, marker)
         if not commands:
             continue
-        stale_commands = [
-            command for command in commands
-            if package_root not in command.replace("\\", "/")
+        issues = [
+            issue
+            for command in commands
+            for issue in _hook_command_health_issues(command, package_root=package_root)
         ]
-        if stale_commands:
+        if issues:
+            broken = any("different AIWatcher checkout" not in issue for issue in issues)
+            posture = "is unhealthy" if broken else "uses another AIWatcher checkout"
             warnings.append(
-                f"{label} is installed from a different AIWatcher checkout. Reinstall it from this repo so hooks, "
-                f"Companion, and gates use the same code. Path: {path}. Repair: {repair}"
+                f"{label} {posture}: {'; '.join(issues)}. Path: {path}. Repair: {repair}"
             )
     return warnings
 
@@ -9608,11 +9958,14 @@ def command_ui(args: argparse.Namespace) -> int:
                 ok, detail = _refresh_existing_native_companion_presence(
                     companion_url,
                     exclude_pid=watcher_pid,
+                    interval=int(watcher.get("interval_seconds") or 30),
                 )
                 if ok:
                     print(f"Companion presence refreshed for {companion_url} ({detail}).")
                 elif "not running" in detail:
-                    ok, detail = _open_native_companion_presence(companion_url)
+                    ok, detail = _open_native_companion_presence(
+                        companion_url, interval=int(watcher.get("interval_seconds") or 30),
+                    )
                     if ok:
                         print(f"Companion presence opened for {companion_url} ({detail}).")
                 elif "not running" not in detail:
@@ -9669,6 +10022,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="When the Companion is visible: always, only during AI app work, or only for nudges",
     )
     start.set_defaults(func=command_start)
+    restart = sub.add_parser("restart", help="Cleanly restart the dashboard UI and Companion together")
+    restart.add_argument("--interval", type=int, default=30, help="Seconds between local Companion scans")
+    restart.add_argument("--open-ui", action="store_true", help="Open the dashboard after restarting it")
+    restart.add_argument("--ui-host", default="127.0.0.1", help="Dashboard loopback address to bind")
+    restart.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT, help="Preferred dashboard port")
+    restart.add_argument("--ui-port-attempts", type=int, default=20, help="How many sequential dashboard ports to try")
+    restart.add_argument(
+        "--presence-position",
+        choices=("bottom-right", "bottom-left", "top-right", "top-left"),
+        default="bottom-right",
+        help="Screen corner for the collapsed Companion",
+    )
+    restart.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible after restart",
+    )
+    restart.add_argument("--from-companion", action="store_true", help=argparse.SUPPRESS)
+    restart.set_defaults(func=command_restart)
     setup = sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps")
     setup.add_argument("--all", action="store_true", help="Show every optional setup and hook command")
     setup.set_defaults(func=command_setup)
@@ -10049,6 +10422,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(func=command_run)
 
+    delivery_review = sub.add_parser(
+        "delivery-review",
+        help="Preview an evidence-backed local delivery candidate without claiming it was pushed",
+    )
+    delivery_review.add_argument("--repo", help="Git checkout to review; defaults to the working directory")
+    delivery_review.add_argument("--session-id", help="Bind the review to an explicitly known AI session")
+    delivery_review.add_argument("--objective", help="Objective to include transiently; only its hash is retained")
+    delivery_review.add_argument("--json", action="store_true", help="Emit the transient review as JSON")
+    delivery_review.set_defaults(func=command_delivery_review)
+
+    push = sub.add_parser(
+        "push",
+        help="Run git push and create a ready review only when the delivered current HEAD is confirmed",
+    )
+    push.add_argument("--repo", help="Git checkout to push; defaults to the working directory")
+    push.add_argument("--session-id", help="Bind the delivery to an explicitly known AI session")
+    push.add_argument("--objective", help="Objective to include transiently; only its hash is retained")
+    push.add_argument("--json", action="store_true", help="Emit the transient review as JSON after a confirmed push")
+    push.add_argument(
+        "push_args", nargs=argparse.REMAINDER,
+        help="Arguments for git push, after `--`; for example `-- --set-upstream origin feature`",
+    )
+    push.set_defaults(func=command_push)
+
     preflight = sub.add_parser("preflight", help="Review a prompt for local cost, scope, and safety risk")
     preflight.add_argument("prompt", nargs="*", help="The prompt to review; quote it, or use --text")
     preflight.add_argument("--text", help="The prompt to review, as a single string")
@@ -10215,7 +10612,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT, help="Port to serve the dashboard on")
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
-    ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")
+    ui.add_argument("--restart", action="store_true", help="Restart the verified recorded AIWatcher dashboard before starting")
     ui.add_argument("--open", "--open-ui", dest="open_ui", action="store_true", help="Open the dashboard in a browser after binding the final port")
     ui.add_argument("--no-watch", action="store_true", help="Do not start Ambient Watch alongside the dashboard")
     ui.add_argument("--watch-interval", type=int, default=60, help="Seconds between Ambient Watch scans when started with the UI")
