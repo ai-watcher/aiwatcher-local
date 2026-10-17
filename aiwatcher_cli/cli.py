@@ -56,6 +56,17 @@ from .command_evidence import (
 )
 from .evidence_capture import record_missing_evidence_snapshots
 from .delivery_review import DeliveryReviewUnavailable, build_work_receipt, format_work_receipt
+from .delivery_tracking import (
+    active_commit_hook_path,
+    COMMIT_HOOK_END,
+    COMMIT_HOOK_MARKER,
+    cli_command_for_current_install as _cli_command_for_current_file,
+    commit_hook_body as _commit_hook_body,
+    delivery_tracking_status,
+    install_commit_hook,
+    remove_commit_hook,
+    sync_delivery_tracking,
+)
 from . import compaction, compaction_outcomes, prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
@@ -91,6 +102,7 @@ from .local_state import (
     record_commit_receipt,
     record_verification_receipt,
     record_decision,
+    record_delivery_tracking_settings,
     record_evidence_snapshot,
     record_intervention,
     record_hook_event,
@@ -100,6 +112,7 @@ from .local_state import (
     record_outcome,
     record_survival_check,
     record_watcher_heartbeat,
+    delivery_tracking_settings,
     record_watch_notification,
     recent_watch_notifications,
     redact_command_for_storage,
@@ -128,6 +141,8 @@ from .runtime_lifecycle import (
     ROLE_ACQUIRE_TIMEOUT_SECONDS,
     RuntimeLock,
     acquire_runtime_lock,
+    preferred_runtime,
+    record_preferred_runtime,
     runtime_lock_status,
 )
 from .runtime_nudge import (
@@ -173,7 +188,7 @@ from .scanner import (
 )
 from .session_health import analyze_session_health
 from .session_presence import presence_for_session
-from .updater import apply_updates, check_for_updates, install_identity
+from .updater import apply_updates, check_for_updates, install_identity, installed_source_root
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
@@ -3732,6 +3747,123 @@ def _loopback_host(value: str) -> bool:
         return False
 
 
+_RUNTIME_HANDOFF_ENV = "AIWATCHER_RUNTIME_HANDOFF"
+
+
+def _aiwatcher_checkout_from(path: Path) -> Path | None:
+    """Find an intentional AIWatcher source checkout at or above `path`."""
+    try:
+        start = path.expanduser().resolve()
+    except OSError:
+        return None
+    for candidate in (start, *start.parents):
+        project_file = candidate / "pyproject.toml"
+        module_file = candidate / "aiwatcher_cli" / "__main__.py"
+        if not project_file.is_file() or not module_file.is_file():
+            continue
+        try:
+            project_text = project_file.read_text(encoding="utf-8")[:131_072]
+        except OSError:
+            continue
+        if re.search(r"(?m)^\s*name\s*=\s*['\"]aiwatcher-local['\"]\s*$", project_text):
+            return candidate
+    return None
+
+
+def _checkout_python(source_root: Path) -> str:
+    candidates = (
+        source_root / ".venv" / "bin" / "python",
+        source_root / ".venv" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.absolute())
+    return os.path.abspath(sys.executable)
+
+
+def _runtime_handoff_spec(
+    *,
+    source_root: Path,
+    python_executable: str,
+    arguments: Sequence[str],
+) -> dict[str, object] | None:
+    try:
+        root = source_root.expanduser().resolve()
+    except OSError:
+        return None
+    executable = Path(python_executable).expanduser()
+    if not executable.is_absolute() or not executable.is_file():
+        return None
+    if not (root / "aiwatcher_cli" / "__main__.py").is_file():
+        return None
+    current_root = installed_source_root().expanduser().resolve()
+    if root == current_root:
+        return None
+    if os.environ.get(_RUNTIME_HANDOFF_ENV) == str(root):
+        return None
+    env = os.environ.copy()
+    env[_RUNTIME_HANDOFF_ENV] = str(root)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    return {
+        "command": [str(executable), "-m", "aiwatcher_cli", *arguments],
+        "cwd": str(root),
+        "env": env,
+    }
+
+
+def _requested_checkout_handoff(
+    arguments: Sequence[str],
+    args: argparse.Namespace,
+) -> dict[str, object] | None:
+    if getattr(args, "command", None) not in {"start", "restart"}:
+        return None
+    if bool(getattr(args, "from_companion", False)):
+        return None
+    checkout = _aiwatcher_checkout_from(Path.cwd())
+    if checkout is None:
+        return None
+    return _runtime_handoff_spec(
+        source_root=checkout,
+        python_executable=_checkout_python(checkout),
+        arguments=arguments,
+    )
+
+
+def _preferred_runtime_handoff(
+    arguments: Sequence[str],
+    args: argparse.Namespace,
+) -> dict[str, object] | None:
+    if getattr(args, "command", None) != "restart" or not bool(getattr(args, "from_companion", False)):
+        return None
+    preference = preferred_runtime()
+    source_root = str(preference.get("source_root") or "").strip()
+    python_executable = str(preference.get("python_executable") or "").strip()
+    if not source_root or not python_executable:
+        return None
+    return _runtime_handoff_spec(
+        source_root=Path(source_root),
+        python_executable=python_executable,
+        arguments=arguments,
+    )
+
+
+def _run_runtime_handoff(spec: dict[str, object]) -> int:
+    command = spec.get("command")
+    cwd = spec.get("cwd")
+    env = spec.get("env")
+    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+        return 2
+    if not isinstance(cwd, str) or not isinstance(env, dict):
+        return 2
+    print(f"Using the explicitly selected AIWatcher runtime at {cwd}.")
+    try:
+        completed = subprocess.run(command, cwd=cwd, env=env, check=False)
+    except OSError as exc:
+        print(f"Could not start the selected AIWatcher runtime: {exc}", file=sys.stderr)
+        return 2
+    return int(completed.returncode)
+
+
 def command_restart(args: argparse.Namespace) -> int:
     """Replace the dashboard and Companion as one local lifecycle action."""
     if getattr(args, "from_companion", False) and os.name != "nt":
@@ -4104,6 +4236,12 @@ def setup_checklist() -> list[dict[str, str]]:
             "status": "recommended",
         },
         {
+            "title": "Enable automatic delivery tracking",
+            "why": "One-time setup: records commits in Git repositories observed in AI sessions. One repository hook covers every branch and linked worktree.",
+            "command": "aiwatcher delivery-tracking enable",
+            "status": "recommended",
+        },
+        {
             "title": "Check for GitHub updates",
             "why": "For clone-based installs, reports whether the checkout is behind main and gives a safe fast-forward command.",
             "command": "aiwatcher update",
@@ -4170,6 +4308,7 @@ def _first_run_setup_steps() -> list[dict[str, str]]:
     first_run_titles = {
         "Start AIWatcher Local",
         "Verify local history coverage",
+        "Enable automatic delivery tracking",
         "Try one safe test prompt",
     }
     return [step for step in setup_checklist() if step["title"] in first_run_titles]
@@ -4214,6 +4353,54 @@ def command_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_delivery_tracking(args: argparse.Namespace) -> int:
+    """Manage one-time automatic commit tracking for observed repositories."""
+    action = str(args.delivery_tracking_action)
+    since = datetime.now().astimezone() - timedelta(days=30)
+    sessions = scan_all(since=since)
+    try:
+        events = scan_all_events(since=since)
+    except OSError:
+        events = []
+    observed_items = [*sessions, *events]
+    if action == "enable":
+        record_delivery_tracking_settings({"enabled": True})
+        status = sync_delivery_tracking(observed_items)
+    elif action == "disable":
+        record_delivery_tracking_settings({"enabled": False})
+        status = delivery_tracking_status(observed_items)
+    else:
+        status = delivery_tracking_status(observed_items)
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2))
+        return 0 if not status["enabled"] or not status["needs_attention"] else 1
+    print("AIWatcher automatic delivery tracking")
+    print(f"Status: {'enabled' if status['enabled'] else 'disabled'}")
+    print(
+        f"Observed repositories: {status['observed_repositories']} · "
+        f"tracked: {status['tracked_repositories']} · "
+        f"needs attention: {status['needs_attention']}"
+    )
+    print(status["scope"])
+    print(status["session_identity_note"])
+    if status.get("discovery_truncated"):
+        print(
+            "Setup is processing repositories in bounded batches; "
+            f"{status['deferred_candidate_directories']} older candidate path(s) remain for later refreshes."
+        )
+    if not status["enabled"] and status["tracked_repositories"]:
+        print(
+            "Automatic setup is paused; "
+            f"{status['tracked_repositories']} installed hook(s) remain active and can still record commits."
+        )
+        print("Remove one with: aiwatcher uninstall-commit-hook --repo <path>")
+    if action == "disable":
+        print("Automatic management stopped. Existing repository hooks were left in place.")
+    elif action == "enable" and status["needs_attention"]:
+        print("Open Settings -> General to see repositories that could not be configured.")
+    return 0 if not status["enabled"] or not status["needs_attention"] else 1
+
+
 def command_status(_args: argparse.Namespace) -> int:
     sessions = scan_all()
     print("AIWatcher Local status\n")
@@ -4223,6 +4410,20 @@ def command_status(_args: argparse.Namespace) -> int:
     print("\nMode: private by default")
     print("Network: disabled unless you run an update command, turn on automatic update checks in the dashboard, or configure a connected workflow")
     return 0
+
+
+def _sync_recent_delivery_tracking() -> None:
+    """Apply one-time delivery setup even when no dashboard tab is open."""
+    config = delivery_tracking_settings()
+    if not config.get("enabled"):
+        return
+    since = datetime.now().astimezone() - timedelta(days=2)
+    try:
+        sessions = scan_all(since=since)
+        events = scan_all_events(since=since)
+        sync_delivery_tracking([*sessions, *events], force=False, config=config)
+    except Exception:
+        return
 
 
 def _run_companion_heartbeat(
@@ -4245,6 +4446,7 @@ def _run_companion_heartbeat(
     if ownership is None:
         print("Another AIWatcher Companion already owns the local runtime.", file=sys.stderr)
         return 2
+    next_delivery_sync = 0.0
     try:
         while True:
             record_watcher_heartbeat(
@@ -4254,6 +4456,10 @@ def _run_companion_heartbeat(
                 notify=False,
                 overlay=True,
             )
+            now = time_module.monotonic()
+            if now >= next_delivery_sync:
+                _sync_recent_delivery_tracking()
+                next_delivery_sync = now + 300
             time_module.sleep(interval)
     except KeyboardInterrupt:
         return 0
@@ -4646,43 +4852,6 @@ def command_uninstall_statusline(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMIT_HOOK_MARKER = "# >>> aiwatcher commit receipt >>>"
-COMMIT_HOOK_END = "# <<< aiwatcher commit receipt <<<"
-
-
-def _commit_hook_body(command: str) -> str:
-    # `|| true` is belt and braces: post-commit's exit code is already ignored
-    # by git, but a non-zero status here would still show up in some wrappers,
-    # and nothing about a receipt is worth making a commit look failed.
-    #
-    # `2>/dev/null` because the hook outlives any single checkout. Installed
-    # once, it fires on every branch -- including ones whose aiwatcher predates
-    # `commit-receipt`, where argparse writes a usage dump to stderr before any
-    # of our code runs and `--quiet-if-empty` never gets a say. The tradeoff is
-    # accepted deliberately: a genuinely broken install goes quiet too, which is
-    # the right call for something that prints under every commit. Run
-    # `aiwatcher commit-receipt` directly to see what it would have said.
-    return (
-        f"{COMMIT_HOOK_MARKER}\n"
-        f"{command} commit-receipt --quiet-if-empty 2>/dev/null || true\n"
-        f"{COMMIT_HOOK_END}\n"
-    )
-
-
-def _post_commit_hook_path(repo: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--git-path", "hooks/post-commit"],
-        check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if result.returncode != 0:
-        return None
-    hook_path = result.stdout.strip()
-    if not os.path.isabs(hook_path):
-        hook_path = os.path.join(repo, hook_path)
-    return os.path.normpath(hook_path)
-
-
 def command_compactions(args: argparse.Namespace) -> int:
     """What each recorded compaction did to the requests after it.
 
@@ -4833,57 +5002,34 @@ def command_install_commit_hook(args: argparse.Namespace) -> int:
     command = args.command or _cli_command_for_current_file()
     body = _commit_hook_body(command)
     if not args.write:
-        print("Add this to your repo's .git/hooks/post-commit:")
+        print("Add this to your repository's active post-commit hook:")
         print(body)
-        print(f"Target: {_post_commit_hook_path(repo) or '(not a git repository)'}")
+        print(f"Target: {active_commit_hook_path(repo) or '(not a git repository)'}")
         print("Re-run with --write to install it there directly.")
         return 0
 
-    path = _post_commit_hook_path(repo)
-    if not path:
-        print(f"{repo} is not a git repository.")
+    result = install_commit_hook(
+        repo,
+        command=command,
+        allow_existing=True,
+        allow_custom=True,
+    )
+    path = result.get("path")
+    if not result.get("ok"):
+        print(f"Could not install AIWatcher commit receipt: {result.get('detail') or result.get('status')}")
         return 1
-
-    existing = ""
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as handle:
-            existing = handle.read()
-    if COMMIT_HOOK_MARKER in existing:
-        # Ours is already here, but possibly an older version of it. Rewrite the
-        # block in place when it has drifted -- without this, a fix to the hook
-        # line only ever reaches people who have never installed it, which is
-        # exactly the wrong half of the userbase.
-        before, _, rest = existing.partition(COMMIT_HOOK_MARKER)
-        current, _, after = rest.partition(COMMIT_HOOK_END)
-        if (COMMIT_HOOK_MARKER + current + COMMIT_HOOK_END + "\n") == body:
-            print(f"AIWatcher commit receipt is already installed at {path}.")
-            return 0
-        updated = before + body.rstrip("\n") + after
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(updated if updated.endswith("\n") else updated + "\n")
+    if result.get("status") == "current":
+        print(f"AIWatcher commit receipt is already installed at {path}.")
+        return 0
+    if result.get("status") == "updated":
         print(f"Updated the AIWatcher commit receipt at {path} to the current version.")
         return 0
-
-    if existing.strip():
-        # Someone else's hook is already here. Appending inside our own markers
-        # keeps their hook working and keeps ours removable, which is better
-        # than refusing and better than overwriting.
-        updated = existing.rstrip("\n") + "\n\n" + body
-        note = "Appended to the existing post-commit hook; the previous contents still run first."
-    else:
-        updated = "#!/bin/sh\n\n" + body
-        note = "Created a new post-commit hook."
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(updated)
-    try:
-        os.chmod(path, os.stat(path).st_mode | 0o111)
-    except OSError:
-        # Windows has no execute bit and git for Windows does not need one.
-        pass
     print(f"Installed AIWatcher commit receipt at {path}")
-    print(note)
+    print(
+        "Appended to the existing post-commit hook; the previous contents still run first."
+        if result.get("status") == "installed_alongside_existing"
+        else "Created a new post-commit hook."
+    )
     # Built now so the very first receipt has something to compare against,
     # rather than saying "not computed yet" on the commit that made the user
     # install this in the first place.
@@ -4897,26 +5043,17 @@ def command_install_commit_hook(args: argparse.Namespace) -> int:
 
 def command_uninstall_commit_hook(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo or os.getcwd())
-    path = _post_commit_hook_path(repo)
-    if not path or not os.path.exists(path):
-        print(f"No post-commit hook found for {repo}.")
-        return 0
-    with open(path, "r", encoding="utf-8") as handle:
-        existing = handle.read()
-    if COMMIT_HOOK_MARKER not in existing:
-        print(f"No AIWatcher commit receipt found in {path}.")
-        return 0
-
-    before, _, rest = existing.partition(COMMIT_HOOK_MARKER)
-    _, _, after = rest.partition(COMMIT_HOOK_END)
-    updated = (before.rstrip("\n") + "\n" + after.lstrip("\n")).strip()
-    if updated in ("", "#!/bin/sh"):
-        os.remove(path)
+    result = remove_commit_hook(repo)
+    path = result.get("path")
+    if not result.get("ok"):
+        print(f"Could not remove AIWatcher commit receipt: {result.get('detail') or result.get('status')}")
+        return 1
+    if result.get("status") == "not_installed":
+        print(f"No AIWatcher commit receipt found for {repo}.")
+    elif result.get("status") == "removed_file":
         print(f"Removed {path} (it contained nothing else).")
-        return 0
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(updated + "\n")
-    print(f"Removed AIWatcher commit receipt from {path}")
+    else:
+        print(f"Removed AIWatcher commit receipt from {path}")
     return 0
 
 
@@ -8479,26 +8616,6 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cli_command_for_current_file() -> str:
-    installed = shutil.which("aiwatcher")
-    if installed:
-        if os.name == "nt":
-            installed = installed.replace("\\", "/")
-        return shlex.quote(installed)
-    executable = sys.executable
-    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if os.name == "nt":
-        # Claude/Codex/Cursor invoke hook commands through a POSIX shell (Git
-        # Bash) even on Windows, where backslash is an escape character. An
-        # unquoted Windows path like C:\Users\... gets mangled to C:Users...,
-        # so normalize to forward slashes, which Windows accepts too.
-        executable = executable.replace("\\", "/")
-        package_root = package_root.replace("\\", "/")
-    parts = [executable, "-m", "aiwatcher_cli"]
-    pythonpath_prefix = f"PYTHONPATH={shlex.quote(package_root + os.pathsep)}\"${{PYTHONPATH:-}}\""
-    return f"{pythonpath_prefix} " + " ".join(shlex.quote(part) for part in parts)
-
-
 def _hook_command(command: str, transport: str, *, gate: bool = False) -> str:
     suffix = " --gate" if gate else ""
     return f"{command} {transport}{suffix}"
@@ -10163,6 +10280,16 @@ def build_parser() -> argparse.ArgumentParser:
     setup = sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps")
     setup.add_argument("--all", action="store_true", help="Show every optional setup and hook command")
     setup.set_defaults(func=command_setup)
+    delivery_tracking = sub.add_parser(
+        "delivery-tracking",
+        help="Enable one-time setup that tracks commits across observed repositories, branches, and worktrees",
+    )
+    delivery_tracking.add_argument(
+        "delivery_tracking_action", choices=("enable", "status", "disable"),
+        help="Enable automatic setup, inspect coverage, or stop future automatic management",
+    )
+    delivery_tracking.add_argument("--json", action="store_true", help="Emit delivery-tracking coverage as JSON")
+    delivery_tracking.set_defaults(func=command_delivery_tracking)
     update = sub.add_parser("update", help="Check for GitHub updates, and optionally fast-forward a source checkout")
     update.add_argument("--apply", action="store_true", help="Fast-forward the checkout when updates are available")
     update.add_argument("--no-fetch", action="store_true", help="Compare against the last fetched remote state")
@@ -10768,6 +10895,9 @@ def main(argv: list[str] | None = None) -> int:
         handler = handlers[arguments[0]]
         return int(handler(hook_args))
     args = build_parser().parse_args(arguments)
+    requested_handoff = _requested_checkout_handoff(arguments, args)
+    if requested_handoff is not None:
+        return _run_runtime_handoff(requested_handoff)
     companion_action = getattr(args, "companion_action", None)
     lifecycle_action = args.command in {"start", "restart"} or (
         args.command == "companion" and (
@@ -10777,18 +10907,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not lifecycle_action:
         return int(args.func(args))
+    identity = install_identity()
     lifecycle = acquire_runtime_lock(
         "lifecycle",
-        metadata={"command": " ".join(arguments), **install_identity()},
+        metadata={"command": " ".join(arguments), **identity},
         timeout=10,
     )
     if lifecycle is None:
         print("Another AIWatcher start, stop, or restart is still in progress.", file=sys.stderr)
         return 2
+    released = False
     try:
+        if args.command in {"start", "restart"} and not bool(getattr(args, "from_companion", False)):
+            try:
+                record_preferred_runtime(identity, python_executable=sys.executable)
+            except (OSError, ValueError) as exc:
+                print(f"Could not remember the selected AIWatcher runtime: {exc}", file=sys.stderr)
+        preferred_handoff = _preferred_runtime_handoff(arguments, args)
+        if preferred_handoff is not None:
+            lifecycle.release()
+            released = True
+            return _run_runtime_handoff(preferred_handoff)
         return int(args.func(args))
     finally:
-        lifecycle.release()
+        if not released:
+            lifecycle.release()
 
 
 if __name__ == "__main__":

@@ -4060,6 +4060,63 @@ async function saveCompanionSettings() {
     showToast(`Could not save Companion settings: ${error.message || 'unknown error'}`, 'error');
   }
 }
+
+function renderDeliveryTracking(status) {
+  const tracking = status || {};
+  const enabled = tracking.enabled === true;
+  const observed = Number(tracking.observed_repositories || 0);
+  const tracked = Number(tracking.tracked_repositories || 0);
+  const missing = (tracking.repositories || []).filter(row => row && !row.installed);
+  const coverage = observed
+    ? (tracking.discovery_truncated
+      ? `${tracked} of ${observed} Git repositor${observed === 1 ? 'y' : 'ies'} configured in this batch`
+      : `${tracked} of ${observed} observed Git repositor${observed === 1 ? 'y' : 'ies'} configured`)
+    : 'No Git repository has appeared in observed session metadata yet';
+  const failures = enabled && missing.length
+    ? `<details class="aiw-details"><summary>${esc(missing.length)} repositor${missing.length === 1 ? 'y needs' : 'ies need'} attention</summary><div class="details-body"><ul>${missing.slice(0, 10).map(row => `<li><strong>${esc(row.checkout_path || 'Unknown checkout')}</strong>${row.detail ? `<br>${esc(row.detail)}` : ''}</li>`).join('')}</ul></div></details>`
+    : '';
+  const paused = !enabled && tracked
+    ? `<p class="receipt-note"><strong>Automatic setup is paused; ${esc(tracked)} installed hook${tracked === 1 ? '' : 's'} remain active and can still record commits.</strong> Remove a repository hook with <code>aiwatcher uninstall-commit-hook --repo &lt;path&gt;</code>.</p>`
+    : '';
+  const deferred = tracking.discovery_truncated
+    ? `<p class="receipt-note"><strong>Setup is processing repositories in bounded batches.</strong> ${esc(tracking.deferred_candidate_directories || 0)} older candidate director${Number(tracking.deferred_candidate_directories || 0) === 1 ? 'y is' : 'ies are'} deferred to later Companion or dashboard refreshes.</p>`
+    : '';
+  return `<div class="ai-assist-fields">
+    <label class="check-row"><input id="deliveryTrackingEnabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="setDeliveryTracking(this.checked)"> Automatically configure commit tracking for repositories seen in AI sessions</label>
+    <p class="receipt-note"><strong>${esc(coverage)}.</strong> One repository hook covers every branch and linked worktree. Automatic setup uses only the standard hook location; custom or pre-existing hooks are left unchanged for review.</p>
+    <p class="receipt-note">Configuration is not execution proof. A successful receipt records commit facts; exact session linkage still depends on the AI host exposing a session ID.</p>
+    ${paused}
+    ${deferred}
+    ${failures}
+  </div>`;
+}
+
+async function setDeliveryTracking(enabled) {
+  const input = document.getElementById('deliveryTrackingEnabled');
+  if (input) input.disabled = true;
+  const mount = document.getElementById('deliveryTrackingMount');
+  if (mount) mount.innerHTML = `<div class="empty">${enabled ? 'Configuring observed repositories...' : 'Stopping automatic setup...'}</div>`;
+  try {
+    const response = await fetch('/api/delivery-tracking', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: Boolean(enabled) }),
+    });
+    const status = await response.json();
+    if (!response.ok || status.error) throw new Error(status.error || 'save failed');
+    if (currentData) currentData.delivery_tracking = status;
+    if (mount) mount.innerHTML = renderDeliveryTracking(status);
+    showToast(enabled ? 'Automatic delivery tracking enabled' : 'Automatic setup paused; installed hooks remain');
+  } catch (error) {
+    if (input) {
+      input.disabled = false;
+      input.checked = !enabled;
+    }
+    if (mount) mount.innerHTML = renderDeliveryTracking((currentData && currentData.delivery_tracking) || {});
+    showToast(`Could not update delivery tracking: ${error.message || 'unknown error'}`, 'error');
+  }
+}
+
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
   return rows.map((row, index) => `<div class="coverage-card">
@@ -7103,6 +7160,10 @@ async function loadOnce(resetDetail, forceRefresh) {
   const companionNode = document.getElementById('companionSettingsMount');
   if (companionNode) {
     companionNode.innerHTML = renderCompanionSettings(data.companion_preferences || {});
+  }
+  const deliveryTrackingNode = document.getElementById('deliveryTrackingMount');
+  if (deliveryTrackingNode) {
+    deliveryTrackingNode.innerHTML = renderDeliveryTracking(data.delivery_tracking || {});
   }
   updateAskAiAssistControl(data.ai_assist || {});
   const settingsVisible = !document.getElementById('view-setup').hidden;

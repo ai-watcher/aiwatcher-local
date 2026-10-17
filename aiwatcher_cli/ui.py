@@ -60,6 +60,7 @@ from .delivery_review import (
     work_receipt_matches_current_checkout,
 )
 from .delivery import ObjectiveClaim
+from .delivery_tracking import delivery_tracking_status, sync_delivery_tracking
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .git_identity import identity_for_session, repository_identity
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, bound_handoff_words, build_handoff_capsule
@@ -87,6 +88,7 @@ from .local_state import (
     analyst_contents_allowed,
     analyst_month_spend,
     companion_preferences,
+    delivery_tracking_settings,
     companion_skip_active,
     evidence_snapshots_for_sessions,
     fresh_start_followup_evidence,
@@ -119,6 +121,7 @@ from .local_state import (
     record_analyst_contents,
     record_analyst_run,
     record_companion_preferences,
+    record_delivery_tracking_settings,
     record_handoff_decision,
     record_optimize_decision,
     record_evidence_snapshot,
@@ -289,6 +292,7 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/delivery-review-approve",
     "/api/delivery-reviews",
     "/api/delivery-review-viewed",
+    "/api/delivery-tracking",
 })
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
@@ -6445,6 +6449,7 @@ def build_summary(
     all_rows: list[LocalSession] | None = None,
     all_events: list[LocalEvent] | None = None,
     session_index_payload: list[dict[str, object]] | None = None,
+    delivery_tracking_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
@@ -6742,6 +6747,7 @@ def build_summary(
         "update_install_revision": package_install_revision(),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "companion_preferences": companion_preferences(),
+        "delivery_tracking": delivery_tracking_snapshot or delivery_tracking_status(all_rows),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": context_health,
         "context_health_status": "ready",
@@ -6881,6 +6887,12 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
     copy["update_source_root"] = str(installed_source_root())
     copy["update_install_revision"] = package_install_revision()
     copy["companion_preferences"] = settings["companion_preferences"]
+    delivery_tracking = copy.get("delivery_tracking") if isinstance(copy.get("delivery_tracking"), dict) else {}
+    copy["delivery_tracking"] = {
+        **delivery_tracking,
+        "enabled": settings["delivery_tracking"]["enabled"],
+        "enabled_at": settings["delivery_tracking"]["enabled_at"],
+    }
     # Watcher lifecycle is live process state, not historical summary data.
     # Rehydrate it on every poll regardless of memory or disk cache source.
     copy["watcher"] = get_watcher_status()
@@ -7103,6 +7115,7 @@ def _build_summary_shell(
         "update_install_revision": package_install_revision(),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "companion_preferences": companion_preferences(),
+        "delivery_tracking": delivery_tracking_status(all_rows, force=False),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": [],
         "context_health_status": "pending",
@@ -7125,7 +7138,11 @@ def _summary_refresh_windows(requested_days: int) -> list[int]:
     return [requested_days]
 
 
-def _run_shared_summary_refresh(requested_days: int) -> None:
+def _run_shared_summary_refresh(
+    requested_days: int,
+    *,
+    delivery_config: dict[str, object] | None = None,
+) -> None:
     """Scan local histories once, then materialize every dashboard window."""
     global _SUMMARY_REFRESH_ERROR
     try:
@@ -7141,6 +7158,13 @@ def _run_shared_summary_refresh(requested_days: int) -> None:
             all_events = scan_all_events(since=now - timedelta(days=scan_days))
         except OSError:
             all_events = []
+        # Session rows identify the initial checkout while events preserve
+        # command-level CWDs, including sibling worktrees entered mid-session.
+        delivery_tracking_snapshot = sync_delivery_tracking(
+            [*all_rows, *all_events],
+            force=False,
+            config=delivery_config,
+        )
         _index_events(all_events, complete=True)
         for days in _summary_refresh_windows(requested_days):
             summary = build_summary(
@@ -7148,6 +7172,7 @@ def _run_shared_summary_refresh(requested_days: int) -> None:
                 all_rows=all_rows,
                 all_events=all_events,
                 session_index_payload=session_index_payload,
+                delivery_tracking_snapshot=delivery_tracking_snapshot,
             )
             _store_summary_cache(days, summary, mark_refreshed=True)
         _SUMMARY_REFRESH_ERROR = None
@@ -7163,7 +7188,7 @@ def _refresh_summary_cache(days: int) -> None:
         if _SUMMARY_REFRESHING:
             return
         _SUMMARY_REFRESHING.update(_summary_refresh_windows(days))
-    _run_shared_summary_refresh(days)
+    _run_shared_summary_refresh(days, delivery_config=delivery_tracking_settings())
 
 
 def _maybe_refresh_summary_cache(days: int, *, force: bool = False) -> bool:
@@ -7175,8 +7200,10 @@ def _maybe_refresh_summary_cache(days: int, *, force: bool = False) -> bool:
             return False
         _SUMMARY_REFRESHING.update(_summary_refresh_windows(days))
 
+    delivery_config = delivery_tracking_settings()
+
     def run() -> None:
-        _run_shared_summary_refresh(days)
+        _run_shared_summary_refresh(days, delivery_config=delivery_config)
 
     thread = threading.Thread(target=run, name="aiwatcher-summary-refresh", daemon=True)
     thread.start()
@@ -9800,6 +9827,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/delivery-review",
             "/api/delivery-review-approve",
             "/api/delivery-review-viewed",
+            "/api/delivery-tracking",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -9827,6 +9855,35 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/delivery-tracking":
+            if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+                self._send(400, json.dumps({"error": "enabled must be true or false"}), "application/json; charset=utf-8")
+                return
+            try:
+                record_delivery_tracking_settings({"enabled": payload["enabled"]})
+                since = datetime.now().astimezone() - timedelta(days=30)
+                sessions = scan_all(since=since)
+                try:
+                    events = scan_all_events(since=since)
+                except OSError:
+                    events = []
+                observed_items = [*sessions, *events]
+                response = (
+                    sync_delivery_tracking(observed_items)
+                    if payload["enabled"]
+                    else delivery_tracking_status(observed_items)
+                )
+                with _SUMMARY_CACHE_LOCK:
+                    for days, (cached_at, summary) in list(_SUMMARY_CACHE.items()):
+                        _SUMMARY_CACHE[days] = (
+                            cached_at,
+                            {**summary, "delivery_tracking": response},
+                        )
+            except OSError as exc:
+                self._send(500, json.dumps({"error": f"Could not configure delivery tracking: {exc}"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/delivery-review":
             if not isinstance(payload, dict):
