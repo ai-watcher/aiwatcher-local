@@ -99,11 +99,22 @@ class FreshStartContractTests(unittest.TestCase):
                 ai_assist.improve_fresh_start_brief({}, local_brief='x' * (ai_assist.MAX_FRESH_START_INPUT_CHARS + 1))
         call.assert_not_called()
 
+    def test_evidence_validation_matches_decoded_windows_and_unicode_paths(self):
+        for project in (r"C:\Users\dev\workspace", "/workspace/café"):
+            with self.subTest(project=project):
+                packet = json.dumps({"objective": "Fix rendering", "source": {"project": project}})
+                parsed = {"goal": "Fix rendering", "next_ask": "Inspect the reader", "what_is_done": ["Unknown"],
+                          "current_state": ["Unverified"], "inspect_first": [project], "next_steps": ["Read instructions"]}
+                self.assertTrue(ai_assist._fresh_start_response_is_useful(parsed, packet))
+                parsed["inspect_first"] = ["unrelated workspace"]
+                parsed[project] = True  # A key alone cannot establish evidence.
+                self.assertFalse(ai_assist._fresh_start_response_is_useful(parsed, packet))
+
     def test_successful_provider_response_preserves_the_canonical_contract(self):
         capsule = self.capsule(objective='Fix reader rendering', next_outcome='Demonstrate the reader regression fix')
         parsed = {'goal': 'Replace the objective with a redesign', 'next_ask': 'Inspect the reader rendering path.',
                   'what_is_done': ['No verified completion'], 'current_state': ['Checkout state unknown'],
-                  'inspect_first': ['/unavailable/checkout'], 'next_steps': ['Read the project instructions']}
+                  'inspect_first': ['source-session'], 'next_steps': ['Read the project instructions']}
         with patch.object(ai_assist, 'build_ai_assist_status', return_value={'ready': True, 'mode': 'cloud'}), \
              patch.object(ai_assist, '_call_configured_chat', return_value={
                  'text': json.dumps(parsed), 'provider': 'openai', 'model': 'test', 'usage': {},

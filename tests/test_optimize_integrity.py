@@ -12,6 +12,23 @@ from aiwatcher_cli.optimize_review import session_review_identity
 
 
 class OptimizeIntegrityTests(unittest.TestCase):
+    def test_workspace_scan_survives_protected_and_disappearing_git_markers(self):
+        original = Path.is_symlink
+        for failure in (PermissionError("protected service directory"), FileNotFoundError("checkout vanished")):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                denied = root / "systemd-private-service"
+                denied.mkdir()
+                allowed = root / "codex-reviewable"
+                allowed.mkdir()
+                def check(path):
+                    if path == denied / ".git":
+                        raise failure
+                    return original(path)
+                with patch.object(Path, "is_symlink", check), patch.object(ui, "_is_temporary_workspace", return_value=True):
+                    rows = ui._scan_agent_workspace_root(root, set())
+                self.assertEqual([row["path"] for row in rows], [str(allowed.resolve())])
+
     def test_long_prompt_roundtrips_with_confirmation_and_guardrails(self):
         text = 'AIWatcher AI-assisted Optimize cleanup prompt\n' + ('Evidence row\n' * 1600) + '\nConfirm the exact action before deletion.\nPreserve unfinished work.'
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'AIWATCHER_STATE_FILE': str(Path(folder)/'state.json')}):

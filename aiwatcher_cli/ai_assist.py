@@ -930,8 +930,20 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
         str(source.get("project") or ""),
         str(source.get("session_id") or ""),
     ]
-    response_text = json.dumps(parsed, sort_keys=True).lower()
-    concrete = [anchor for anchor in anchors if len(anchor) >= 4 and anchor.lower() in response_text]
+    def string_values(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value.lower()]
+        if isinstance(value, list):
+            return [text for item in value for text in string_values(item)]
+        if isinstance(value, dict):
+            return [text for item in value.values() for text in string_values(item)]
+        return []
+
+    # Compare actual field values, not JSON's escaped representation of
+    # Windows paths or non-ASCII project names. Keys are not evidence.
+    response_values = string_values(parsed)
+    concrete = [anchor for anchor in anchors if len(anchor) >= 4
+                and any(anchor.lower() in value for value in response_values)]
     return bool(concrete)
 
 

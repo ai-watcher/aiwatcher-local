@@ -1144,7 +1144,13 @@ def _temporary_agent_checkout(path: Path) -> dict[str, object] | None:
     No remote fetch or file-content scan occurs here.
     """
     marker = path / '.git'
-    if not _is_temporary_workspace(path) or marker.is_symlink() or not marker.exists():
+    try:
+        if not _is_temporary_workspace(path) or marker.is_symlink() or not marker.exists():
+            return None
+        is_worktree = marker.is_file()
+    except OSError:
+        # Shared temporary roots contain protected service directories and
+        # entries can disappear mid-scan. Neither may break the inventory.
         return None
     try:
         result = subprocess.run(['git', '-C', str(path), 'symbolic-ref', '--quiet', '--short', 'HEAD'],
@@ -1160,7 +1166,7 @@ def _temporary_agent_checkout(path: Path) -> dict[str, object] | None:
         fields = metadata.stdout.strip().splitlines() if metadata.returncode == 0 else []
     except (OSError, subprocess.TimeoutExpired):
         fields = []
-    return {'source': 'git_worktree' if marker.is_file() else 'scratch_scan',
+    return {'source': 'git_worktree' if is_worktree else 'scratch_scan',
             'branch': branch, 'agent_owned': True,
             'common_git_directory': fields[0] if len(fields) == 2 else None,
             'head': fields[1] if len(fields) == 2 else None,
