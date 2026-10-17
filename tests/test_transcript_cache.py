@@ -40,7 +40,7 @@ class TranscriptCacheTests(unittest.TestCase):
     def test_unchanged_and_append_only_consume_new_rows(self):
         self.append(*({'n': 1} for _ in range(500)))
         self.assertEqual(self.total(), 500)
-        with patch.object(transcript_cache, 'open', side_effect=AssertionError('unchanged file opened')):
+        with patch.object(transcript_cache.json, 'loads', side_effect=AssertionError('unchanged file parsed')):
             self.assertEqual(self.total(), 500)
         self.append({'n': 3})
         self.assertEqual(self.total(), 503)
@@ -88,6 +88,24 @@ class TranscriptCacheTests(unittest.TestCase):
             handle.write(b'2}\n')
         self.assertEqual(self.total(), 3)
         self.assertEqual(self.consumed, 2)
+
+    def test_same_size_rewrite_with_frozen_timestamps_checks_small_guards(self):
+        self.path.write_bytes(b'{"n":1}\n')
+        self.assertEqual(self.total(), 1)
+        info = self.path.stat()
+        self.path.write_bytes(b'{"n":2}\n')
+        # Reproduce coarse/unchanged Windows timestamps on every platform.
+        with patch.object(transcript_cache.os, 'stat', return_value=info), \
+             patch.object(transcript_cache.os, 'fstat', return_value=info):
+            self.assertEqual(self.total(), 2)
+        pattern = re.compile(b'marker')
+        self.path.write_bytes(b'marker')
+        self.assertEqual(transcript_cache.count_pattern(str(self.path), pattern), 1)
+        info = self.path.stat()
+        self.path.write_bytes(b'absent')
+        with patch.object(transcript_cache.os, 'stat', return_value=info), \
+             patch.object(transcript_cache.os, 'fstat', return_value=info):
+            self.assertEqual(transcript_cache.count_pattern(str(self.path), pattern), 0)
 
     def test_valid_unterminated_record_is_rebuilt_if_extended(self):
         self.path.write_bytes(b'{"n":1}')
@@ -229,7 +247,7 @@ class TranscriptCacheTests(unittest.TestCase):
                     # Different names simulate successive live sessions without
                     # creating or scanning a user's actual logs.
                     session.source_path = str(self.path.parent / f'{i}.jsonl')
-                    with patch.object(ui.os, 'stat', return_value=self.path.stat()):
+                    with patch.object(transcript_cache, 'file_signature', return_value=(1, i, 3, 1, 1, b'{}', b'{}')):
                         ui._record_compaction_outcomes([row], [session])
                     self.assertLessEqual(len(ui._OUTCOME_SCAN), 64)
             self.assertEqual(len(ui._OUTCOME_SCAN), 64)
@@ -247,8 +265,10 @@ class TranscriptCacheTests(unittest.TestCase):
             row = SimpleNamespace(session_id='s', live=True, analyst_run=False)
             with patch.object(compaction_outcomes, 'record_session', return_value=[{'closed_by': 'prompts'}]) as recorder:
                 ui._record_compaction_outcomes([row], [session])
+                info = self.path.stat()
                 self.path.write_bytes(self.path.read_bytes().replace(b'one', b'two'))
-                ui._record_compaction_outcomes([row], [session])
+                with patch.object(transcript_cache.os, 'fstat', return_value=info):
+                    ui._record_compaction_outcomes([row], [session])
                 self.assertEqual(recorder.call_count, 2)
         finally:
             ui._OUTCOME_SCAN.clear()

@@ -26,7 +26,7 @@ from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, compaction, compaction_outcomes, improve, prompt_signals, statusline
+from . import analyst, compaction, compaction_outcomes, improve, prompt_signals, statusline, transcript_cache
 from .optimize_review import REVIEW_BATCH_SIZE, session_review_identity, project_activity
 from .ai_assist import (
     AiAssistRejected,
@@ -8666,10 +8666,10 @@ def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> d
 # path -> (file signature, compaction markers, every record's window closed). The poll
 # runs every few seconds while a session works, and most of those polls find
 # a transcript that grew but holds nothing new to measure.
-_OUTCOME_SCAN: dict[str, tuple[tuple[int, ...], int, bool]] = {}
+_OUTCOME_SCAN: dict[str, tuple[tuple[Any, ...], int, bool]] = {}
 
 
-def _remember_outcome_scan(path: str, signature: tuple[int, ...], markers: int, closed: bool) -> None:
+def _remember_outcome_scan(path: str, signature: tuple[Any, ...], markers: int, closed: bool) -> None:
     # Every insertion, including the common no-marker/closed-window fast path,
     # must obey the same bound.
     _OUTCOME_SCAN.pop(path, None)
@@ -8696,8 +8696,7 @@ def _record_compaction_outcomes(rows: list[SessionPresence], sessions: list[Loca
         if not path or not path.endswith(".jsonl") or "claude" not in session.tool.lower():
             continue
         try:
-            info = os.stat(path)
-            signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            signature = transcript_cache.file_signature(path)
             cached = _OUTCOME_SCAN.get(path)
             if cached is not None and cached[0] == signature:
                 continue

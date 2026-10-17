@@ -50,16 +50,41 @@ def clear() -> None:
         _CACHE.clear()
 
 
+def file_signature(path: str) -> tuple[Any, ...]:
+    """Metadata plus bounded guards for callers caching a whole-file result.
+
+    Windows can report identical timestamps for rapid same-size rewrites.
+    Guards catch those edits without hashing the complete historical log.
+    """
+    with open(path, "rb") as handle:
+        sig = _signature(os.fstat(handle.fileno()))
+        head = handle.read(min(GUARD_BYTES, sig[2]))
+        handle.seek(max(0, sig[2] - GUARD_BYTES))
+        return (*sig, head, handle.read(min(GUARD_BYTES, sig[2])))
+
+
+def _guards_match(handle: Any, entry: _Entry) -> bool:
+    handle.seek(0)
+    if handle.read(len(entry.head)) != entry.head:
+        return False
+    handle.seek(max(0, entry.offset - len(entry.guard)))
+    return handle.read(len(entry.guard)) == entry.guard
+
+
+def _unchanged(path: str, entry: _Entry | None, sig: tuple[int, ...]) -> bool:
+    if entry is None or entry.signature != sig:
+        return False
+    with open(path, "rb") as handle:
+        return _signature(os.fstat(handle.fileno())) == sig and _guards_match(handle, entry)
+
+
 def _prepare(handle: Any, entry: _Entry | None, sig: tuple[int, ...], factory: Callable[[], Any]) -> _Entry:
     reset = entry is None
     if entry is not None:
         reset = (entry.signature[:2] != sig[:2] or sig[2] < entry.signature[2]
                  or sig[2] == entry.signature[2] or entry.unterminated)
         if not reset:
-            handle.seek(0)
-            reset = handle.read(len(entry.head)) != entry.head
-            handle.seek(max(0, entry.offset - len(entry.guard)))
-            reset = reset or handle.read(len(entry.guard)) != entry.guard
+            reset = not _guards_match(handle, entry)
     if reset:
         entry = _Entry(factory())
     handle.seek(entry.offset)
@@ -99,7 +124,7 @@ def folded_jsonl(
         try:
             sig = _signature(os.stat(path))
             entry = _CACHE.get(key)
-            if entry is None or entry.signature != sig:
+            if not _unchanged(path, entry, sig):
                 with open(path, "rb") as handle:
                     sig = _signature(os.fstat(handle.fileno()))
                     entry = _prepare(handle, entry, sig, factory)
@@ -144,7 +169,7 @@ def count_pattern(path: str, pattern: Any, *, overlap: int = 64) -> int:
         try:
             sig = _signature(os.stat(path))
             entry = _CACHE.get(key)
-            if entry is not None and entry.signature == sig:
+            if _unchanged(path, entry, sig):
                 _CACHE.move_to_end(key)
                 return entry.value["count"]
             with open(path, "rb") as handle:
