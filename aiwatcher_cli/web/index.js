@@ -1449,12 +1449,14 @@ function splitLines(value) {
 function handoffOptionsFromForm(defaultType = 'coding') {
   const typeEl = document.getElementById('handoffType');
   const objectiveEl = document.getElementById('handoffObjective');
+  const nextOutcomeEl = document.getElementById('handoffNextOutcome');
   const sourceEl = document.getElementById('handoffSources');
   const constraintEl = document.getElementById('handoffConstraints');
   const acceptanceEl = document.getElementById('handoffAcceptance');
   return {
     type: typeEl ? typeEl.value : defaultType,
     objective: objectiveEl ? objectiveEl.value.trim() : '',
+    next_outcome: nextOutcomeEl ? nextOutcomeEl.value.trim() : '',
     sources: splitLines(sourceEl ? sourceEl.value : ''),
     constraints: splitLines(constraintEl ? constraintEl.value : ''),
     acceptance: splitLines(acceptanceEl ? acceptanceEl.value : ''),
@@ -1468,6 +1470,7 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     prompt: !!includePrompt,
     type: next.type || 'coding',
     objective: next.objective || '',
+    next_outcome: next.next_outcome || '',
     source_refs: next.sources || [],
     constraints: next.constraints || [],
     acceptance_criteria: next.acceptance || [],
@@ -1851,13 +1854,14 @@ function renderHandoffForm(capsule) {
     <div class="handoff-form-head">
       <div>
         <h3>Shape the next session</h3>
-        <p>Keep this brief specific enough that the new chat can continue from evidence, not from hidden memory.</p>
+        <p>Capture the request and next result, then regenerate the brief before copying. Missing intent requires a question before editing.</p>
       </div>
       <span class="pill">private</span>
     </div>
     <div class="handoff-form-grid">
       <label><span class="label">Work type</span><select id="handoffType">${HANDOFF_TYPES.map(item => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>
-      <label><span class="label">Objective</span><input id="handoffObjective" value="${esc(capsule.objective || '')}" placeholder="What should the next chat accomplish?"></label>
+      <label><span class="label">Objective</span><input id="handoffObjective" value="${esc(capsule.objective || '')}" placeholder="What user request are we continuing?"></label>
+      <label><span class="label">Next outcome</span><input id="handoffNextOutcome" value="${esc(capsule.next_outcome || '')}" placeholder="What concrete result should the next chat deliver?"></label>
       <label><span class="label">Source of truth</span><textarea id="handoffSources" placeholder="One file, PR, issue, or local state per line">${esc(sourceRefs)}</textarea></label>
       <label><span class="label">Constraints</span><textarea id="handoffConstraints" placeholder="Scope, privacy, files not to touch, decisions already made">${esc(constraints)}</textarea></label>
       <label><span class="label">Acceptance checks</span><textarea id="handoffAcceptance" placeholder="How should the next chat know it is done?">${esc(acceptance)}</textarea></label>
@@ -1921,7 +1925,7 @@ function listPreview(items, fallback) {
   return values.slice(0, 4).map(item => `• ${esc(item)}`).join('<br>');
 }
 function renderFreshStartPreview(capsule) {
-  const objective = capsule.objective || 'Reconstruct the current work from repo state, recent commits, changed files, and the evidence below.';
+  const objective = capsule.objective || 'Objective not captured. Confirm the intended request before editing.';
   const decisions = capsule.decisions || [];
   const result = capsule.ai_assist_result || {};
   const structured = result.structured || {};
@@ -1935,8 +1939,9 @@ function renderFreshStartPreview(capsule) {
     ${assisted && nextAsk ? `<div class="fresh-preview-next"><strong>Next ask</strong><p>${esc(nextAsk)}</p></div>` : ''}
     <div class="fresh-preview-grid">
       <div class="fresh-preview-row"><strong>Objective</strong><p>${esc(objective)}</p></div>
+      <div class="fresh-preview-row"><strong>Next outcome</strong><p>${esc(capsule.next_outcome || 'Not captured. Confirm the next deliverable before editing.')}</p></div>
       <div class="fresh-preview-row"><strong>Source of truth</strong><p>${listPreview(capsule.source_refs, 'Repository state, local session metadata, changed files, and the source log.')}</p></div>
-      <div class="fresh-preview-row"><strong>Decisions</strong><p>${listPreview(decisions, 'No explicit decisions detected yet; the next session should infer from files and recent evidence.')}</p></div>
+      <div class="fresh-preview-row"><strong>Decisions</strong><p>${listPreview(decisions, 'No explicit decisions captured; confirm decisions with the user rather than treating repository history as intent.')}</p></div>
       <div class="fresh-preview-row"><strong>Constraints</strong><p>${listPreview(capsule.constraints, 'Do not assume access to hidden chat history. Do not invent unobserved outcomes or savings.')}</p></div>
       <div class="fresh-preview-row"><strong>Done when</strong><p>${listPreview(capsule.acceptance_criteria, 'Identify the smallest next checkpoint and verify it with local evidence.')}</p></div>
     </div>
@@ -2007,6 +2012,9 @@ function renderHandoff(capsule) {
   const changedFiles = evidence.changed_files || [];
   const runtime = capsule.runtime_attachment || {};
   const target = capsule.target || 'generic';
+  const formOptions = JSON.stringify({type: capsule.handoff_type || 'coding', objective: capsule.objective || '',
+    next_outcome: capsule.next_outcome || '', sources: capsule.source_refs || [],
+    constraints: capsule.constraints || [], acceptance: capsule.acceptance_criteria || []});
   const includePrompt = !!capsule.include_prompt_excerpt;
   const canOpenRuntime = !!runtime.available;
   const aiAssist = capsule.ai_assist || {};
@@ -2075,7 +2083,7 @@ function renderHandoff(capsule) {
           <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
         </div>
       </div>
-      <textarea id="handoffBrief" class="brief-box" ${awaitingEvidence ? 'disabled' : ''}>${esc(capsule.next_brief || '')}</textarea>
+      <textarea id="handoffBrief" data-options="${esc(formOptions)}" class="brief-box" ${awaitingEvidence ? 'disabled' : ''}>${esc(capsule.next_brief || '')}</textarea>
       <div class="copy-row"><button class="btn-primary" ${awaitingEvidence ? 'disabled' : `onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)"`}>${awaitingEvidence ? 'Loading evidence...' : 'Copy brief'}</button></div>
     </div>
     <!-- The brief is the focal object. Optional shaping fields stay below it
@@ -2105,7 +2113,12 @@ function renderHandoff(capsule) {
 }
 async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
   const token = drawerRequestToken;
-  const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
+  const briefElement = document.getElementById('handoffBrief');
+  if (briefElement?.dataset?.options && briefElement.dataset.options !== JSON.stringify(handoffOptionsFromForm())) {
+    showToast('The request or next outcome changed. Regenerate the brief before copying.', 'warning');
+    return;
+  }
+  const brief = briefElement ? briefElement.value : '';
   const copied = await copyText(brief, 'Fresh Start brief copied');
   if (!copied) return;
   await fetch('/api/handoff-decision', {
@@ -2151,6 +2164,7 @@ function freshStartAutoComposeKey(capsule) {
       !!capsule.include_prompt_excerpt,
       capsule.handoff_type || 'coding',
       capsule.objective || '',
+      capsule.next_outcome || '',
       capsule.source_refs || [],
       capsule.constraints || [],
       capsule.acceptance_criteria || [],
@@ -2440,7 +2454,7 @@ function fmtMoney(value) {
 }
 function renderOptimizeWorkspace(optimize, cache = {}) {
   const state = optimize?.review_state;
-  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 2);
+  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
   if (state === 'error' || cache.error) {
     return `<div role="status" class="verdict-card"><h3>Optimize evidence refresh failed</h3><p>Copying is paused until the evidence is ready.</p><button onclick="load(false, true)">Retry evidence refresh</button></div>`;
   }
@@ -2459,9 +2473,10 @@ function renderOptimizeWorkspace(optimize, cache = {}) {
       <div class="mini"><span class="label">Status</span><strong>${esc(optimize.title || 'Optimize')}</strong></div>
       <div class="mini"><span class="label">Review scope</span><strong>${esc(topImpact)}</strong></div>
       <div class="mini"><span class="label">Evidence</span><strong>${esc(optimize.evidence_label || 'Observed')}</strong></div>
-      <div class="mini"><span class="label">Items</span><strong>${esc(candidates.length)}</strong></div>
+      <div class="mini"><span class="label">Items shown</span><strong>${esc(candidates.length)} of ${esc(optimize.candidate_count || candidates.length)}</strong></div>
     </div>
     <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Start with one review batch. Verify current work in the owning app, then confirm the review summary. Only the unchanged item is quieted for 24 hours. Historical tokens are not cleanup savings.</p>
+    <p class="receipt-note">Discovery covers known project worktrees and bounded temp/tool workspace locations, not every folder on this machine.${optimize.omitted_candidate_count ? ` ${esc(optimize.omitted_candidate_count)} additional candidates are outside this displayed batch; reviewing or skipping items allows later candidates to appear.` : ''}</p>
     <div class="action-queue">${candidates.map(item => {
       const cleanupPrompt = item.cleanup_prompt || checklist;
       const aiCleanup = optimizeAiButton(item.id || '');
@@ -2492,7 +2507,7 @@ function renderOptimizeWorkspace(optimize, cache = {}) {
     </div>`;
     }).join('')}</div>
     <div class="copy-row" style="margin-top:12px">
-      <button class="btn-quiet" onclick="copyOptimizeCleanupPrompt('', this)">Copy all review items</button>
+      <button class="btn-quiet" onclick="copyOptimizeCleanupPrompt('', this)">Copy displayed review items</button>
     </div>`;
 }
 function renderRuntimeOptimizeCard(item, cleanupPrompt) {

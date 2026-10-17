@@ -151,6 +151,8 @@ tree nesting at 32 levels. These limits do not affect ordinary session scans.
 `/api/health` reports the running dashboard's install kind, package manager,
 source root, process id, version, and launch directory so `aiwatcher start` can
 avoid reusing a dashboard from another checkout or package install.
+Fresh Start handoff routes accept `objective` and `next_outcome` as separate optional strings, alongside source references, constraints and acceptance checks. Missing intent requires confirmation before editing. Raw and AI-assisted generation preserve the same canonical evidence and guardrails; see [Fresh Start contract](FRESH_START_CONTRACT.md).
+
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
 payload. `/api/update-status` checks source checkouts against GitHub, PyPI

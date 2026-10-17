@@ -264,7 +264,10 @@ def classify_process(row: ProcessRow, *, stale_minutes: int = DEFAULT_STALE_MINU
     threshold = max(1, stale_minutes) * 60
     is_long_running = age_seconds is not None and age_seconds >= threshold
 
-    if row.ppid == 1:
+    # LaunchServices-owned macOS GUI apps and their helpers normally have
+    # launchd as parent. That alone is not evidence of an abandoned runtime.
+    bundled_app = bool(argv) and ".app/contents/" in argv[0].lower() and tool not in {"Codex runtime", "node_repl", "Computer Use"}
+    if row.ppid == 1 and not bundled_app:
         reasons.append("orphaned parent (PPID=1)")
     if row.state.upper().startswith("T"):
         reasons.append("stopped/suspended process")

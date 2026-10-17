@@ -1,0 +1,17 @@
+# Fresh Start continuation contract
+
+Fresh Start carries an observed checkout state and a user-confirmed continuation request into another chat. It must not manufacture the original task from nearby commits, file names, a useful-outcome label, or whichever prompt cost the most.
+
+The form, GET/POST handoff endpoints, CLI handoff/resume commands and caches carry two separate fields: `objective` (the user request being continued) and `next_outcome` (the concrete result for the next session). Use `--objective` and `--next-outcome` at the CLI. Missing either produces one focused question before editing or selecting verification. Identity and checkout inspection can be read-only. A missing checkout requires the user to confirm its location; the reviewer must not recreate it or silently switch repositories.
+
+Objective and next-outcome provenance is `user_supplied` or `missing`. Transcript access remains opt-in. When allowed, a bounded tail can supply the latest non-compaction user-ask candidate, explicitly unconfirmed and possibly incomplete. The costliest prompt never becomes the objective. Known subagent/internal/approval sources and internal-review model hints do not supply automatic user-intent candidates. No transcript prompt text is read by this intent-capture path in metadata-only mode.
+
+Raw generation creates the canonical continuation brief. The AI-assisted renderer preserves its full body, changing only the title; a bounded, explicitly unverified suggestion may follow when both intent fields are supplied. The AI cannot replace the objective, proposed next result, identity confidence, source references, constraints, acceptance checks, current-state uncertainty or verification qualifiers. Its receipt describes observations as snapshots, not authoritative completion claims. Model input/output that would cut the contract is rejected in favor of the complete local brief.
+
+Briefs include an observation timestamp, exact checkout/session anchors, recorded role where available, and the distinction between current Git state, historical upstream references, candidate commits and session-bound verification. Other observed active workspaces are not presented as proven dependencies. A completed turn or useful outcome is not proof of task completion.
+
+The brief targets 500 words, with critical identity, intent and safety text taking precedence over the soft target. Shortening drops whole evidence items or a whole commit-message body and provides an omission notice and inspection reference. It never slices a sentence or guardrail to satisfy a word count. If constraints or acceptance checks were omitted for length, the next session must confirm them before editing. The complete structured capsule retains the supplied context.
+
+Changing the form requires regeneration before copying. Copying stale text cannot silently discard newly entered intent. Objective, next outcome and the canonical brief participate in evidence/cache identity. Older generated briefs are invalidated by the continuation contract version.
+
+Regression cases include the supplied KMwebsite and historical `codex-auto-review` handoffs, unknown/missing checkouts, metadata-only privacy, an opted-in latest ask versus a costliest prompt, hostile model goal/completion substitutions, omission safety, and form-to-payload/copy behavior. Tests use synthetic evidence; they do not claim to verify those real projects.

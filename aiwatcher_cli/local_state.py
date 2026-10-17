@@ -1481,6 +1481,7 @@ MAX_HANDOFF_DECISIONS_STORED = 200
 MAX_OPTIMIZE_DECISIONS_STORED = 200
 MAX_AI_ASSIST_RUNS_STORED = 200
 MAX_AI_ASSIST_CACHE_STORED = 100
+MAX_AI_ASSIST_CACHE_TEXT_CHARS = 32_000
 
 
 def record_handoff_decision(
@@ -1821,7 +1822,14 @@ def ai_assist_cache_get(workflow: str, evidence_hash: str) -> dict[str, Any] | N
     if not isinstance(cache, dict):
         return None
     record = cache.get(_ai_assist_cache_key(workflow_value, evidence_value))
-    return dict(record) if isinstance(record, dict) else None
+    if not isinstance(record, dict):
+        return None
+    text = str(record.get("text") or "")
+    # Older Optimize entries may have lost their final confirmation/guardrails
+    # at the former 12k storage limit. Never replay an unverified partial prompt.
+    if workflow_value == "optimize_cleanup" and text and record.get("text_sha256") != hashlib.sha256(text.encode()).hexdigest():
+        return None
+    return dict(record)
 
 
 def record_ai_assist_cache(
@@ -1848,6 +1856,9 @@ def record_ai_assist_cache(
     evidence_value = evidence_hash.strip().lower()
     if not evidence_value:
         raise ValueError("evidence_hash is required")
+    complete_text = str(text or "").strip()
+    if len(complete_text) > MAX_AI_ASSIST_CACHE_TEXT_CHARS:
+        raise ValueError("AI Assist cache output exceeds the limit; refusing to truncate instructions")
     safe_usage: dict[str, Any] = {}
     if isinstance(usage, dict):
         for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
@@ -1858,7 +1869,8 @@ def record_ai_assist_cache(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "workflow": workflow_value,
         "evidence_hash": evidence_value[:128],
-        "text": str(text or "").strip()[:12_000],
+        "text": complete_text,
+        "text_sha256": hashlib.sha256(complete_text.encode()).hexdigest(),
         "provider": provider.strip()[:80] if isinstance(provider, str) and provider.strip() else None,
         "model": model.strip()[:120] if isinstance(model, str) and model.strip() else None,
         "mode": mode.strip()[:40] if isinstance(mode, str) and mode.strip() else None,

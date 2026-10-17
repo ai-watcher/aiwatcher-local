@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from aiwatcher_cli.handoff import build_handoff_capsule, render_handoff_capsule
+from aiwatcher_cli.handoff import MAX_HANDOFF_WORDS, build_handoff_capsule, render_handoff_capsule
 from aiwatcher_cli.local_state import record_decision
 from aiwatcher_cli.outcome_evidence import OutcomeEvidence
 from aiwatcher_cli.scanner import LocalSession
@@ -210,7 +210,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Finish review fixes for PR #150", brief)
         self.assertNotIn("10.2M", brief)
         self.assertNotIn("Usage pressure", brief)
-        self.assertLessEqual(len(brief.split()), 350, brief)
+        self.assertLessEqual(len(brief.split()), MAX_HANDOFF_WORDS, brief)
 
     def test_dense_handoff_preserves_critical_state_within_word_budget(self) -> None:
         now = datetime.now(timezone.utc)
@@ -234,7 +234,7 @@ class HandoffTests(unittest.TestCase):
             )
 
         brief = capsule["next_brief"]
-        self.assertLessEqual(len(brief.split()), 350, brief)
+        self.assertLessEqual(len(brief.split()), MAX_HANDOFF_WORDS, brief)
         self.assertIn("Complete the verified continuation checkpoint", brief)
         self.assertIn(expected_path, brief)
         self.assertIn("Working tree: clean", brief)
@@ -265,15 +265,15 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("continue with a smaller checkpoint", "\n".join(capsule["warnings"]))
         self.assertIn("fresh Claude/Codex/Cursor session", rendered)
         self.assertIn("fresh AI coding session", capsule["next_brief"])
-        self.assertIn("the previous chat is unavailable", capsule["next_brief"])
+        self.assertIn("do not assume access to the previous chat", capsule["next_brief"])
         self.assertIn("Objective and context", capsule["next_brief"])
         self.assertIn("Objective status: not captured; confirmation required before edits", capsule["next_brief"])
-        self.assertIn("ask one focused question to confirm the intended next outcome", capsule["next_brief"])
-        self.assertIn("This was an AI", capsule["next_brief"])
+        self.assertIn("Ask one focused question to confirm the intended outcome", capsule["next_brief"])
+        self.assertIn("fresh AI coding session", capsule["next_brief"])
         self.assertNotIn("This was a a", capsule["next_brief"])
-        self.assertIn("Completed work", capsule["next_brief"])
+        self.assertIn("Current state", capsule["next_brief"])
         self.assertIn("Decisions and constraints", capsule["next_brief"])
-        self.assertIn("Completed work and current state", capsule["next_brief"])
+        self.assertIn("Current state", capsule["next_brief"])
         self.assertIn("First action", capsule["next_brief"])
         self.assertIn("Acceptance criteria", capsule["next_brief"])
         self.assertLess(capsule["next_brief"].index("Objective and context"), capsule["next_brief"].index("Source session identity"))
@@ -322,7 +322,7 @@ class HandoffTests(unittest.TestCase):
             )
 
         brief = capsule["next_brief"]
-        self.assertIn("Source session match: Likely workspace", brief)
+        self.assertIn("Identity confidence: Likely workspace", brief)
         self.assertIn("4 same-project sessions were observed", brief)
         self.assertIn("Source session identity", brief)
         self.assertIn("Identity confidence: Likely workspace (medium)", brief)
@@ -452,7 +452,7 @@ class HandoffTests(unittest.TestCase):
                 capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
-        self.assertIn(f"Commit: {commit_sha}: fix login bug", capsule["next_brief"])
+        self.assertIn(f"Candidate commit: {commit_sha}: fix login bug", capsule["next_brief"])
         self.assertIn(f"git show {commit_sha} --stat", capsule["next_brief"])
         self.assertIn("Changed file: app.py", capsule["next_brief"])
         self.assertIn(f"Most recent commit message ({commit_sha})", capsule["next_brief"])
@@ -483,10 +483,10 @@ class HandoffTests(unittest.TestCase):
                 capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
-        self.assertIn(f"Commit: {commit_sha}: wip", capsule["next_brief"])
+        self.assertIn(f"Candidate commit: {commit_sha}: wip", capsule["next_brief"])
         self.assertNotIn("Most recent commit message", capsule["next_brief"])
 
-    def test_commit_message_body_truncates_at_line_boundary_not_mid_word(self) -> None:
+    def test_long_commit_message_is_omitted_with_exact_inspection_reference(self) -> None:
         now = datetime.now(timezone.utc)
         bullets = [f"- bullet point number {i} with some descriptive words attached" for i in range(30)]
         long_body = "\n".join(bullets)
@@ -515,12 +515,9 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn(long_body, brief)
         section = brief.split("Most recent commit message")[1].split("\n\nVerification and test signals")[0]
         header_line, _, body_text = section.partition("\n")
-        self.assertTrue(body_text.rstrip().endswith("..."))
-        kept_text = body_text.rstrip()[:-3].rstrip()
-        for line in kept_text.splitlines():
-            if not line.strip():
-                continue
-            self.assertIn(line, bullets)
+        self.assertIn("Commit message omitted for length", body_text)
+        self.assertIn("git show -s --format=%B", body_text)
+        self.assertNotIn("...", body_text)
 
     def test_evidence_flags_when_more_commits_or_files_exist_than_shown(self) -> None:
         now = datetime.now(timezone.utc)
@@ -684,9 +681,9 @@ class HandoffTests(unittest.TestCase):
 
         brief = capsule["next_brief"]
         self.assertEqual(capsule["related_workspaces"], ["/repo/docs", "/repo/enterprise"])
-        self.assertIn("- Related active workspace: /repo/docs", brief)
-        self.assertIn("- Related active workspace: /repo/enterprise", brief)
-        self.assertIn("confirm which repo owns the next checkpoint", brief)
+        self.assertIn("- Other observed active workspace (not a proven dependency): /repo/docs", brief)
+        self.assertIn("- Other observed active workspace (not a proven dependency): /repo/enterprise", brief)
+        self.assertIn("no dependency or ownership link is established", brief)
         self.assertIn("Keep the exact checkout above active unless the user explicitly chooses another workspace", brief)
         self.assertNotIn("clone the repository", brief.lower())
 

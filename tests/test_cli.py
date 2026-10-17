@@ -2318,9 +2318,9 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("preparing a Fresh Start brief now", rendered)
         self.assertIn("AIWatcher Fresh Start capsule", rendered)
         self.assertIn("AIWatcher Fresh Start brief", rendered)
-        self.assertIn("the previous chat is unavailable", rendered)
+        self.assertIn("do not assume access to the previous chat", rendered)
         self.assertIn("First action", rendered)
-        self.assertIn("ask one focused question", rendered)
+        self.assertIn("ask one focused question", rendered.lower())
         self.assertIn("Your clipboard was not changed", rendered)
 
     def test_watch_critical_context_prepares_without_copying_and_dedupes_across_polls(self) -> None:

@@ -5954,6 +5954,7 @@ def command_handoff(args: argparse.Namespace) -> int:
         target=getattr(args, "target", "generic"),
         handoff_type=getattr(args, "type", "coding"),
         objective=getattr(args, "objective", None),
+        next_outcome=getattr(args, "next_outcome", None),
         source_refs=getattr(args, "source", []),
         constraints=getattr(args, "constraint", []),
         acceptance_criteria=getattr(args, "acceptance", []),
@@ -9912,6 +9913,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shape the Fresh Start brief for the kind of continuation",
     )
     handoff.add_argument("--objective", help="User-visible objective to carry into the fresh session")
+    handoff.add_argument("--next-outcome", help="Concrete deliverable for the next session; missing intent requires confirmation before editing")
     handoff.add_argument(
         "--source",
         action="append",
@@ -9959,6 +9961,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shape the Fresh Start brief for the kind of continuation",
     )
     resume.add_argument("--objective", help="User-visible objective to carry into the fresh session")
+    resume.add_argument("--next-outcome", help="Concrete deliverable for the next session")
     resume.add_argument(
         "--source",
         action="append",

@@ -424,8 +424,9 @@ aiwatcher handoff [--session-id SESSION_ID] [--days DAYS]
                   [--copy] [--format {text,json}]
                   [--include-prompt-excerpt]
                   [--type {bugbash,coding,general,investigation,product,review}]
-                  [--objective OBJECTIVE] [--source SOURCE]
-                  [--constraint CONSTRAINT] [--acceptance ACCEPTANCE]
+                  [--objective OBJECTIVE] [--next-outcome NEXT_OUTCOME]
+                  [--source SOURCE] [--constraint CONSTRAINT]
+                  [--acceptance ACCEPTANCE]
 ```
 
 Example:
@@ -444,6 +445,7 @@ aiwatcher handoff --target claude --copy
 | `--include-prompt-excerpt` | flag |  | Include a local prompt excerpt in the capsule output |
 | `--type` | `bugbash`, `coding`, `general`, `investigation`, `product`, `review` | `coding` | Shape the Fresh Start brief for the kind of continuation |
 | `--objective` | text |  | User-visible objective to carry into the fresh session |
+| `--next-outcome` | text |  | Concrete deliverable for the next session; missing intent requires confirmation before editing |
 | `--source` | repeatable |  | Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable |
 | `--constraint` | repeatable |  | Non-negotiable constraint or known bad path the fresh session must preserve; repeatable |
 | `--acceptance` | repeatable |  | Acceptance check the fresh session should use before calling the work done; repeatable |
@@ -461,8 +463,9 @@ aiwatcher resume [--session-id SESSION_ID] [--search SEARCH]
                  [--copy] [--format {text,json}]
                  [--include-prompt-excerpt]
                  [--type {bugbash,coding,general,investigation,product,review}]
-                 [--objective OBJECTIVE] [--source SOURCE]
-                 [--constraint CONSTRAINT] [--acceptance ACCEPTANCE]
+                 [--objective OBJECTIVE] [--next-outcome NEXT_OUTCOME]
+                 [--source SOURCE] [--constraint CONSTRAINT]
+                 [--acceptance ACCEPTANCE]
 ```
 
 Examples:
@@ -485,6 +488,7 @@ aiwatcher resume --search <your-project> --days 30
 | `--include-prompt-excerpt` | flag |  | Include a local prompt excerpt in the brief output |
 | `--type` | `bugbash`, `coding`, `general`, `investigation`, `product`, `review` | `coding` | Shape the Fresh Start brief for the kind of continuation |
 | `--objective` | text |  | User-visible objective to carry into the fresh session |
+| `--next-outcome` | text |  | Concrete deliverable for the next session |
 | `--source` | repeatable |  | Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable |
 | `--constraint` | repeatable |  | Non-negotiable constraint or known bad path the fresh session must preserve; repeatable |
 | `--acceptance` | repeatable |  | Acceptance check the fresh session should use before calling the work done; repeatable |
