@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import statusline
+from . import statusline, transcript_cache
 from .git_identity import identity_for_session, resolve_git_identity
 from .pricing import cache_read_cost, is_subscription_model, lookup
 from .scanner import LocalSession, _codex_user_prompt_text, _parse_ts
@@ -221,75 +221,70 @@ def codex_boundary_stats(path: str, *, since: datetime | None = None) -> dict[st
     only the whole-session figures (latest, peak, first, model) are filled,
     which is what the Companion meter needs.
     """
-    empty: dict[str, Any] = {
-        "available": False, "latest_context": 0, "peak_context": 0, "first_context": 0,
-        "turns": 0, "model": None, "context_at_since": 0, "min_context_since": 0,
-        "turns_since": 0, "prompts_since": 0, "files_since": [],
-        # Codex rollouts carry no session title and, as far as is known, no
-        # marker for a compaction in progress; those stay unset and the
-        # lifecycle falls back to observing the drop.
-        "title": None, "command_seen_at": None, "boundary_seen_at": None,
-        "turns_after_min_since": 0, "prompts_after_min_since": 0, "context_before_min_since": 0,
-    }
-    try:
-        handle = open(path, "r", encoding="utf-8", errors="replace")
-    except OSError:
-        return empty
-    stats = dict(empty)
-    previous_total = -1
-    previous_context = 0
-    with handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            row_type = row.get("type")
-            stamp = _parse_ts(row.get("timestamp"))
-            after = since is not None and stamp is not None and stamp >= since
-            if row_type == "turn_context" and payload.get("model"):
-                stats["model"] = str(payload["model"])
-            if after and row_type == "response_item" and payload.get("type") in {"function_call", "custom_tool_call"}:
-                for file_path in _codex_patch_paths(payload):
-                    if file_path not in stats["files_since"]:
-                        stats["files_since"].append(file_path)
-            if after and _codex_user_prompt_text(row_type, payload):
-                stats["prompts_since"] += 1
-                stats["prompts_after_min_since"] += 1
-            if row_type != "event_msg" or payload.get("type") != "token_count":
-                continue
-            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
-            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
-            total_tokens = int(total.get("total_tokens") or 0)
-            if not total_tokens or total_tokens == previous_total:
-                continue
-            previous_total = total_tokens
-            context = int(last.get("input_tokens") or 0)
-            if context <= 0:
-                continue
-            stats["turns"] += 1
-            stats["latest_context"] = context
-            stats["peak_context"] = max(stats["peak_context"], context)
-            if not stats["first_context"]:
-                stats["first_context"] = context
-            if after:
-                stats["turns_since"] += 1
-                if not stats["min_context_since"] or context < stats["min_context_since"]:
-                    stats["min_context_since"] = context
-                    stats["context_before_min_since"] = previous_context
-                    stats["turns_after_min_since"] = 0
-                    stats["prompts_after_min_since"] = 0
-                else:
-                    stats["turns_after_min_since"] += 1
-            elif since is not None:
-                stats["context_at_since"] = context
-            previous_context = context
-    stats["available"] = stats["turns"] > 0
-    return stats
+    def initial() -> dict[str, Any]:
+        return {
+            "stats": {
+                "available": False, "latest_context": 0, "peak_context": 0, "first_context": 0,
+                "turns": 0, "model": None, "context_at_since": 0, "min_context_since": 0,
+                "turns_since": 0, "prompts_since": 0, "files_since": [],
+                # Codex has no observed title or in-progress compact marker;
+                # the lifecycle falls back to observing a context drop.
+                "title": None, "command_seen_at": None, "boundary_seen_at": None,
+                "turns_after_min_since": 0, "prompts_after_min_since": 0, "context_before_min_since": 0,
+            },
+            "previous_total": -1, "previous_context": 0,
+        }
+
+    def consume(s: dict[str, Any], row: dict[str, Any]) -> None:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        row_type = row.get("type")
+        stamp = _parse_ts(row.get("timestamp"))
+        after = since is not None and stamp is not None and stamp >= since
+        if row_type == "turn_context" and payload.get("model"):
+            s['stats']["model"] = str(payload["model"])
+        if after and row_type == "response_item" and payload.get("type") in {"function_call", "custom_tool_call"}:
+            for file_path in _codex_patch_paths(payload):
+                if file_path not in s['stats']["files_since"]:
+                    s['stats']["files_since"].append(file_path)
+        if after and _codex_user_prompt_text(row_type, payload):
+            s['stats']["prompts_since"] += 1
+            s['stats']["prompts_after_min_since"] += 1
+        if row_type != "event_msg" or payload.get("type") != "token_count":
+            return
+        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+        total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+        last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+        total_tokens = int(total.get("total_tokens") or 0)
+        if not total_tokens or total_tokens == s['previous_total']:
+            return
+        s['previous_total'] = total_tokens
+        context = int(last.get("input_tokens") or 0)
+        if context <= 0:
+            return
+        s['stats']["turns"] += 1
+        s['stats']["latest_context"] = context
+        s['stats']["peak_context"] = max(s['stats']["peak_context"], context)
+        if not s['stats']["first_context"]:
+            s['stats']["first_context"] = context
+        if after:
+            s['stats']["turns_since"] += 1
+            if not s['stats']["min_context_since"] or context < s['stats']["min_context_since"]:
+                s['stats']["min_context_since"] = context
+                s['stats']["context_before_min_since"] = s['previous_context']
+                s['stats']["turns_after_min_since"] = 0
+                s['stats']["prompts_after_min_since"] = 0
+            else:
+                s['stats']["turns_after_min_since"] += 1
+        elif since is not None:
+            s['stats']["context_at_since"] = context
+        s['previous_context'] = context
+
+    with transcript_cache.folded_jsonl(path, ("codex-usage", since), initial, consume) as aggregate:
+        s = aggregate if aggregate is not None else initial()
+        result = dict(s['stats'])
+        result['files_since'] = list(result['files_since'])
+        result['available'] = result['turns'] > 0
+        return result
 
 
 def _relative(path: str, root: str | None) -> str:

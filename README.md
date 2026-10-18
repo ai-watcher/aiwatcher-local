@@ -454,7 +454,15 @@ Measured from this repo on macOS with Python 3.14:
 On the measured machine, a Companion startup scan over recent local AI history
 briefly used more CPU and memory, then settled back near idle. Larger local
 Claude/Codex/Cursor histories can make that scan peak higher. The default
-Companion interval is 30 seconds, and you can stop it any time:
+Companion interval is 30 seconds. Context/compaction polling reuses process-local
+aggregates and reads appended transcript rows instead of reparsing the full log
+on each write. First reads, changed commit windows, replaced/truncated logs, and
+cache evictions still require a full pass. Marker searches stream in 1 MB chunks.
+The aggregate cache retains at most 64 entries and 250,000 records in total;
+folds larger than 100,000 records are returned but not retained. Rows over 8 MB
+produce unavailable measurements instead of partial totals. These are record
+limits, not a fixed RAM guarantee; prompt/source bodies are not retained in the
+aggregates. You can stop the Companion any time:
 
 ```sh
 aiwatcher companion stop

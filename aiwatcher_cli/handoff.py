@@ -176,27 +176,6 @@ def verification_handoff_state(
     }
 
 
-def _short(value: str | None, limit: int = 900) -> str | None:
-    if not value:
-        return None
-    text = value.strip()
-    if len(text) <= limit:
-        return text
-    truncated = text[:limit]
-    # Prefer dropping the last, possibly-partial line entirely (so a bullet
-    # list doesn't end on a fragment) rather than just avoiding a mid-word
-    # cut. Only fall back to a word boundary when there's no newline close
-    # enough to be worth it (e.g. a single long paragraph with no lines).
-    newline_break = truncated.rfind("\n")
-    if newline_break > limit * 0.5:
-        truncated = truncated[:newline_break]
-    else:
-        space_break = truncated.rfind(" ")
-        if space_break > limit * 0.6:
-            truncated = truncated[:space_break]
-    return truncated.rstrip() + "..."
-
-
 def _stamp(session: LocalSession) -> str:
     stamp = session.updated_at or session.started_at
     if not stamp:
@@ -280,19 +259,6 @@ def _runtime_identity_lines(
     if isinstance(pid, int):
         lines.append(f"- Matched process id: {pid}")
     return lines, identity_label, exact_return_label
-
-
-def _usage_pressure_label(session: LocalSession) -> str:
-    tokens = session.tokens_in + session.tokens_out
-    value = _money(session.cost_usd)
-    if tokens > 0 and session.cost_usd == 0:
-        value = f"{value} API-equivalent value (subscription-limited, local, or unavailable pricing)"
-    else:
-        value = f"{value} API-equivalent value"
-    return (
-        f"{_compact_int(tokens)} tokens, {session.agent_calls} model calls, "
-        f"{session.tool_calls} tool calls, {value}"
-    )
 
 
 HandoffTarget = Literal["generic", "claude", "codex", "cursor", "vscode"]
@@ -410,7 +376,7 @@ def _handoff_profile(handoff_type: str) -> dict[str, object]:
     return TYPE_PROFILES.get(handoff_type, TYPE_PROFILES["coding"])
 
 
-def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit: int = 220) -> list[str]:
+def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8) -> list[str]:
     cleaned: list[str] = []
     for item in items or []:
         text = " ".join(str(item).strip().split())
@@ -424,15 +390,8 @@ def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit
     return cleaned
 
 
-def _indefinite_article(label: str) -> str:
-    """"an AI coding session", not "a AI coding session"."""
-    return "an" if label[:1].lower() in "aeiou" else "a"
-
-
 def _brief_memory_summary(
     *,
-    project_label: str,
-    project_reliable: bool,
     objective_text: str | None,
     profile: dict[str, object],
     evidence: object,
@@ -447,8 +406,6 @@ def _brief_memory_summary(
     section is deliberately framed as local evidence plus inference instead of
     pretending the previous chat text is available.
     """
-    project_part = project_label if project_reliable else "an unconfirmed project"
-    session_label = str(profile.get("session_label") or "AI work session")
     summary: list[str] = []
     if objective_text:
         summary.append(f"- You were trying to: {objective_text}")
@@ -768,7 +725,6 @@ def build_handoff_capsule(
             str(costliest_prompt.get("prompt_excerpt")),
         ]
 
-    warning_lines = [f"- {item}" for item in warnings[:5]]
     done_lines: list[str] = []
     if evidence.changed_files:
         done_lines.append(
@@ -827,8 +783,6 @@ def build_handoff_capsule(
         ]
 
     memory_summary = _brief_memory_summary(
-        project_label=project_label,
-        project_reliable=project_reliable,
         objective_text=objective_text,
         profile=profile,
         evidence=evidence,

@@ -57,6 +57,8 @@ jobs:
         run: pip install -e .
       - name: Compile
         run: python -m compileall aiwatcher_cli
+      - name: Transcript cache regressions
+        run: python -m unittest discover -s tests -p test_transcript_cache.py -v
       - name: Unit tests
         env:
           # One macOS job owns the swiftc typecheck of the overlay source. It
