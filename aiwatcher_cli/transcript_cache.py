@@ -71,11 +71,8 @@ def _guards_match(handle: Any, entry: _Entry) -> bool:
     return handle.read(len(entry.guard)) == entry.guard
 
 
-def _unchanged(path: str, entry: _Entry | None, sig: tuple[int, ...]) -> bool:
-    if entry is None or entry.signature != sig:
-        return False
-    with open(path, "rb") as handle:
-        return _signature(os.fstat(handle.fileno())) == sig and _guards_match(handle, entry)
+def _unchanged(handle: Any, entry: _Entry | None, sig: tuple[int, ...]) -> bool:
+    return entry is not None and entry.signature == sig and _guards_match(handle, entry)
 
 
 def _prepare(handle: Any, entry: _Entry | None, sig: tuple[int, ...], factory: Callable[[], Any]) -> _Entry:
@@ -122,11 +119,14 @@ def folded_jsonl(
     key = (os.path.abspath(path), "jsonl", namespace)
     with _LOCK:
         try:
-            sig = _signature(os.stat(path))
-            entry = _CACHE.get(key)
-            if not _unchanged(path, entry, sig):
-                with open(path, "rb") as handle:
-                    sig = _signature(os.fstat(handle.fileno()))
+            # Use one handle and one metadata API throughout. Windows stat()
+            # and fstat() can expose different identity/change-time fields.
+            with open(path, "rb") as handle:
+                sig = _signature(os.fstat(handle.fileno()))
+                entry = _CACHE.get(key)
+                if _unchanged(handle, entry, sig):
+                    _CACHE.move_to_end(key)
+                else:
                     entry = _prepare(handle, entry, sig, factory)
                     while handle.tell() < sig[2]:
                         start = handle.tell()
@@ -147,8 +147,6 @@ def folded_jsonl(
                         entry.records += 1
                         entry.unterminated = not raw.endswith(b"\n")
                     _remember(key, entry, handle, sig)
-            else:
-                _CACHE.move_to_end(key)
         except (OSError, _LimitExceeded):
             _CACHE.pop(key, None)
             entry = None
@@ -167,13 +165,12 @@ def count_pattern(path: str, pattern: Any, *, overlap: int = 64) -> int:
     key = (os.path.abspath(path), "pattern", pattern.pattern, pattern.flags)
     with _LOCK:
         try:
-            sig = _signature(os.stat(path))
-            entry = _CACHE.get(key)
-            if _unchanged(path, entry, sig):
-                _CACHE.move_to_end(key)
-                return entry.value["count"]
             with open(path, "rb") as handle:
                 sig = _signature(os.fstat(handle.fileno()))
+                entry = _CACHE.get(key)
+                if _unchanged(handle, entry, sig):
+                    _CACHE.move_to_end(key)
+                    return entry.value["count"]
                 entry = _prepare(handle, entry, sig, lambda: {"count": 0, "tail": b""})
                 while handle.tell() < sig[2]:
                     chunk = handle.read(min(CHUNK_BYTES, sig[2] - handle.tell()))

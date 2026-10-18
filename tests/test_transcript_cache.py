@@ -79,6 +79,18 @@ class TranscriptCacheTests(unittest.TestCase):
         # Four small guards plus one new row, rather than the 1 MB history.
         self.assertLess(bytes_read, 2048)
 
+    def test_one_handle_metadata_api_is_used_for_cold_and_warm_reads(self):
+        self.append({'n': 1})
+        # Windows path-stat and handle-stat identity fields can differ.
+        # A cache must not mix them and reparse an unchanged file forever.
+        with patch.object(transcript_cache.os, 'stat', side_effect=AssertionError('path stat used')):
+            self.assertEqual(self.total(), 1)
+            self.assertEqual(self.total(), 1)
+            self.assertEqual(self.consumed, 1)
+            pattern = re.compile(b'"n"')
+            self.assertEqual(transcript_cache.count_pattern(str(self.path), pattern), 1)
+            self.assertEqual(transcript_cache.count_pattern(str(self.path), pattern), 1)
+
     def test_partial_record_is_retried_without_double_counting(self):
         self.append({'n': 1})
         with self.path.open('ab') as handle:
