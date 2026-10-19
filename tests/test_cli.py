@@ -932,6 +932,7 @@ class UpdateCommandCliTests(unittest.TestCase):
 
     def test_pypi_package_install_compares_versions(self) -> None:
         with (
+            patch.object(updater, "__version__", "0.1.0"),
             patch.object(updater, "install_kind", return_value="package"),
             patch.object(updater, "_direct_url_metadata", return_value=None),
             patch.object(updater, "package_manager", return_value="pipx"),
