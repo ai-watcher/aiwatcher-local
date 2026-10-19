@@ -828,6 +828,7 @@ class DashboardServeTests(unittest.TestCase):
                 post_payload = json.dumps({
                     "fresh_start_context": False,
                     "finished_sessions": "expanded",
+                    "motion_mode": "expressive",
                 }).encode("utf-8")
                 post_request = request.Request(
                     f"{base}/api/companion-preferences",
@@ -851,6 +852,7 @@ class DashboardServeTests(unittest.TestCase):
                     server.server_close()
 
         self.assertEqual(posted["finished_sessions"], "expanded")
+        self.assertEqual(posted["motion_mode"], "expressive")
         self.assertFalse(posted["fresh_start_context"])
         self.assertEqual(fetched, posted)
 
