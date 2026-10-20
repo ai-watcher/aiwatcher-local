@@ -74,7 +74,7 @@
   <g transform="translate(248 190)" class="sans">
     <rect width="540" height="520" rx="10" class="card" filter="url(#shadow)"/>
     <text x="28" y="45" class="ink" font-size="30" font-weight="800">Plan</text>
-    <text x="28" y="75" class="muted" font-size="16">Paste a prompt before sending it to Codex, Claude, Cursor, or another agent.</text>
+    <text x="28" y="75" class="muted" font-size="16">Review a prompt before sending it to your AI coding tool.</text>
     <rect x="28" y="110" width="484" height="172" rx="8" fill="#ffffff" stroke="#d9e3f0"/>
     <text x="50" y="142" class="mono muted" font-size="14">Refactor the billing flow, clean up old auth,</text>
     <text x="50" y="166" class="mono muted" font-size="14">and delete unused secrets after reviewing the</text>
@@ -113,7 +113,7 @@
     <text x="326" y="346" class="muted" font-size="14">need manual cleanup later.</text>
     <rect x="30" y="384" width="522" height="84" rx="9" fill="#eef7ff" stroke="#bed7f7"/>
     <text x="56" y="416" class="ink" font-size="18" font-weight="800">Safer prompt</text>
-    <text x="56" y="444" class="muted" font-size="14">Create a 30-minute plan, identify auth files, and stop before deleting anything.</text>
+    <text x="56" y="444" class="muted" font-size="14">Identify auth files and make a plan. Stop before deleting.</text>
   </g>
 
   <g transform="translate(1340 712)" filter="url(#shadow)">

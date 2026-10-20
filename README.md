@@ -12,7 +12,9 @@ It works with local history from tools such as Claude Code, Codex, and Cursor.
 No account is required. No cloud upload happens by default. No LLM call happens
 unless you explicitly configure optional AI Assist.
 
-![AIWatcher Local home dashboard](docs/readme-home-light.svg)
+*Illustrated Home preview; sample data, not a live session.*
+
+![AIWatcher Local home dashboard illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-home-light.png)
 
 ## Contents
 
@@ -51,7 +53,9 @@ The Home view shows active AI work, context pressure, update status, and the
 small Companion control. Plan helps narrow risky prompts before an agent spends
 context:
 
-![AIWatcher Plan prompt gate](docs/readme-plan-light.svg)
+*Illustrated Plan preview; sample data.*
+
+![AIWatcher Plan prompt gate illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-plan-light.png)
 
 ## Why Developers Use It
 
