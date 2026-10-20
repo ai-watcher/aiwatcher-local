@@ -524,15 +524,15 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # A row per live chat's current prompt: the server writes the whole
         # line, the tag says working or done, and the button opens the chat.
         mac = native_overlay.MACOS_SWIFT_PRESENCE
-        self.assertIn('"context_review", "prompt_status", "compact_recommended"].contains(stateName)', mac)
+        self.assertIn('json["activity_sections"]', mac)
         self.assertIn('if kind.hasPrefix("prompt_") {\n            return row["text"] as? String ?? ""', mac)
         self.assertIn('if kind.hasPrefix("prompt_") { return "Open" }', mac)
         self.assertIn('let tagged = kind == "compact" || kind.hasPrefix("prompt_")', mac)
         self.assertIn('if kind == "prompt_working" {', mac)
-        self.assertIn('kind == "prompt_done"', mac)
+        self.assertIn('"prompt_done"', mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
-        self.assertIn('"context_review", "prompt_status", "compact_recommended"} or not waiting_row_texts', tk_source)
+        self.assertIn('activity_sections = payload.get("activity_sections")', tk_source)
         self.assertIn('if kind.startswith("prompt_"):\n            return str(row.get("text") or "")', tk_source)
         self.assertIn('if kind.startswith("prompt_"):\n            return "Open"', tk_source)
         self.assertIn('elif kind.startswith("prompt_"):', tk_source)
@@ -545,9 +545,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # primary, so the later steps fall back to the calm layout.
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn('json["compact_rows"]', mac)
-        self.assertIn('"compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty', mac)
+        self.assertIn('if waitingRowTexts.isEmpty { return 0 }', mac)
         self.assertIn('if kind == "compact" { return "Review" }', mac)
-        self.assertIn('rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)', mac)
+        self.assertIn('rowButtons[index].isHidden = !visible || action == "none" || (kind == "compact" && action.isEmpty)', mac)
         self.assertIn('kind == "compact" ? tag :', mac)
         self.assertIn("func copyCompactRow(index: Int)", mac)
         self.assertIn("func writeClipboard", mac)
@@ -565,7 +565,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('waiting_sessions = payload.get("compact_rows")', tk_source)
-        self.assertIn('"compact_recommended"} or not waiting_row_texts', tk_source)
+        self.assertIn('if not waiting_row_texts:', tk_source)
         self.assertIn('{"control_review", "context_review", "compact_recommended"}', tk_source)
         self.assertIn('if kind == "compact":\n            return "Review"', tk_source)
         self.assertIn("def copy_compact_row(index: int)", tk_source)
@@ -599,18 +599,19 @@ class NativeOverlayConfigTests(unittest.TestCase):
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn("session_finished", mac.split("func hasPrimaryAction")[1][:400])
         self.assertNotIn("session_finished", mac.split("func needsAttentionState")[1][:400])
-        self.assertIn('["session_finished", "away_digest"].contains(stateName)', mac)
+        self.assertIn('["session_finished", "away_digest", "delivery_review_ready"].contains(stateName)', mac)
         self.assertIn('json["finished_sessions"]', mac)
         self.assertIn("waitingCount <= 0 && reviewCount <= 0", mac)
         self.assertNotIn("finishedCount > 0 ? String(finishedCount)", mac)
-        self.assertIn("completed run", mac)
+        self.assertIn("ready to check", mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("session_finished", tk_source.split("def has_primary_action()")[1][:600])
         self.assertNotIn(
             "session_finished",
-            tk_source.split("needs_attention = state_var.get() in")[1][:200],
+            tk_source.split("else state_var.get() in {")[1][:300],
         )
+        self.assertIn('activity_tone_var.get() == "attention"', tk_source)
         self.assertIn("badge_count = waiting_count or review_count", tk_source)
         self.assertIn('fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
 
@@ -629,7 +630,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"away_digest"', tk_source)
         self.assertNotIn(
             "away_digest",
-            tk_source.split("needs_attention = state_var.get() in")[1][:200],
+            tk_source.split("else state_var.get() in {")[1][:300],
         )
         self.assertIn('"Review" if kind else "Open"', tk_source)
 
@@ -642,9 +643,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("orbitLayer", mac)
         self.assertIn('CABasicAnimation(keyPath: "transform.rotation.z")', mac)
         self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
-        self.assertIn("let shouldOrbit = collapsed && workingCount > 0 && !needsAttention && !reduceMotion", mac)
+        self.assertIn('let shouldOrbit = collapsed && window.isVisible && workingCount > 0 && !needsAttention && !reduceMotion && motionMode != "quiet"', mac)
         self.assertIn('orbitLayer.removeAnimation(forKey: "orbit")', mac)
-        self.assertIn("self.schedulePulse(after: animate ? 0.8 : 10.0)", mac)
+        self.assertIn("self.schedulePulse(after: animate ? 0.8 : (dormant ? 30.0 : 10.0))", mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("orbit_angle_var", tk_source)
@@ -663,7 +664,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("func updateWatcherExpression(blink: Bool = false)", mac)
         self.assertIn("CGPoint(x: 1.0, y: 0.8)", mac)
         self.assertIn("CGPoint(x: 0.0, y: -0.8)", mac)
-        self.assertIn('stateName == "session_finished"', mac)
+        self.assertIn('let delivered = !deliveryReceiptID.isEmpty && deliveryReceiptID != previousDeliveryReceiptID', mac)
         self.assertIn('stateName == "offline"', mac)
         self.assertIn("func playWatcherTransition", mac)
         self.assertIn('forKey: "watcher-focus-lock"', mac)
@@ -672,8 +673,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertNotIn("brandMarkView", transition)
         self.assertIn("func scheduleExpression", mac)
         self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
-        self.assertIn("self.collapsed && self.window.isVisible && !reduceMotion", mac)
-        self.assertIn("self.scheduleExpression(after: activelyScanning ? 1.1 : 8.0)", mac)
+        self.assertIn('self.collapsed && self.window.isVisible && !reduceMotion && self.motionMode == "expressive"', mac)
+        self.assertIn('self.scheduleExpression(after: activelyScanning ? 1.1 : (dormant ? 30.0 : 8.0))', mac)
         self.assertIn("brandMarkView.layer?.addSublayer(expandedMark.mark)", mac)
         self.assertIn("collapsedMarkView.layer?.addSublayer(collapsedFacePanel)", mac)
         self.assertIn("self.workingCount = 0", mac.split("func applyOfflineState")[1][:900])
@@ -682,11 +683,35 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("expression_phase_var", tk_source)
         self.assertIn("focus_lock_ticks_var", tk_source)
         self.assertIn("_companion_expression(", tk_source)
-        self.assertIn("reduce_motion = _reduce_motion_requested()", tk_source)
-        self.assertIn("root.after(8000 if reduce_motion else 800", tk_source)
-        self.assertIn("entered_attention or activity_changed or completed or recovered", tk_source)
+        self.assertIn("def reduce_motion_active()", tk_source)
+        self.assertIn("root.after(800 if animate_surface else (30000 if not visible_surface else 8000)", tk_source)
+        self.assertIn("entered_attention or activity_changed or delivered or recovered", tk_source)
         self.assertIn("capstyle=tk.ROUND", tk_source)
         self.assertIn("working_count_var.set(0)", tk_source.split("def apply_offline_state")[1][:900])
+
+    def test_grouped_rows_actions_motion_and_accessibility_share_one_contract(self) -> None:
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["activity_sections"]', mac)
+        self.assertIn('row["normalized_action"]', mac)
+        self.assertIn('row["_section_label"]', mac)
+        self.assertIn('self.expandButton.setAccessibilityLabel("AIWatcher Companion")', mac)
+        self.assertIn('preferences?["motion_mode"]', mac)
+        self.assertIn('self.deliveryConfirmed = json["delivery_confirmed"] as? Bool ?? false', mac)
+        self.assertIn('self.deliveryReceiptID = json["delivery_receipt_id"] as? String ?? ""', mac)
+        self.assertIn('waitingRowActions[index] == "copy_fresh_start"', mac)
+        self.assertIn("let remainingSections = activeSections.count - sectionIndex - 1", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('payload.get("activity_sections")', tk_source)
+        self.assertIn('row.get("normalized_action")', tk_source)
+        self.assertIn('row.get("_section_label")', tk_source)
+        self.assertIn('preferences.get("motion_mode")', tk_source)
+        self.assertIn('delivery_confirmed_var.set(bool(payload.get("delivery_confirmed")))', tk_source)
+        self.assertIn('delivery_receipt_id_var.set(str(payload.get("delivery_receipt_id") or ""))', tk_source)
+        self.assertIn('waiting_row_actions[index] == "copy_fresh_start"', tk_source)
+        self.assertIn("remaining_sections = len(active_sections) - active_index - 1", tk_source)
+        self.assertIn('takefocus=True', tk_source)
+        self.assertIn('collapsed_canvas.bind("<Return>"', tk_source)
 
     def test_the_marks_ring_says_running(self) -> None:
         # The ring speaks the dashboard favicon's vocabulary: orange for
@@ -730,7 +755,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("rimLayer = CAShapeLayer()", mac)
         self.assertIn("rimLayer.lineWidth = 5", mac)
         self.assertIn("rimLayer.isHidden = !collapsed || !needsAttention", mac)
-        self.assertIn("rimLayer.opacity = (hardGate && !reduceMotion && !pulseOn) ? 0.3 : 1.0", mac)
+        self.assertIn('rimLayer.opacity = (hardGate && !reduceMotion && motionMode != "quiet" && !pulseOn) ? 0.3 : 1.0', mac)
         self.assertIn('(hardGate ? "!" : "")', mac)
         self.assertIn("waitingCount <= 0 && reviewCount <= 0 && !hardGate", mac)
         self.assertIn("if isHardGate() && !wasHardGate && collapsed {\n            setCollapsed(false)", mac)

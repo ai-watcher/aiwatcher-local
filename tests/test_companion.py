@@ -397,6 +397,52 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         self.assertEqual(state["label"], "Delivery review ready")
         self.assertIn("2 commits", state["subtitle"])
         self.assertIn("receipt-1", state["primary_url"])
+        self.assertTrue(state["delivery_confirmed"])
+        self.assertEqual(state["confidence"], "confirmed_delivery")
+        self.assertEqual(state["visibility"], "soft")
+        self.assertIn("delivery confirmed", state["activity_line"])
+        self.assertEqual(state["delivery_receipt_id"], "receipt-1")
+
+    def test_gate_does_not_hide_other_waiting_work_or_confirmed_delivery(self):
+        state = self._state(
+            self._summary(),
+            sessions=[
+                self._session("waiting", idle_minutes=9.0),
+                self._session("busy", idle_minutes=0.2),
+            ],
+            signals=self._signal("waiting", minutes_ago=7.0),
+            gate={"id": "g1", "tool": "claude-code", "risk": "high", "url": "/?view=prompt"},
+            delivery_receipts=[self._delivery_receipt()],
+        )
+
+        sections = {row["id"]: row for row in state["activity_sections"]}
+        self.assertEqual(sections["needs_you"]["label"], "Needs you")
+        self.assertEqual({row.get("session_id") for row in sections["needs_you"]["rows"]}, {"", "waiting"})
+        self.assertEqual(sections["needs_you"]["rows"][0]["kind"], "prompt_gate")
+        self.assertEqual(sections["working"]["count"], 1)
+        self.assertEqual(sections["recently_observed"]["rows"][0]["receipt_id"], "receipt-1")
+        self.assertEqual(state["delivery_receipt_id"], "receipt-1")
+
+    def test_compact_advice_stays_calm_and_keeps_its_row_command(self):
+        state = ui._companion_activity_contract({
+            "state": "compact_recommended",
+            "title": "Good moment to compact",
+            "subtitle": "Context can be reduced",
+            "primary_action": "copy_compact",
+            "primary_url": "/?session=s1",
+            "primary_session_id": "s1",
+            "compact_command": "/compact keep decisions",
+            "compact_sha": "sha-1",
+            "activity": {},
+        })
+
+        section = state["activity_sections"][0]
+        row = section["rows"][0]
+        self.assertEqual(section["label"], "For review")
+        self.assertEqual(state["tone"], "calm")
+        self.assertIn("1 to review", state["activity_line"])
+        self.assertEqual(row["command"], "/compact keep decisions")
+        self.assertEqual(row["normalized_action"]["type"], "copy_compact")
 
     def test_candidate_delivery_review_never_interrupts(self):
         state = self._state(
@@ -410,6 +456,48 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             delivery_receipts=[self._delivery_receipt()],
         )
         self.assertEqual(state["state"], "session_waiting")
+
+    def test_activity_groups_coexist_when_a_gate_owns_the_headline(self):
+        self._state(self._summary(), sessions=[self._session("done", idle_minutes=0.2)])
+        state = self._state(
+            self._summary(),
+            sessions=[
+                self._session("done", idle_minutes=3.0),
+                self._session("busy", project="/Users/example/private/feature-repo", idle_minutes=0.2),
+            ],
+            gate={"id": "g1", "tool": "claude-code", "risk": "high", "url": "/?view=prompt"},
+        )
+
+        sections = {row["id"]: row for row in state["activity_sections"]}
+        self.assertEqual(set(sections), {"needs_you", "working", "recently_observed"})
+        self.assertIn("1 needs you", state["activity_line"])
+        self.assertIn("1 working", state["activity_line"])
+        self.assertIn("1 ready to check", state["activity_line"])
+        self.assertNotIn("/Users/example/private", str(sections))
+        for section in sections.values():
+            for row in section["rows"]:
+                action = row["normalized_action"]
+                self.assertIn(action["type"], {"open_url", "open_prompt_gate", "runtime_return", "copy_compact", "none"})
+                self.assertIsInstance(action["available"], bool)
+
+    def test_quiet_transition_is_observed_not_confirmed_completion(self):
+        self._state(self._summary(), sessions=[self._session("done", idle_minutes=0.2)])
+        state = self._state(self._summary(), sessions=[self._session("done", idle_minutes=3.0)])
+
+        self.assertFalse(state["delivery_confirmed"])
+        self.assertEqual(state["confidence"], "observed")
+        self.assertNotIn("completed", state["activity_line"].lower())
+
+    def test_fresh_start_activity_keeps_its_copy_action(self):
+        action = ui._activity_action({
+            "action": "copy_fresh_start",
+            "session_id": "session-1",
+            "url": "/?session=session-1",
+        })
+
+        self.assertEqual(action["label"], "Copy")
+        self.assertEqual(action["type"], "copy_fresh_start")
+        self.assertTrue(action["available"])
 
     def test_a_waiting_session_takes_over_the_companion(self):
         # It used to read "Watching quietly - 7 days: 3 sessions" while a
@@ -862,11 +950,11 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         )
 
         self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "2 completed runs")
+        self.assertEqual(state["label"], "2 ready to check")
         self.assertEqual(state["primary_label"], "Review")
         self.assertEqual(state["primary_url"], "/?view=sessions")
         self.assertEqual(len(state["waiting_sessions"]), 2)
-        self.assertEqual([row["kind"] for row in state["waiting_sessions"]], ["finished", "finished"])
+        self.assertEqual([row["kind"] for row in state["waiting_sessions"]], ["recently_observed", "recently_observed"])
         self.assertEqual(state["skip_label"], "Clear all")
         self.assertEqual(state["skip_state"], "session_finished_group")
         self.assertEqual(state["skip_session_ids"], ["done-1", "done-2"])
@@ -880,7 +968,7 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         )
 
         self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "Run completed")
+        self.assertEqual(state["label"], "Ready to check")
         self.assertIn("done-1", state["primary_url"])
         self.assertEqual(state["skip_state"], "session_finished")
 
@@ -902,7 +990,7 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         ]
         state = self._state(self._summary(), sessions=sessions)
         self.assertEqual(state["state"], "watching")
-        self.assertIn("1 completed", state["subtitle"])
+        self.assertIn("1 to check", state["subtitle"])
         self.assertEqual(len(state["finished_sessions"]), 1)
 
     def test_blocked_outranks_finished(self):
@@ -966,7 +1054,7 @@ class CompanionAwayDigestTests(WaitingSessionCompanionTests):
         with patch.object(ui, "recent_ambient_interventions", return_value=[self._loop_record()]):
             state = self._state(self._summary(), sessions=[finished, before_gap])
         self.assertEqual(state["state"], "away_digest")
-        self.assertIn("1 finished", state["subtitle"])
+        self.assertIn("1 went quiet", state["subtitle"])
         self.assertIn("1 signal", state["subtitle"])
         self.assertIn("gap 48m", state["subtitle"])
         self.assertEqual([row["kind"] for row in state["digest_rows"]], ["finished", "loop"])
@@ -1528,7 +1616,8 @@ class WaitingWidgetAttentionTests(unittest.TestCase):
         # Left out of these lists it would print "Waiting on you" in the calm
         # style with no button -- urgent words, idle appearance.
         for marker in ("func hasPrimaryAction()", "func needsAttentionState()",
-                       "def has_primary_action()", "needs_attention = state_var.get()"):
+                       "def has_primary_action()"):
             with self.subTest(marker=marker):
                 block = self.source[self.source.index(marker):]
                 self.assertIn("session_waiting", block[:600])
+        self.assertIn('activity_tone_var.get() == "attention"', self.source)

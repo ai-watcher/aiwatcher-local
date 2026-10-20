@@ -83,7 +83,7 @@ class PromptStatusBlockTests(unittest.TestCase):
         (item,) = block["items"]
         self.assertFalse(item["working"])
         self.assertEqual(item["rest"], f"{ui.money(8.66)} · +{ui.compact_int(88_300)} · 14 min")
-        self.assertEqual(item["tag"], "done")
+        self.assertEqual(item["tag"], "ready to check")
 
     def test_a_receipt_after_a_break_names_the_break(self) -> None:
         block = self.block([presence("s1", "quiet")], [session("s1")], {"/tmp/s1.jsonl": (
@@ -130,7 +130,7 @@ class PromptStatusBlockTests(unittest.TestCase):
 def item(name: str, *, working: bool, cost: float = 1.0, rest: str = "$1.00 so far · +2.0k · 1 min") -> dict:
     return {
         "session_id": name, "name": name, "working": working, "rest": rest,
-        "tag": "working 1 min" if working else "done", "cost_usd": cost, "at": NOW.isoformat(),
+        "tag": "working 1 min" if working else "ready to check", "cost_usd": cost, "at": NOW.isoformat(),
         "url": f"/?session={name}",
     }
 
@@ -147,11 +147,19 @@ class PromptStatusStateTests(unittest.TestCase):
         self.assertEqual(state["waiting_sessions"], [])
         self.assertIsNone(state["badge"])
 
+    def test_one_quiet_chat_is_ready_to_check_not_done(self) -> None:
+        state = ui._prompt_status_state(
+            {"badge": None},
+            {"items": [item("Quiet", working=False)], "working": 0, "done": 1},
+        )
+
+        self.assertEqual(state["label"], "Ready to check")
+
     def test_several_chats_get_a_row_each(self) -> None:
         state = ui._prompt_status_state({"badge": None}, {"items": [
             item("Busy", working=True, cost=1.35), item("Done", working=False, cost=8.66, rest="$8.66 · +88.3k · 14 min"),
         ], "working": 1, "done": 1})
-        self.assertEqual(state["label"], "1 working · 1 done")
+        self.assertEqual(state["label"], "1 working, 1 ready")
         self.assertEqual([row["kind"] for row in state["waiting_sessions"]], ["prompt_working", "prompt_done"])
         self.assertEqual(state["waiting_sessions"][1]["text"], "Done · $8.66 · +88.3k · 14 min")
         self.assertEqual(state["subtitle"], f"{ui.money(10.01)} across 2 chats' current prompts")

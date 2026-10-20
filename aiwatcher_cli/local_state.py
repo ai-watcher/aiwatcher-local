@@ -55,6 +55,7 @@ DEFAULT_AI_ASSIST_WORKFLOWS = ["fresh_start", "prompt_plan", "optimize_cleanup",
 LEGACY_DEFAULT_AI_ASSIST_WORKFLOWS = ["fresh_start", "prompt_plan", "optimize_cleanup"]
 
 FINISHED_SESSION_NOTICE_MODES = {"badge_only", "expanded"}
+COMPANION_MOTION_MODES = {"quiet", "standard", "expressive"}
 
 
 def default_delivery_tracking_settings() -> dict[str, Any]:
@@ -80,6 +81,7 @@ def default_companion_preferences() -> dict[str, Any]:
         "fresh_start_context": True,
         "finished_sessions": "badge_only",
         "batch_finished_sessions": True,
+        "motion_mode": "standard",
     }
 
 
@@ -110,6 +112,8 @@ def _normalize_companion_preferences(value: Any) -> dict[str, Any]:
     prefs["finished_sessions"] = mode if mode in FINISHED_SESSION_NOTICE_MODES else "badge_only"
     if "batch_finished_sessions" in value:
         prefs["batch_finished_sessions"] = _safe_bool(value.get("batch_finished_sessions"), prefs["batch_finished_sessions"])
+    motion_mode = str(value.get("motion_mode") or prefs["motion_mode"]).strip().lower()
+    prefs["motion_mode"] = motion_mode if motion_mode in COMPANION_MOTION_MODES else "standard"
     return prefs
 
 
