@@ -62,7 +62,7 @@
     <text x="13" y="18" fill="#176f5e" font-size="13" font-weight="800">Watcher running</text>
     <circle cx="148" cy="13" r="3" fill="#7a8798"/>
     <text x="162" y="18" class="mono muted" font-size="14">13 live · Codex 13 quiet · on this machine · updated just now</text>
-    <text x="1080" y="18" class="sans muted" font-size="14" font-weight="700">Run this in a terminal to start it:</text>
+    <text x="1080" y="18" class="sans muted" font-size="14" font-weight="700">Copy start command</text>
     <rect x="1284" y="-5" width="58" height="36" rx="9" fill="#edf4fb"/>
     <text x="1313" y="19" class="mono ink" font-size="14" font-weight="700" text-anchor="middle">Copy</text>
   </g>
@@ -87,17 +87,17 @@
     <text x="28" y="40" class="mono muted" font-size="15" font-weight="700">/Users/dev/work/aiwatcher-local · codex-cli · 1 of 13 live</text>
     <text x="1116" y="40" class="mono muted" font-size="14" font-weight="700" text-anchor="end">updated just now</text>
     <text x="28" y="113" class="sans ink" font-size="54" font-weight="800">148.7k</text>
-    <text x="190" y="113" class="sans muted" font-size="18" font-weight="800">tokens / turn</text>
+    <text x="220" y="113" class="sans muted" font-size="18" font-weight="800">tokens / turn</text>
     <rect x="28" y="145" width="708" height="14" rx="7" fill="#cf181f"/>
     <line x1="745" y1="137" x2="745" y2="173" stroke="#c4550d" stroke-width="3"/>
     <line x1="970" y1="137" x2="970" y2="173" stroke="#b8232a" stroke-width="3"/>
-    <rect x="970" y="145" width="250" height="14" rx="7" fill="#e9eff7"/>
-    <circle cx="1145" cy="152" r="6" fill="#cf181f"/>
+    <rect x="970" y="145" width="160" height="14" rx="7" fill="#e9eff7"/>
+    <circle cx="1110" cy="152" r="6" fill="#cf181f"/>
     <text x="28" y="196" class="sans muted" font-size="18">About <tspan font-weight="800" fill="#19253a">8 turns</tspan> of headroom at the current rate.</text>
-    <rect x="28" y="235" width="148" height="46" rx="8" class="button"/>
-    <text x="102" y="264" fill="#fff" font-size="16" font-weight="800" text-anchor="middle">Review Fresh Start</text>
-    <rect x="186" y="235" width="124" height="46" rx="8" fill="#f5f9ff" stroke="#d8e1ee"/>
-    <text x="248" y="264" class="ink" font-size="16" font-weight="800" text-anchor="middle">Inspect session</text>
+    <rect x="28" y="235" width="164" height="46" rx="8" class="button"/>
+    <text x="110" y="264" fill="#fff" font-size="16" font-weight="800" text-anchor="middle">Review Fresh Start</text>
+    <rect x="204" y="235" width="124" height="46" rx="8" fill="#f5f9ff" stroke="#d8e1ee"/>
+    <text x="266" y="264" class="ink" font-size="16" font-weight="800" text-anchor="middle">Inspect session</text>
     <line x1="28" y1="295" x2="1130" y2="295" class="line"/>
   </g>
 

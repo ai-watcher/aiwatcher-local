@@ -83,6 +83,17 @@ entry points, and the license. If docs, private automation files, local exports,
 or hidden tool config appear in the wheel, stop and fix the package boundary
 before publishing.
 
+The package description comes from `docs/PYPI.md`; the longer GitHub guide is
+`README.md`. Keep installation commands and feature boundaries consistent.
+Render the built description and check that every image and documentation link
+uses an absolute HTTPS URL (page-local anchors are fine). `twine check` checks
+markup validity, not image availability. Confirm image URLs load publicly before
+publishing; the PNG previews have editable SVG sources beside them and must be
+regenerated after illustration changes. Label sample illustrations as such.
+The source archive must include `docs/PYPI.md` so rebuilding it preserves the
+same description. A GitHub documentation merge does not update an existing PyPI
+release: publish the corrected metadata with the next version.
+
 Run a dependency audit against the release environment:
 
 ```sh
