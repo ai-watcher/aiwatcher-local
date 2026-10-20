@@ -34,6 +34,13 @@ function review(status = 'candidate') {
       { runner: 'old tests', status: 'passed', scope: 'project_default', exact_state: false },
     ],
     workflow: { session_count: 1, user_turns: 3, model_calls: 5, tool_calls: 8 },
+    work_understanding: {
+      opening_objective: 'Deliver exact review evidence.', latest_request: 'Bind approval to HEAD.',
+      latest_request_differs: true, turn_count: 3, latest_turn: { model_calls: 2, tool_calls: 4 },
+      commits: [{ sha: 'a'.repeat(12), subject: 'Bind approval to Git evidence' }],
+      changed_areas: ['src'], confidence: 'medium', alignment_label: 'Confirm requirement coverage.',
+      limitation: 'AIWatcher does not prove requirement completion.',
+    },
     attention: ['Local candidate only; remote push and pull-request status were not confirmed.'],
     summary_text: 'AIWatcher Delivery Review',
   };
@@ -63,6 +70,7 @@ test('review cards distinguish exact verification from stale checks', () => {
     deliveryStatusLabel: row => row.event.status === 'confirmed' ? 'Push confirmed' : 'Local candidate',
     deliveryDestination: () => 'feature',
   });
+  vm.runInContext(extract('renderWorkUnderstanding'), ctx);
   vm.runInContext(extract('deliveryReviewCard'), ctx);
   const card = ctx.deliveryReviewCard(review('confirmed'));
   assert.match(card, /Push confirmed/);
@@ -70,6 +78,8 @@ test('review cards distinguish exact verification from stale checks', () => {
   assert.doesNotMatch(card, /old tests/);
   assert.match(card, /Deliver exact review evidence/);
   assert.match(card, /src\/app.py/);
+  assert.match(card, /Bind approval to HEAD/);
+  assert.match(card, /does not prove requirement completion/);
   assert.match(card, /Confirm objective &amp; approve|Confirm objective & approve/);
   assert.match(card, /<button[^>]*disabled>Copy PR summary<\/button>/);
 });
@@ -79,6 +89,7 @@ test('an approved exact review enables copying and removes the approval action',
     esc: value => String(value), jsArg: value => JSON.stringify(value),
     deliveryStatusLabel: () => 'Push confirmed', deliveryDestination: () => 'feature',
   });
+  vm.runInContext(extract('renderWorkUnderstanding'), ctx);
   vm.runInContext(extract('deliveryReviewCard'), ctx);
   const item = review('confirmed');
   item.approval_valid = true;
@@ -199,4 +210,38 @@ test('the real page and responsive stylesheet include the complete delivery surf
   assert.match(js, /objective\.setSelectionRange\(selectionStart, selectionEnd\)/);
   assert.match(js, /deliveryReviewPendingView = true/);
   assert.match(js, /targetTop - headerBottom - 12/);
+});
+
+test('intent-to-evidence review fits desktop and mobile without clipping', async () => {
+  const { chromium } = require('playwright-core');
+  const browser = await chromium.launch({
+    ...(fs.existsSync(chromium.executablePath()) ? {} : { executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' }),
+    headless: true,
+  });
+  try {
+    const ctx = vm.createContext({
+      esc: value => String(value), jsArg: value => JSON.stringify(value),
+      deliveryStatusLabel: () => 'Push confirmed', deliveryDestination: () => 'origin/feature',
+    });
+    vm.runInContext(extract('renderWorkUnderstanding'), ctx);
+    vm.runInContext(extract('deliveryReviewCard'), ctx);
+    const item = review('confirmed');
+    item.work_understanding.opening_objective = 'Implement a concise evidence-backed delivery review without claiming semantic completion. '.repeat(3);
+    item.work_understanding.latest_request = 'Keep the approval tied to the exact intent and Git state. '.repeat(3);
+    const card = ctx.deliveryReviewCard(item);
+    for (const width of [1280, 320]) {
+      const page = await browser.newPage({ viewport: { width, height: 1000 } });
+      await page.setContent(`<main style="padding:16px">${card}</main>`);
+      await page.addStyleTag({ content: css });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      assert.equal(await page.getByRole('heading', { name: 'Intent to delivery evidence' }).isVisible(), true);
+      assert.equal(await page.getByText(/does not prove requirement completion/).isVisible(), true);
+      if (process.env.AIWATCHER_DELIVERY_PREVIEW && width === 320) {
+        await page.screenshot({ path: process.env.AIWATCHER_DELIVERY_PREVIEW, fullPage: true });
+      }
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
 });

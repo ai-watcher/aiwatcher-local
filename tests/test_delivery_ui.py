@@ -273,6 +273,10 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(review["objective"]["provenance"], "inferred")
         self.assertEqual(review["objective"]["text"], "Add an evidence-backed delivery review.")
         self.assertIn("confirm before sharing", review["summary_text"])
+        self.assertEqual(review["work_understanding"]["turn_count"], 1)
+        self.assertTrue(review["work_understanding"]["exact_session_link"])
+        self.assertIn("does not prove", review["work_understanding"]["limitation"])
+        self.assertIn("Intent and evidence", review["summary_text"])
 
     def test_delivery_mutations_reject_cross_origin_pages(self) -> None:
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)
