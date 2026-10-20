@@ -161,6 +161,7 @@ from .session_presence import (
     presence_for_sessions,
     tool_label,
 )
+from .work_understanding import build_work_understanding
 from .session_health import (
     ContextHealth,
     analyze_all_sessions,
@@ -3268,8 +3269,16 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
     segments = segment_session_by_prompt(row.source_path)
     turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
     evidence = build_outcome_evidence(row, survival=_survival_for_session(session_id))
+    evidence_json = evidence.to_json()
+    understanding = build_work_understanding(
+        segments,
+        commits=evidence_json.get("commits") or [],
+        files=evidence_json.get("files_touched") or evidence_json.get("changed_files") or [],
+        checks=evidence_json.get("tests") or [],
+        exact_session_link=evidence_json.get("commit_attribution") == "session_bound",
+    )
     try:
-        record_evidence_snapshot(session_id, evidence.to_json())
+        record_evidence_snapshot(session_id, evidence_json)
     except OSError:
         pass
     return {
@@ -3280,7 +3289,8 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
         "prompt_receipts": build_prompt_receipts(segments),
-        "outcome_evidence": evidence.to_json(),
+        "work_understanding": understanding,
+        "outcome_evidence": evidence_json,
         "turn_prompts": turn_prompts,
         "timeline_summary": {
             "events": len(events),
@@ -3788,22 +3798,32 @@ def _finalize_delivery_review(
 ) -> dict[str, object]:
     """Attach transient objective, approval, and current-state facts to a review."""
     objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
+    contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
+    linked_sessions: list[LocalSession] = []
+    seen_session_ids: set[str] = set()
+    for contribution in contributions:
+        if not isinstance(contribution, dict):
+            continue
+        session_id = str(contribution.get("session_id") or "")
+        if not session_id or session_id in seen_session_ids:
+            continue
+        session = _find_session_row(session_id)
+        if session is not None:
+            seen_session_ids.add(session_id)
+            linked_sessions.append(session)
+    linked_sessions.sort(key=lambda row: row.started_at or row.updated_at or MIN_DT)
+    linked_segments: list[dict[str, object]] = []
+    for session in linked_sessions:
+        linked_segments.extend(segment_session_by_prompt(session.source_path, max_chars=700))
     if (
         infer_objective
         and not objective.get("text")
         and objective.get("provenance") != "user_confirmed"
     ):
-        contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
-        for contribution in contributions:
-            if not isinstance(contribution, dict):
-                continue
-            session = _find_session_row(str(contribution.get("session_id") or ""))
-            if session is None:
-                continue
-            segments = segment_session_by_prompt(session.source_path, max_chars=500)
+        for session in linked_sessions:
             prompt = next((
                 str(segment.get("prompt") or "").strip()
-                for segment in segments
+                for segment in segment_session_by_prompt(session.source_path, max_chars=500)
                 if not segment.get("compact_summary") and str(segment.get("prompt") or "").strip()
             ), "")
             if not prompt:
@@ -3829,6 +3849,16 @@ def _finalize_delivery_review(
             if not str(item).startswith("Objective unavailable.")
         ]
     event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    understanding = build_work_understanding(
+        linked_segments,
+        commits=snapshot.get("commit_summaries") or [],
+        files=snapshot.get("changed_files") or [],
+        checks=payload.get("verifications") or [],
+        exact_session_link=bool(linked_sessions),
+    )
+    payload["work_understanding"] = understanding
+    payload["intent_source_hash"] = understanding.get("intent_source_hash") if understanding else None
     payload["ready"] = bool(
         event.get("status") == "confirmed"
         and not payload.get("viewed_at")

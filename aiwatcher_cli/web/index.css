@@ -1845,6 +1845,18 @@
     .delivery-review-evidence summary { cursor: pointer; color: var(--text); }
     .delivery-review-evidence pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
     .delivery-review-detail-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-top: var(--sp-3); }
+    .work-understanding { min-width: 0; }
+    .delivery-understanding { margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+    .work-understanding .section-title { align-items: flex-start; margin-bottom: var(--sp-3); }
+    .work-understanding .section-title h3 { margin: 0; font-size: var(--fs-4); }
+    .work-understanding .section-title p { margin: 4px 0 0; color: var(--muted); line-height: 1.45; }
+    .work-understanding .confidence-chip { white-space: nowrap; }
+    .work-understanding-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); }
+    .work-understanding-grid h4 { margin: 0 0 5px; color: var(--muted); font-size: var(--fs-1); text-transform: uppercase; letter-spacing: 0; }
+    .work-understanding-grid p, .work-understanding-grid ul { margin: 0; font-size: var(--fs-2); line-height: 1.5; overflow-wrap: anywhere; }
+    .work-understanding-grid ul { padding-left: 18px; }
+    .work-understanding .pill-row { margin-top: var(--sp-3); }
+    .evidence-limit { margin: var(--sp-3) 0 0; color: var(--muted); font-size: var(--fs-1); line-height: 1.45; }
     .delivery-review-privacy { margin: var(--sp-3) 0 0; color: var(--muted); font-size: var(--fs-1); }
     .receipts-all { margin-top: var(--sp-3); }
     .receipts-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--sp-2) var(--sp-4); margin-bottom: 6px; font-size: var(--fs-1); color: var(--muted); }
@@ -2375,6 +2387,7 @@
       .agent-map-layout { grid-template-columns: 1fr; }
       .agent-detail-pane { border-left: 0; border-top: 1px solid var(--line); }
       .delivery-review-grid { grid-template-columns: 1fr 1fr; }
+      .work-understanding-grid { grid-template-columns: 1fr 1fr; }
       .delivery-review-create { grid-template-columns: 1fr 1fr; }
       .delivery-review-create button { grid-column: 1 / -1; justify-self: start; }
       .bar-row { grid-template-columns: 1fr; gap: var(--sp-1); }
@@ -2407,6 +2420,7 @@
       .delivery-review-create { grid-template-columns: 1fr; }
       .delivery-review-create button { grid-column: auto; width: 100%; }
       .delivery-review-grid { grid-template-columns: 1fr; }
+      .work-understanding-grid { grid-template-columns: 1fr; }
       .delivery-review-actions { align-items: stretch; flex-direction: column; }
       .delivery-review-actions button { width: 100%; }
       .sessions-table-wrap { overflow: visible; }

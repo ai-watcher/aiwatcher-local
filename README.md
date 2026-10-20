@@ -252,6 +252,13 @@ hash, and timestamp, and becomes stale when the checkout HEAD or evidence change
 When an exact commit receipt links a delivery to a local session, Prove may
 re-read the first user prompt and show it as **inferred**; it remains explicitly
 unconfirmed until the developer accepts or replaces it and approves the summary.
+The review also connects the opening objective, latest observed request, turn
+statistics, commit subjects, changed areas, and exact-state checks. The same
+bounded review appears when you open a recently completed run from Companion.
+This is evidence for developer confirmation, not a claim that AIWatcher proved
+every prose requirement was implemented. Prompt text is read only for the local
+review and is not retained in the receipt; approval is bound to its hash and
+becomes stale if the linked intent or Git evidence changes.
 
 The Prove view can also review a checkout before it is pushed. That result is
 labelled **Local candidate** and never triggers a delivery-ready signal. The

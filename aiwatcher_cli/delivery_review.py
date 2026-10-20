@@ -382,9 +382,20 @@ def hydrate_persisted_receipt(receipt: dict[str, Any], event: dict[str, Any] | N
         snapshot["changed_files"] = list(files)
         snapshot["lines_added"] = added
         snapshot["lines_removed"] = removed
+        summaries = []
+        for sha in snapshot.get("commit_shas") or []:
+            value = _git_text(repo, ["show", "-s", "--format=%H%x1f%s", str(sha)])
+            if not value:
+                continue
+            full_sha, separator, subject = value.partition("\x1f")
+            summaries.append({"sha": full_sha[:12], "subject": subject.strip() if separator else ""})
+            if len(summaries) >= 5:
+                break
+        snapshot["commit_summaries"] = summaries
         snapshot["evidence_available"] = True
     else:
         snapshot["changed_files"] = []
+        snapshot["commit_summaries"] = []
         snapshot["evidence_available"] = False
     payload["snapshot"] = snapshot
     return payload
@@ -434,6 +445,7 @@ def work_receipt_evidence_hash(
             for row in contributions if isinstance(row, dict)
         ],
         "workflow": workflow,
+        "intent_source_hash": payload.get("intent_source_hash"),
         "attention": [str(item) for item in payload.get("attention", []) if isinstance(item, str)],
     }
     encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -468,11 +480,34 @@ def format_work_receipt(receipt: WorkReceipt | dict[str, Any]) -> str:
     event = payload.get("event") or {}
     checks = payload.get("verifications") or []
     workflow = payload.get("workflow") or {}
+    understanding = payload.get("work_understanding") or {}
     lines = ["AIWatcher Delivery Review", ""]
     objective_text = str(objective.get("text") or "Unknown; confirm before sharing.")
     if objective.get("provenance") == "inferred" and objective.get("text"):
         objective_text += "\nInferred from a linked session; confirm before sharing."
     lines.extend(("Objective", objective_text, ""))
+    if understanding:
+        lines.append("Intent and evidence")
+        latest = str(understanding.get("latest_request") or "")
+        if understanding.get("latest_request_differs") and latest:
+            lines.append(f"Latest observed request: {latest}")
+        lines.append(
+            f"{int(understanding.get('turn_count') or 0)} user turn(s); "
+            f"{int(understanding.get('commit_count') or 0)} linked commit summary item(s); "
+            f"{int(understanding.get('passed_check_count') or 0)} exact passing check(s)."
+        )
+        subjects = [
+            str(row.get("subject") or "").strip()
+            for row in understanding.get("commits") or []
+            if isinstance(row, dict) and str(row.get("subject") or "").strip()
+        ]
+        if subjects:
+            lines.append("Observed commits: " + "; ".join(subjects[:5]))
+        areas = [str(item) for item in understanding.get("changed_areas") or [] if str(item)]
+        if areas:
+            lines.append("Changed areas: " + ", ".join(areas))
+        lines.append(str(understanding.get("limitation") or "Confirm requirement coverage before sharing."))
+        lines.append("")
     destination = event.get("pull_request_url") or event.get("remote_ref") or snapshot.get("upstream") or "remote status unknown"
     lines.extend((
         "Delivered",
