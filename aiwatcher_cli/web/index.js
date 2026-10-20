@@ -4042,11 +4042,15 @@ function renderCompanionSettings(prefs) {
   const finishedExpanded = settings.finished_sessions === 'expanded';
   const freshStartContext = settings.fresh_start_context !== false;
   const batchFinished = settings.batch_finished_sessions !== false;
+  const motionMode = ['quiet', 'standard', 'expressive'].includes(settings.motion_mode) ? settings.motion_mode : 'standard';
   return `<form class="ai-assist-fields" id="companionSettingsForm" onsubmit="event.preventDefault(); saveCompanionSettings();">
+    <fieldset class="companion-motion"><legend>Motion</legend><div class="companion-motion-options">
+      ${['quiet', 'standard', 'expressive'].map(mode => `<label><input type="radio" name="companionMotion" value="${mode}" ${motionMode === mode ? 'checked' : ''}><span>${mode[0].toUpperCase() + mode.slice(1)}</span></label>`).join('')}
+    </div></fieldset>
     <label class="check-row"><input id="companionBlockedSessions" type="checkbox" ${blockedSessions ? 'checked' : ''}> Waiting-on-you work alerts in Companion</label>
     <label class="check-row"><input id="companionFreshStartContext" type="checkbox" ${freshStartContext ? 'checked' : ''}> Fresh Start context reviews in Companion</label>
-    <label class="check-row"><input id="companionFinishedExpanded" type="checkbox" ${finishedExpanded ? 'checked' : ''}> Open Companion when a run completes</label>
-    <label class="check-row"><input id="companionBatchFinished" type="checkbox" ${batchFinished ? 'checked' : ''}> Batch completed runs</label>
+    <label class="check-row"><input id="companionFinishedExpanded" type="checkbox" ${finishedExpanded ? 'checked' : ''}> Open Companion when a run becomes quiet</label>
+    <label class="check-row"><input id="companionBatchFinished" type="checkbox" ${batchFinished ? 'checked' : ''}> Batch recently quiet runs</label>
     <div class="copy-row"><button class="btn-primary" type="submit">Save Companion settings</button></div>
   </form>`;
 }
@@ -4057,6 +4061,7 @@ async function saveCompanionSettings() {
     fresh_start_context: document.getElementById('companionFreshStartContext').checked,
     finished_sessions: document.getElementById('companionFinishedExpanded').checked ? 'expanded' : 'badge_only',
     batch_finished_sessions: document.getElementById('companionBatchFinished').checked,
+    motion_mode: document.querySelector('input[name="companionMotion"]:checked')?.value || 'standard',
   };
   try {
     const res = await fetch('/api/companion-preferences', {

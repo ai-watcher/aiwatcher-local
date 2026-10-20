@@ -1627,6 +1627,7 @@ class SettingsTest(unittest.TestCase):
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
 
     def test_the_duplicate_coverage_view_is_gone(self):
         # 36 of its 38 sentences were already in Settings, and its only entry
@@ -1681,6 +1682,12 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("Automatically configure commit tracking", self.js)
         self.assertIn("One repository hook covers every branch and linked worktree", self.js)
         self.assertIn("fetch('/api/delivery-tracking'", self.js)
+
+    def test_companion_motion_is_a_three_mode_persisted_control(self):
+        self.assertIn("['quiet', 'standard', 'expressive']", self.js)
+        self.assertIn('name="companionMotion"', self.js)
+        self.assertIn("motion_mode:", self.js)
+        self.assertIn(".companion-motion-options", self.css)
 
     def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
