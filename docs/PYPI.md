@@ -10,7 +10,7 @@ completed or stale work deserves a cleanup review.
 **No account required. Local by default. No Python runtime dependencies.**
 Optional AI Assist requires configuration and an explicit workflow action.
 
-![Illustrated AIWatcher Home preview with sample session data](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/main/docs/readme-home-light.png)
+![Illustrated AIWatcher Home preview with sample session data](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-home-light.png)
 
 *Illustrated product preview with sample data. The installed UI may differ.*
 

@@ -14,7 +14,7 @@ unless you explicitly configure optional AI Assist.
 
 *Illustrated Home preview; sample data, not a live session.*
 
-![AIWatcher Local home dashboard illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/main/docs/readme-home-light.png)
+![AIWatcher Local home dashboard illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-home-light.png)
 
 ## Contents
 
@@ -55,7 +55,7 @@ context:
 
 *Illustrated Plan preview; sample data.*
 
-![AIWatcher Plan prompt gate illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/main/docs/readme-plan-light.png)
+![AIWatcher Plan prompt gate illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-plan-light.png)
 
 ## Why Developers Use It
 
