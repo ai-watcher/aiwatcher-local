@@ -934,6 +934,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.workingCount = 0
         self.finishedCount = 0
         self.reviewCount = 0
+        self.activityTone = ""
         self.skipState = ""
         self.skipSessionID = ""
         self.skipProject = ""
@@ -2215,7 +2216,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
 
         CATransaction.begin()
-        CATransaction.setAnimationDuration(reduceMotion ? 0 : 0.22)
+        CATransaction.setAnimationDuration((reduceMotion || motionMode == "quiet") ? 0 : 0.22)
         collapsedFacePanel.opacity = stateName == "offline" ? 0.62 : 1.0
         collapsedLeftEye.backgroundColor = eyeColor.cgColor
         collapsedRightEye.backgroundColor = eyeColor.cgColor
@@ -2223,7 +2224,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapsedRightEye.frame = CGRect(x: 9.0 + gaze.x, y: 4.0 + gaze.y, width: 2.8, height: 1.45)
         CATransaction.commit()
 
-        if blink && !reduceMotion && workingCount == 0 && !needsAttention && stateName != "offline" {
+        if blink && !reduceMotion && motionMode != "quiet" && workingCount == 0 && !needsAttention && stateName != "offline" {
             let close = CAKeyframeAnimation(keyPath: "transform.scale.y")
             close.values = [1.0, 0.12, 1.0]
             close.keyTimes = [0.0, 0.45, 1.0]
@@ -2301,16 +2302,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapsedBlueRing.borderColor = ringColor.cgColor
         brandBlueRing.borderColor = ringColor.cgColor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let shouldOrbit = collapsed && window.isVisible && workingCount > 0 && !needsAttention && !reduceMotion && motionMode != "quiet"
-        orbitLayer.isHidden = !shouldOrbit
-        if shouldOrbit && orbitLayer.animation(forKey: "orbit") == nil {
+        let showOrbit = collapsed && window.isVisible && workingCount > 0 && !needsAttention
+        let animateOrbit = showOrbit && !reduceMotion && motionMode != "quiet"
+        orbitLayer.isHidden = !showOrbit
+        if animateOrbit && orbitLayer.animation(forKey: "orbit") == nil {
             let spin = CABasicAnimation(keyPath: "transform.rotation.z")
             spin.fromValue = 0
             spin.toValue = -2 * Double.pi
             spin.duration = 2.8
             spin.repeatCount = .infinity
             orbitLayer.add(spin, forKey: "orbit")
-        } else if !shouldOrbit {
+        } else if !animateOrbit {
             orbitLayer.removeAnimation(forKey: "orbit")
         }
         // The rim outranks the orbit arc the way attention outranks running.
@@ -3514,6 +3516,7 @@ def run_native_presence(
         working_count_var.set(0)
         finished_count_var.set(0)
         review_count_var.set(0)
+        activity_tone_var.set("")
         skip_state_var.set("")
         skip_session_id_var.set("")
         skip_project_var.set("")
