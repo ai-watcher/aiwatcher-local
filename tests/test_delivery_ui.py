@@ -286,11 +286,19 @@ class DeliveryReviewApiTests(unittest.TestCase):
         identity = resolve_git_identity(str(self.repo))
         head = git(self.repo, "rev-parse", "HEAD")
         source = self.root / "agent-child.jsonl"
-        source.write_text(json.dumps({
-            "uuid": "prompt-1", "type": "user", "sessionId": "agent-child",
-            "timestamp": "2026-10-09T12:00:00Z",
-            "message": {"content": "Review only the authentication files."},
-        }) + "\n", encoding="utf-8")
+        source.write_text("\n".join((
+            json.dumps({
+                "type": "session_meta", "payload": {
+                    "id": "agent-child", "cwd": str(self.repo),
+                    "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-session"}}},
+                },
+            }),
+            json.dumps({
+                "uuid": "prompt-1", "type": "user", "sessionId": "agent-child",
+                "timestamp": "2026-10-09T12:00:00Z",
+                "message": {"content": "Review only the authentication files."},
+            }),
+        )) + "\n", encoding="utf-8")
         local_state.record_commit_receipt({
             "sha": head, "checkout_path": identity.checkout_path,
             "repository_id": identity.repository_id,
@@ -307,7 +315,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             project_path=str(self.repo), raw_cwd=str(self.repo),
         )
 
-        with patch.object(ui, "_known_delegated_session_ids", return_value={"agent-child"}), patch.object(
+        with patch.object(ui, "_known_delegated_session_ids", return_value=set()), patch.object(
             ui, "_find_session_row", return_value=session,
         ):
             review = ui.build_delivery_reviews()["reviews"][0]
@@ -316,6 +324,20 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(review["work_understanding"]["turn_count"], 0)
         self.assertEqual(review["work_understanding"]["excluded_delegated_sessions"], 1)
         self.assertEqual(review["work_understanding"]["confidence"], "low")
+
+    def test_structural_codex_user_session_remains_eligible_for_intent(self) -> None:
+        source = self.root / "codex-user.jsonl"
+        source.write_text(json.dumps({
+            "type": "session_meta", "payload": {
+                "id": "codex-user", "cwd": str(self.repo), "source": "cli",
+            },
+        }) + "\n", encoding="utf-8")
+        session = LocalSession(
+            session_id="codex-user", tool="codex-cli", source_path=str(source),
+            project_path=str(self.repo), raw_cwd=str(self.repo),
+        )
+
+        self.assertFalse(ui._session_is_delegated(session, set()))
 
     def test_only_commits_with_receipts_are_marked_session_linked(self) -> None:
         identity = resolve_git_identity(str(self.repo))
