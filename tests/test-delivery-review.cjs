@@ -37,7 +37,7 @@ function review(status = 'candidate') {
     work_understanding: {
       opening_objective: 'Deliver exact review evidence.', latest_request: 'Bind approval to HEAD.',
       latest_request_differs: true, turn_count: 3, latest_turn: { model_calls: 2, tool_calls: 4 },
-      commits: [{ sha: 'a'.repeat(12), subject: 'Bind approval to Git evidence' }],
+      commits: [{ sha: 'a'.repeat(12), subject: 'Bind approval to Git evidence', session_linked: true }],
       changed_areas: ['src'], confidence: 'medium', alignment_label: 'Confirm requirement coverage.',
       limitation: 'AIWatcher does not prove requirement completion.',
     },
@@ -79,6 +79,7 @@ test('review cards distinguish exact verification from stale checks', () => {
   assert.match(card, /Deliver exact review evidence/);
   assert.match(card, /src\/app.py/);
   assert.match(card, /Bind approval to HEAD/);
+  assert.match(card, /session-linked/);
   assert.match(card, /does not prove requirement completion/);
   assert.match(card, /Confirm objective &amp; approve|Confirm objective & approve/);
   assert.match(card, /<button[^>]*disabled>Copy PR summary<\/button>/);

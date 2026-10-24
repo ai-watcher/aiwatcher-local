@@ -27,6 +27,8 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(self.state)})
         self.env.start()
         self.addCleanup(self.env.stop)
+        with ui._DELEGATED_SESSION_CACHE_LOCK:
+            ui._DELEGATED_SESSION_CACHE.update({"expires_at": 0.0, "session_ids": set()})
         self.repo = self.root / "repo"
         self.repo.mkdir()
         git(self.repo, "init", "-b", "main")
@@ -267,7 +269,9 @@ class DeliveryReviewApiTests(unittest.TestCase):
             started_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
         )
 
-        with patch.object(ui, "_find_session_row", return_value=session):
+        with patch.object(ui, "_known_delegated_session_ids", return_value=set()), patch.object(
+            ui, "_find_session_row", return_value=session,
+        ):
             review = ui.build_delivery_reviews()["reviews"][0]
 
         self.assertEqual(review["objective"]["provenance"], "inferred")
@@ -277,6 +281,118 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertTrue(review["work_understanding"]["exact_session_link"])
         self.assertIn("does not prove", review["work_understanding"]["limitation"])
         self.assertIn("Intent and evidence", review["summary_text"])
+
+    def test_delegated_agent_prompt_is_not_presented_as_developer_intent(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        source = self.root / "agent-child.jsonl"
+        source.write_text(json.dumps({
+            "uuid": "prompt-1", "type": "user", "sessionId": "agent-child",
+            "timestamp": "2026-10-09T12:00:00Z",
+            "message": {"content": "Review only the authentication files."},
+        }) + "\n", encoding="utf-8")
+        local_state.record_commit_receipt({
+            "sha": head, "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id, "session_id": "agent-child", "source_id": "commit-child",
+        })
+        build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-child", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        session = LocalSession(
+            session_id="agent-child", tool="codex-cli", source_path=str(source),
+            project_path=str(self.repo), raw_cwd=str(self.repo),
+        )
+
+        with patch.object(ui, "_known_delegated_session_ids", return_value={"agent-child"}), patch.object(
+            ui, "_find_session_row", return_value=session,
+        ):
+            review = ui.build_delivery_reviews()["reviews"][0]
+
+        self.assertIsNone(review["objective"]["text"])
+        self.assertEqual(review["work_understanding"]["turn_count"], 0)
+        self.assertEqual(review["work_understanding"]["excluded_delegated_sessions"], 1)
+        self.assertEqual(review["work_understanding"]["confidence"], "low")
+
+    def test_only_commits_with_receipts_are_marked_session_linked(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        linked_head = git(self.repo, "rev-parse", "HEAD")
+        local_state.record_commit_receipt({
+            "sha": linked_head, "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-linked",
+        })
+        (self.repo / "maintenance.txt").write_text("unrelated\n", encoding="utf-8")
+        git(self.repo, "add", "maintenance.txt")
+        git(self.repo, "commit", "-m", "unrelated maintenance")
+        source = self.root / "session.jsonl"
+        source.write_text(json.dumps({
+            "uuid": "prompt-1", "type": "user", "sessionId": "session-1",
+            "timestamp": "2026-10-09T12:00:00Z", "message": {"content": "Implement feature."},
+        }) + "\n", encoding="utf-8")
+        build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-partial", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        session = LocalSession(session_id="session-1", tool="claude-code", source_path=str(source))
+
+        with patch.object(ui, "_known_delegated_session_ids", return_value=set()), patch.object(
+            ui, "_find_session_row", return_value=session,
+        ):
+            understanding = ui.build_delivery_reviews()["reviews"][0]["work_understanding"]
+
+        self.assertEqual(understanding["commit_count"], 2)
+        self.assertEqual(understanding["linked_commit_count"], 1)
+        self.assertEqual([row["session_linked"] for row in understanding["commits"]], [True, False])
+
+    def test_approval_becomes_stale_when_a_middle_intent_turn_changes(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        source = self.root / "session.jsonl"
+
+        def write_turns(middle: str) -> None:
+            rows = [
+                ("1", "2026-10-09T12:00:00Z", "Implement delivery review."),
+                ("2", "2026-10-09T12:01:00Z", middle),
+                ("3", "2026-10-09T12:02:00Z", "Keep the final summary concise."),
+            ]
+            source.write_text("".join(json.dumps({
+                "uuid": row_id, "type": "user", "sessionId": "session-1",
+                "timestamp": stamp, "message": {"content": prompt},
+            }) + "\n" for row_id, stamp, prompt in rows), encoding="utf-8")
+
+        write_turns("Require audit logging.")
+        local_state.record_commit_receipt({
+            "sha": head, "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-intent",
+        })
+        build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-intent", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        session = LocalSession(session_id="session-1", tool="claude-code", source_path=str(source))
+
+        with patch.object(ui, "_known_delegated_session_ids", return_value=set()), patch.object(
+            ui, "_find_session_row", return_value=session,
+        ):
+            review = ui.build_delivery_reviews()["reviews"][0]
+            approved = ui.approve_delivery_review({
+                "receipt_id": review["receipt_id"], "evidence_hash": review["evidence_hash"],
+                "objective": review["objective"]["text"], "confirmed": True,
+            })
+            self.assertTrue(approved["approval_valid"])
+            write_turns("Do not add audit logging.")
+            stale = ui.build_delivery_reviews()["reviews"][0]
+
+        self.assertFalse(stale["approval_valid"])
 
     def test_delivery_mutations_reject_cross_origin_pages(self) -> None:
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)

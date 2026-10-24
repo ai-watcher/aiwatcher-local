@@ -493,7 +493,8 @@ def format_work_receipt(receipt: WorkReceipt | dict[str, Any]) -> str:
             lines.append(f"Latest observed request: {latest}")
         lines.append(
             f"{int(understanding.get('turn_count') or 0)} user turn(s); "
-            f"{int(understanding.get('commit_count') or 0)} linked commit summary item(s); "
+            f"{int(understanding.get('linked_commit_count') or 0)} session-linked of "
+            f"{int(understanding.get('commit_count') or 0)} observed commit summary item(s); "
             f"{int(understanding.get('passed_check_count') or 0)} exact passing check(s)."
         )
         subjects = [

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
@@ -47,6 +49,15 @@ def _changed_areas(files: Iterable[object]) -> list[str]:
     return areas
 
 
+def _turn_timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 def build_work_understanding(
     segments: Iterable[dict[str, object]],
     *,
@@ -54,14 +65,22 @@ def build_work_understanding(
     files: Iterable[object] = (),
     checks: Iterable[dict[str, object]] = (),
     exact_session_link: bool = False,
+    linked_commit_shas: Iterable[object] = (),
+    excluded_delegated_sessions: int = 0,
 ) -> dict[str, Any] | None:
     """Connect transient intent to observed work without claiming completion."""
     turns = [
-        dict(row) for row in segments
+        {**row, "_input_order": index} for index, row in enumerate(segments)
         if isinstance(row, dict)
         and not row.get("compact_summary")
         and _clean_text(row.get("prompt"))
     ]
+    turns.sort(key=lambda row: (
+        _turn_timestamp(row.get("at")) is None,
+        _turn_timestamp(row.get("at")) or 0,
+        int(row.get("_input_order") or 0),
+    ))
+    linked_shas = {str(value or "").strip().lower() for value in linked_commit_shas if str(value or "").strip()}
     commit_rows = []
     for row in commits:
         if not isinstance(row, dict):
@@ -69,7 +88,15 @@ def build_work_understanding(
         subject = _clean_text(row.get("subject"), 240)
         sha = _clean_text(row.get("sha"), 64)
         if subject or sha:
-            commit_rows.append({"sha": sha, "subject": subject})
+            normalized_sha = sha.lower()
+            session_linked = bool(
+                exact_session_link
+                or (
+                    normalized_sha
+                    and any(value.startswith(normalized_sha) or normalized_sha.startswith(value) for value in linked_shas)
+                )
+            )
+            commit_rows.append({"sha": sha, "subject": subject, "session_linked": session_linked})
         if len(commit_rows) >= MAX_COMMITS:
             break
     file_rows = [str(value) for value in files if str(value or "").strip()]
@@ -86,8 +113,9 @@ def build_work_understanding(
         if str(row.get("status") or "").lower() == "passed"
         and (row.get("exact_state") is True or row.get("authoritative") is True)
     ]
-    exact_commits = bool(commit_rows and exact_session_link)
-    if exact_commits and passed_checks:
+    linked_commit_count = sum(1 for row in commit_rows if row["session_linked"])
+    exact_commits = linked_commit_count > 0
+    if turns and exact_commits and passed_checks:
         confidence = "medium"
         alignment_label = "Intent and exact-state evidence are connected; confirm requirement coverage."
     elif commit_rows or file_rows:
@@ -97,7 +125,14 @@ def build_work_understanding(
         confidence = "low"
         alignment_label = "No code delivery is linked yet; review the turn before treating it as complete."
 
-    intent_seed = "\0".join((opening, latest, str(len(turns))))
+    intent_seed = json.dumps([
+        {
+            "session_id": str(row.get("session_id") or ""),
+            "at": str(row.get("at") or ""),
+            "prompt": _clean_text(row.get("prompt"), 2_000),
+        }
+        for row in turns
+    ], sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return {
         "opening_objective": opening or None,
         "latest_request": latest or None,
@@ -112,10 +147,12 @@ def build_work_understanding(
         },
         "commits": commit_rows,
         "commit_count": len(commit_rows),
+        "linked_commit_count": linked_commit_count,
         "changed_file_count": len(file_rows),
         "changed_areas": _changed_areas(file_rows),
         "passed_check_count": len(passed_checks),
-        "exact_session_link": bool(exact_session_link),
+        "exact_session_link": exact_commits,
+        "excluded_delegated_sessions": max(0, int(excluded_delegated_sessions)),
         "confidence": confidence,
         "alignment_status": "confirmation_required",
         "alignment_label": alignment_label,

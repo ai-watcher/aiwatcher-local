@@ -5074,8 +5074,8 @@ function renderWorkUnderstanding(review, delivery = false) {
     : '';
   const commits = (review.commits || []).filter(row => row && (row.subject || row.sha));
   const commitList = commits.length
-    ? `<ul>${commits.map(row => `<li>${row.subject ? esc(row.subject) : 'Commit'}${row.sha ? ` <span class="sub">${esc(row.sha)}</span>` : ''}</li>`).join('')}</ul>`
-    : '<p>No commit subject is linked to this review yet.</p>';
+    ? `<ul>${commits.map(row => `<li>${row.subject ? esc(row.subject) : 'Commit'}${row.sha ? ` <span class="sub">${esc(row.sha)}</span>` : ''} <span class="sub">${row.session_linked ? 'session-linked' : 'range only'}</span></li>`).join('')}</ul>`
+    : '<p>No commit subject was observed for this review.</p>';
   const areas = (review.changed_areas || []).length
     ? `<p class="sub">Changed areas: ${review.changed_areas.map(esc).join(', ')}</p>`
     : '';
