@@ -257,8 +257,9 @@ statistics, commit subjects, changed areas, and exact-state checks. The same
 bounded review appears when you open a recently completed run from Companion.
 This is evidence for developer confirmation, not a claim that AIWatcher proved
 every prose requirement was implemented. Prompt text is read only for the local
-review and is not retained in the receipt; approval is bound to its hash and
-becomes stale if the linked intent or Git evidence changes.
+review and is not retained in the receipt; approval is bound to the complete
+reviewed linked-intent snapshot and becomes stale if that snapshot or Git
+evidence changes.
 
 The Prove view can also review a checkout before it is pushed. That result is
 labelled **Local candidate** and never triggers a delivery-ready signal. The

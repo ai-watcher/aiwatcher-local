@@ -118,6 +118,8 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         stored = local_state.recent_work_receipts()[0]
         self.assertIsNone(stored["objective"]["text"])
         self.assertEqual(stored["snapshot"]["changed_files"], [])
+        self.assertNotIn("work_understanding", stored)
+        self.assertNotIn("Add a deterministic delivery review.", str(stored))
         event = local_state.recent_delivery_events()[0]
         hydrated = hydrate_persisted_receipt(stored, event)
         self.assertEqual(hydrated["snapshot"]["changed_files"], ["feature.py"])
