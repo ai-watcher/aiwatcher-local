@@ -581,6 +581,7 @@ class StartCommandCliTests(unittest.TestCase):
         with (
             patch.object(cli, "record_watcher_heartbeat") as heartbeat,
             patch.object(cli, "clear_watcher_heartbeat") as clear,
+            patch.object(cli, "delivery_tracking_settings", return_value={"enabled": False}),
             patch.object(cli, "scan_all", side_effect=AssertionError("companion heartbeat must not scan")),
             patch.object(cli, "scan_all_events", side_effect=AssertionError("companion heartbeat must not scan")),
             patch.object(cli.time_module, "sleep", side_effect=KeyboardInterrupt),
@@ -592,6 +593,26 @@ class StartCommandCliTests(unittest.TestCase):
             pid=os.getpid(), mode="companion", interval_seconds=30, notify=False, overlay=True,
         )
         clear.assert_called_once_with(pid=os.getpid())
+
+    def test_companion_heartbeat_syncs_delivery_tracking_when_enabled(self) -> None:
+        session = SimpleNamespace(session_id="one")
+        event = SimpleNamespace(session_id="one", raw_cwd="/repo")
+        config = {"enabled": True, "enabled_at": "2026-10-16T00:00:00Z"}
+        with (
+            patch.object(cli, "record_watcher_heartbeat"),
+            patch.object(cli, "clear_watcher_heartbeat"),
+            patch.object(cli, "delivery_tracking_settings", return_value=config),
+            patch.object(cli, "scan_all", return_value=[session]) as scan_sessions,
+            patch.object(cli, "scan_all_events", return_value=[event]) as scan_events,
+            patch.object(cli, "sync_delivery_tracking") as sync,
+            patch.object(cli.time_module, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = cli._run_companion_heartbeat(30)
+
+        self.assertEqual(result, 0)
+        scan_sessions.assert_called_once()
+        scan_events.assert_called_once()
+        sync.assert_called_once_with([session, event], force=False, config=config)
 
     def test_companion_heartbeat_clears_state_after_unexpected_exception(self) -> None:
         with (
@@ -6684,6 +6705,23 @@ class IntegrationConfigTests(unittest.TestCase):
             command = cli._cli_command_for_current_file()
         self.assertEqual(command, "/home/me/.local/bin/aiwatcher")
         self.assertNotIn("PYTHONPATH=", command)
+
+    def test_commit_hook_dry_run_reports_active_custom_hook_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subprocess.run(["git", "-C", temp_dir, "init", "-b", "main"], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", temp_dir, "config", "core.hooksPath", ".githooks"],
+                check=True,
+                capture_output=True,
+            )
+            args = SimpleNamespace(repo=temp_dir, command="aiwatcher", write=False)
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                result = cli.command_install_commit_hook(args)
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn(os.path.join(".githooks", "post-commit"), output)
+        self.assertNotIn(os.path.join(".git", "hooks", "post-commit"), output)
 
     def test_public_hook_command_falls_back_to_module_entrypoint(self) -> None:
         with patch.object(cli.shutil, "which", return_value=None):

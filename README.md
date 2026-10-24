@@ -104,6 +104,14 @@ Console in your browser. Your normal command after the first setup is simply:
 aiwatcher start --open-ui
 ```
 
+In **Settings → General → Delivery tracking**, enable automatic tracking once.
+AIWatcher then configures repositories as they appear in local AI sessions;
+you do not need to repeat setup for each branch or linked worktree. The CLI
+fallback for a headless machine is `aiwatcher delivery-tracking enable`.
+Repositories with a custom or pre-existing `post-commit` hook are left
+unchanged and shown as needing review. Companion and dashboard refreshes keep
+discovering new repositories in bounded, recent-first batches.
+
 If `pipx` is not installed yet, expand [Other Install Methods](#other-install-methods)
 for short platform-specific instructions. Do not clone the repository just to
 use AIWatcher.
@@ -216,6 +224,14 @@ source checkout has disappeared; reinstall the hook with the same gated command
 to repair it without disabling Prompt Gate.
 
 ## Review A Delivery
+
+Automatic delivery tracking must be enabled once in Settings. It records commit
+facts in observed Git repositories and keeps its marked hook block current
+without replacing custom or pre-existing hooks. Those repositories are shown
+as needing review. One repository hook covers all of that repository's branches
+and linked worktrees. Exact commit-to-session linkage is shown only when the AI
+host exposes a session ID. Hook configuration is not execution proof; the first
+successful receipt proves the hook actually ran.
 
 Capture verification against the exact Git state, then push through AIWatcher:
 
