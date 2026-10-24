@@ -161,6 +161,7 @@ from .session_presence import (
     presence_for_sessions,
     tool_label,
 )
+from .work_understanding import build_work_understanding
 from .session_health import (
     ContextHealth,
     analyze_all_sessions,
@@ -3268,8 +3269,16 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
     segments = segment_session_by_prompt(row.source_path)
     turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
     evidence = build_outcome_evidence(row, survival=_survival_for_session(session_id))
+    evidence_json = evidence.to_json()
+    understanding = build_work_understanding(
+        segments,
+        commits=evidence_json.get("commits") or [],
+        files=evidence_json.get("files_touched") or evidence_json.get("changed_files") or [],
+        checks=evidence_json.get("tests") or [],
+        exact_session_link=evidence_json.get("commit_attribution") == "session_bound",
+    )
     try:
-        record_evidence_snapshot(session_id, evidence.to_json())
+        record_evidence_snapshot(session_id, evidence_json)
     except OSError:
         pass
     return {
@@ -3280,7 +3289,8 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
         "prompt_receipts": build_prompt_receipts(segments),
-        "outcome_evidence": evidence.to_json(),
+        "work_understanding": understanding,
+        "outcome_evidence": evidence_json,
         "turn_prompts": turn_prompts,
         "timeline_summary": {
             "events": len(events),
@@ -3780,6 +3790,51 @@ def _handoff_options_from_payload(payload: dict[str, object], *, default_type: s
     }
 
 
+_DELEGATED_SESSION_CACHE: dict[str, object] = {"expires_at": 0.0, "session_ids": set()}
+_DELEGATED_SESSION_CACHE_LOCK = threading.Lock()
+
+
+def _known_delegated_session_ids() -> set[str]:
+    """Return hierarchy-backed child session ids without retaining prompt text."""
+    now = time.monotonic()
+    with _DELEGATED_SESSION_CACHE_LOCK:
+        if now < float(_DELEGATED_SESSION_CACHE.get("expires_at") or 0):
+            return set(_DELEGATED_SESSION_CACHE.get("session_ids") or set())
+    try:
+        hierarchy = scan_agent_hierarchy()
+    except (OSError, ValueError):
+        hierarchy = {"sessions": []}
+    delegated: set[str] = set()
+    for group in hierarchy.get("sessions") or []:
+        if not isinstance(group, dict):
+            continue
+        root_id = str(group.get("session_id") or "")
+        for agent in group.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            agent_id = str(agent.get("agent_id") or "")
+            if agent_id and agent_id != root_id and agent.get("parent_agent_id"):
+                delegated.add(agent_id)
+    with _DELEGATED_SESSION_CACHE_LOCK:
+        _DELEGATED_SESSION_CACHE.update({"expires_at": now + 30.0, "session_ids": delegated})
+    return delegated
+
+
+def _session_is_delegated(session: LocalSession, known_ids: set[str]) -> bool:
+    if session.session_id in known_ids:
+        return True
+    path = PurePath(session.source_path) if session.source_path else None
+    if path and path.parent.name == "subagents" and path.name.startswith("agent-"):
+        return True
+    if session.tool.startswith("codex"):
+        role = session_review_identity(session, {}).get("session_role")
+        # Developer intent must come from a structurally identified user session.
+        # Unknown metadata fails closed so a stale or unavailable hierarchy scan
+        # cannot promote a child/approval session's assignment into user intent.
+        return role != "user_session"
+    return False
+
+
 def _finalize_delivery_review(
     payload: dict[str, object],
     event_record: dict[str, object] | None,
@@ -3788,31 +3843,58 @@ def _finalize_delivery_review(
 ) -> dict[str, object]:
     """Attach transient objective, approval, and current-state facts to a review."""
     objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
+    contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
+    linked_sessions: list[LocalSession] = []
+    seen_session_ids: set[str] = set()
+    for contribution in contributions:
+        if not isinstance(contribution, dict):
+            continue
+        session_id = str(contribution.get("session_id") or "")
+        if not session_id or session_id in seen_session_ids:
+            continue
+        session = _find_session_row(session_id)
+        if session is not None:
+            seen_session_ids.add(session_id)
+            linked_sessions.append(session)
+    linked_sessions.sort(key=lambda row: row.started_at or row.updated_at or MIN_DT)
+    delegated_ids = _known_delegated_session_ids() if linked_sessions else set()
+    intent_sessions = [
+        session for session in linked_sessions
+        if not _session_is_delegated(session, delegated_ids)
+    ]
+    excluded_delegated_sessions = len(linked_sessions) - len(intent_sessions)
+    linked_segments: list[dict[str, object]] = []
+    for session in intent_sessions:
+        linked_segments.extend({**segment, "session_id": session.session_id} for segment in segment_session_by_prompt(
+            session.source_path, max_chars=2_000,
+        ))
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    linked_commit_shas = {
+        str(sha)
+        for contribution in contributions if isinstance(contribution, dict)
+        for sha in contribution.get("commit_shas") or []
+        if str(sha or "").strip()
+    }
+    understanding = build_work_understanding(
+        linked_segments,
+        commits=snapshot.get("commit_summaries") or [],
+        files=snapshot.get("changed_files") or [],
+        checks=payload.get("verifications") or [],
+        linked_commit_shas=linked_commit_shas,
+        excluded_delegated_sessions=excluded_delegated_sessions,
+    )
     if (
         infer_objective
         and not objective.get("text")
         and objective.get("provenance") != "user_confirmed"
     ):
-        contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
-        for contribution in contributions:
-            if not isinstance(contribution, dict):
-                continue
-            session = _find_session_row(str(contribution.get("session_id") or ""))
-            if session is None:
-                continue
-            segments = segment_session_by_prompt(session.source_path, max_chars=500)
-            prompt = next((
-                str(segment.get("prompt") or "").strip()
-                for segment in segments
-                if not segment.get("compact_summary") and str(segment.get("prompt") or "").strip()
-            ), "")
-            if not prompt:
-                continue
+        prompt = str((understanding or {}).get("opening_objective") or "").strip()
+        if prompt:
             objective = ObjectiveClaim(
                 provenance="inferred", confidence="low", text=prompt,
             ).to_json()
             payload["objective"] = objective
-            break
     payload["objective_retained"] = bool(objective.get("text"))
     payload["objective_label"] = (
         "Objective inferred from a linked session; confirm before sharing"
@@ -3828,7 +3910,8 @@ def _finalize_delivery_review(
             item for item in (payload.get("attention") or [])
             if not str(item).startswith("Objective unavailable.")
         ]
-    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    payload["work_understanding"] = understanding
+    payload["intent_source_hash"] = understanding.get("intent_source_hash") if understanding else None
     payload["ready"] = bool(
         event.get("status") == "confirmed"
         and not payload.get("viewed_at")

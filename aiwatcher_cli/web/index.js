@@ -4537,6 +4537,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   }
   setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
     ${renderFreshStartCompletion(s) || renderSessionActions(s)}
+    ${renderWorkUnderstanding(s.work_understanding)}
     ${renderVerdict(s)}
     ${outcomeActions}
     ${promptReview}
@@ -5066,6 +5067,37 @@ function deliveryDestination(review) {
   return event.pull_request_url || event.remote_ref || snapshot.upstream || 'Remote destination unknown';
 }
 
+function renderWorkUnderstanding(review, delivery = false) {
+  if (!review) return '';
+  const latest = review.latest_request_differs && review.latest_request
+    ? `<div><h4>Latest request</h4><p>${esc(review.latest_request)}</p></div>`
+    : '';
+  const commits = (review.commits || []).filter(row => row && (row.subject || row.sha));
+  const commitList = commits.length
+    ? `<ul>${commits.map(row => `<li>${row.subject ? esc(row.subject) : 'Commit'}${row.sha ? ` <span class="sub">${esc(row.sha)}</span>` : ''} <span class="sub">${row.session_linked ? 'session-linked' : 'range only'}</span></li>`).join('')}</ul>`
+    : '<p>No commit subject was observed for this review.</p>';
+  const areas = (review.changed_areas || []).length
+    ? `<p class="sub">Changed areas: ${review.changed_areas.map(esc).join(', ')}</p>`
+    : '';
+  const turn = review.latest_turn || {};
+  const metrics = [
+    review.turn_count ? `${review.turn_count} user turn${review.turn_count === 1 ? '' : 's'}` : '',
+    turn.model_calls ? `${turn.model_calls} model call${turn.model_calls === 1 ? '' : 's'} in latest turn` : '',
+    turn.tool_calls ? `${turn.tool_calls} tool call${turn.tool_calls === 1 ? '' : 's'} in latest turn` : '',
+    turn.duration_label ? `${turn.duration_label} observed latest-turn duration` : '',
+  ].filter(Boolean).map(value => `<span class="pill">${esc(value)}</span>`).join('');
+  return `<section class="work-understanding${delivery ? ' delivery-understanding' : ' detail-section'}">
+    <div class="section-title"><div><h3>${delivery ? 'Intent to delivery evidence' : 'What this run appears to contain'}</h3><p>${esc(review.alignment_label || 'Confirm the observed intent against the code evidence.')}</p></div><span class="confidence-chip inferred">${esc(review.confidence || 'low')} confidence</span></div>
+    <div class="work-understanding-grid">
+      <div><h4>Opening objective</h4><p>${esc(review.opening_objective || 'Unavailable from this tool surface.')}</p></div>
+      ${latest}
+      <div><h4>Observed code evidence</h4>${commitList}${areas}</div>
+    </div>
+    ${metrics ? `<div class="pill-row">${metrics}</div>` : ''}
+    <p class="evidence-limit">${esc(review.limitation || '')}</p>
+  </section>`;
+}
+
 function deliveryReviewCard(review) {
   const event = review.event || {};
   const snapshot = review.snapshot || {};
@@ -5110,6 +5142,7 @@ function deliveryReviewCard(review) {
       <div class="delivery-review-block"><h4>Verification</h4>${verification}</div>
       <div class="delivery-review-block"><h4>Workflow evidence</h4>${contribution}</div>
     </div>
+    ${renderWorkUnderstanding(review.work_understanding, true)}
     <details class="delivery-review-evidence"><summary>Changed paths and evidence limits</summary>
       <div class="delivery-review-grid delivery-review-detail-grid">
         <div class="delivery-review-block"><h4>Changed paths</h4>${fileList}</div>

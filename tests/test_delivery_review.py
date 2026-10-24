@@ -13,6 +13,7 @@ from aiwatcher_cli.delivery_review import (
     build_work_receipt,
     format_work_receipt,
     hydrate_persisted_receipt,
+    work_receipt_evidence_hash,
 )
 from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.outcome_evidence import verification_git_fingerprint
@@ -48,6 +49,17 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(self.state)})
         self.env.start()
         self.addCleanup(self.env.stop)
+
+    def test_approval_evidence_changes_when_linked_intent_changes(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="explicit_review", event_status="candidate",
+            event_source="test", persist=False,
+        ).to_json()
+        receipt["intent_source_hash"] = "a" * 64
+        first = work_receipt_evidence_hash(receipt)
+        receipt["intent_source_hash"] = "b" * 64
+
+        self.assertNotEqual(first, work_receipt_evidence_hash(receipt))
 
     def _record_exact_verification(self) -> None:
         identity = resolve_git_identity(str(self.repo))
@@ -106,6 +118,8 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         stored = local_state.recent_work_receipts()[0]
         self.assertIsNone(stored["objective"]["text"])
         self.assertEqual(stored["snapshot"]["changed_files"], [])
+        self.assertNotIn("work_understanding", stored)
+        self.assertNotIn("Add a deterministic delivery review.", str(stored))
         event = local_state.recent_delivery_events()[0]
         hydrated = hydrate_persisted_receipt(stored, event)
         self.assertEqual(hydrated["snapshot"]["changed_files"], ["feature.py"])
