@@ -249,6 +249,8 @@ def _valid_receipt_block(content: str) -> bool:
     executable = os.path.basename(tokens[0]).lower()
     if executable in {"aiwatcher", "aiwatcher.exe"}:
         return len(tokens) >= 2 and tokens[1] == "commit-receipt"
+    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable):
+        return False
     return len(tokens) >= 4 and tokens[1:4] == ["-m", "aiwatcher_cli", "commit-receipt"]
 
 

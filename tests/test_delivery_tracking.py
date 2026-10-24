@@ -277,6 +277,24 @@ class AutomaticDeliveryTrackingTests(unittest.TestCase):
         self.assertEqual(status["needs_attention"], 1)
         self.assertEqual(status["repositories"][0]["issue"], "invalid_aiwatcher_hook")
 
+    def test_command_shaped_fake_hook_is_not_reported_as_tracked(self) -> None:
+        repo = self.root / "repo"
+        init_repo(repo)
+        hook = repo / ".git" / "hooks" / "post-commit"
+        hook.write_text(
+            "#!/bin/sh\n" + COMMIT_HOOK_MARKER + "\n"
+            "false -m aiwatcher_cli commit-receipt\n"
+            "# <<< aiwatcher commit receipt <<<\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+
+        status = delivery_tracking_status([session(repo)])
+
+        self.assertEqual(status["tracked_repositories"], 0)
+        self.assertEqual(status["needs_attention"], 1)
+        self.assertEqual(status["repositories"][0]["issue"], "invalid_aiwatcher_hook")
+
     def test_concurrent_installers_leave_one_complete_marker_block(self) -> None:
         repo = self.root / "repo"
         init_repo(repo)
