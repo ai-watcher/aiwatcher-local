@@ -637,13 +637,15 @@ class NativeOverlayConfigTests(unittest.TestCase):
     def test_the_running_arc_orbits_the_bubble(self) -> None:
         # The owner's pick from the mockup candidates: a short mint arc
         # circling the bubble rim while a session works. Attention outranks
-        # it, and macOS Reduce Motion suppresses it entirely -- the mint ring
-        # alone says running then.
+        # it. Reduce Motion and Quiet keep the arc as a static shape so working
+        # never becomes a color-only state.
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn("orbitLayer", mac)
         self.assertIn('CABasicAnimation(keyPath: "transform.rotation.z")', mac)
         self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
-        self.assertIn('let shouldOrbit = collapsed && window.isVisible && workingCount > 0 && !needsAttention && !reduceMotion && motionMode != "quiet"', mac)
+        self.assertIn('let showOrbit = collapsed && window.isVisible && workingCount > 0 && !needsAttention', mac)
+        self.assertIn('let animateOrbit = showOrbit && !reduceMotion && motionMode != "quiet"', mac)
+        self.assertIn('orbitLayer.isHidden = !showOrbit', mac)
         self.assertIn('orbitLayer.removeAnimation(forKey: "orbit")', mac)
         self.assertIn("self.schedulePulse(after: animate ? 0.8 : (dormant ? 30.0 : 10.0))", mac)
 
@@ -678,6 +680,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("brandMarkView.layer?.addSublayer(expandedMark.mark)", mac)
         self.assertIn("collapsedMarkView.layer?.addSublayer(collapsedFacePanel)", mac)
         self.assertIn("self.workingCount = 0", mac.split("func applyOfflineState")[1][:900])
+        self.assertIn('self.activityTone = ""', mac.split("func applyOfflineState")[1][:900])
+        self.assertIn('CATransaction.setAnimationDuration((reduceMotion || motionMode == "quiet") ? 0 : 0.22)', mac)
+        self.assertIn('blink && !reduceMotion && motionMode != "quiet"', mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("expression_phase_var", tk_source)
@@ -688,6 +693,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("entered_attention or activity_changed or delivered or recovered", tk_source)
         self.assertIn("capstyle=tk.ROUND", tk_source)
         self.assertIn("working_count_var.set(0)", tk_source.split("def apply_offline_state")[1][:900])
+        self.assertIn('activity_tone_var.set("")', tk_source.split("def apply_offline_state")[1][:900])
 
     def test_grouped_rows_actions_motion_and_accessibility_share_one_contract(self) -> None:
         mac = native_overlay.MACOS_SWIFT_PRESENCE
