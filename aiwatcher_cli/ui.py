@@ -3824,7 +3824,15 @@ def _session_is_delegated(session: LocalSession, known_ids: set[str]) -> bool:
     if session.session_id in known_ids:
         return True
     path = PurePath(session.source_path) if session.source_path else None
-    return bool(path and path.parent.name == "subagents" and path.name.startswith("agent-"))
+    if path and path.parent.name == "subagents" and path.name.startswith("agent-"):
+        return True
+    if session.tool.startswith("codex"):
+        role = session_review_identity(session, {}).get("session_role")
+        # Developer intent must come from a structurally identified user session.
+        # Unknown metadata fails closed so a stale or unavailable hierarchy scan
+        # cannot promote a child/approval session's assignment into user intent.
+        return role != "user_session"
+    return False
 
 
 def _finalize_delivery_review(
