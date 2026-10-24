@@ -277,6 +277,7 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/update-status",
     "/api/update-apply",
     "/api/update-auto-check",
+    "/api/companion-usage",
     "/api/companion-preferences",
     "/api/companion-skip",
     "/api/ai-assist-config",
@@ -7939,7 +7940,7 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
 # session's updated_at stamp plus the tokens read then (0 = read but not
 # measurable). A session only changes its transcript when it writes, and
 # writing moves updated_at, so a hit means the 13ms parse can be skipped.
-_PRESSURE_TRANSCRIPT_CACHE: dict[str, tuple[str, int]] = {}
+_PRESSURE_TRANSCRIPT_CACHE: dict[str, tuple[str, int, int, str | None]] = {}
 
 _TRANSIENT_SIGNAL_KINDS = {"loop", "velocity", "runway", "usage_pressure", "prompt_blocked"}
 _TRANSIENT_SIGNAL_LABELS = {
@@ -7954,13 +7955,16 @@ _TRANSIENT_SIGNAL_LABELS = {
 RECENT_SIGNAL_WINDOW_MINUTES = LIVE_WINDOW_MINUTES
 
 
-def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object]:
+def _pressure_block(
+    rows: list[SessionPresence], sessions: list[LocalSession], *, session_id: str | None = None,
+) -> dict[str, object]:
     """Context pressure of the session being worked in, for the resting bar.
 
     The label asks: "how much of this model's context window is the latest
     turn using?" Unit and scope: billed input tokens on the latest single turn
     of the most recently active *working* session -- per-turn, never a
-    cumulative session total under a per-turn label. Compared against the
+    cumulative session total under a per-turn label. The on-demand Usage
+    panel can explicitly select a quiet or inactive session instead. Compared against the
     session model's own window (pricing.context_window), the same figure that the
     runway chart and statusline read, so the surfaces cannot disagree.
     Freshness comes from statusline.read_transcript (one file, ~13ms), cached
@@ -7971,10 +7975,15 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
     """
     working = [
         row for row in rows
-        if row.state == "working" and row.measurable and not row.analyst_run
+        if row.measurable and not row.analyst_run
+        and (row.session_id == session_id if session_id else row.state == "working")
     ]
     if not working:
-        return {"available": False, "reason": "no working session right now"}
+        selected = next((row for row in rows if row.session_id == session_id), None) if session_id else None
+        return {"available": False, "reason": (
+            selected.reason or "context not measurable for this session"
+            if selected else "no working session right now"
+        )}
     target = working[0]
     # Looked up in the rows this poll already holds, not via _find_session_row:
     # that helper falls back to a full rescan, which has no place on a 3-second
@@ -8036,12 +8045,105 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
         "session_id": target.session_id,
         "latest_turn_tokens": latest,
         "pct_of_turn_limit": pct,
+        "model": model or session.model,
         "severity": severity,
         "context_window": window,
         "label": f"{compact_int(latest)} · {pct}% of {compact_int(window)} window",
         "stats_label": " · ".join(stats_parts),
         "stats_detail": "This session so far, API-equivalent cost and total tokens.",
     }
+
+
+COMPANION_USAGE_SESSION_LIMIT = 20
+
+
+def build_companion_usage(session_id: str = "") -> dict[str, object]:
+    """On-demand detail; read at most one transcript, never rescan repositories.
+
+    Local totals cannot reconstruct the tool's prompt/tool/system composition.
+    Keep cumulative usage separate from latest-turn input and model-table limits.
+    No transcript bodies, session titles, or source paths leave this endpoint.
+    """
+    indexed_sessions = _cached_session_rows()
+    indexed_stamps = {row.session_id: row.updated_at for row in indexed_sessions}
+    sessions = _freshened_for_presence(indexed_sessions)
+    rows = presence_for_sessions(sessions)
+    by_id = {session.session_id: session for session in sessions}
+    now = datetime.now(timezone.utc)
+    def recently_observed(row: SessionPresence) -> bool:
+        stamp = by_id[row.session_id].updated_at or by_id[row.session_id].started_at
+        if stamp is None:
+            return False
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return timedelta(0) <= now - stamp <= timedelta(minutes=LIVE_WINDOW_MINUTES)
+
+    recent = [row for row in rows if not row.analyst_run and (
+        row.live or (row.state == "unmeasurable" and recently_observed(row))
+    )]
+    candidates = recent[:COMPANION_USAGE_SESSION_LIMIT]
+    # An explicit selection stays pinned even if its activity falls out of the
+    # live list between opening the picker and refreshing the detail.
+    target = next((row for row in rows if row.session_id == session_id and not row.analyst_run), None) if session_id else next(
+        (row for row in candidates if row.state == "working"), candidates[0] if candidates else None,
+    )
+    if target and target not in candidates:
+        candidates = [target, *candidates[:COMPANION_USAGE_SESSION_LIMIT - 1]]
+    choices = []
+    for row in candidates:
+        session = by_id[row.session_id]
+        project = session.checkout_path or session.project_path
+        name = Path(project).name if project else "Unknown project"
+        choices.append({
+            "session_id": row.session_id,
+            "label": f"{name} · {session.tool} · {row.session_id[:8]} · {row.state}",
+        })
+    payload: dict[str, object] = {
+        "sessions": choices,
+        "total_recent_sessions": len(recent),
+        "session_limit": COMPANION_USAGE_SESSION_LIMIT,
+        "selected": None,
+        "reason": "Selected session is no longer available." if session_id else "No recent sessions observed. Run Scan to refresh local history.",
+        "sampled_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if target is None:
+        return payload
+    session = by_id[target.session_id]
+    pressure = _pressure_block(rows, sessions, session_id=target.session_id)
+    total_in = max(0, session.tokens_in or 0)
+    total_out = max(0, session.tokens_out or 0)
+    total = total_in + total_out
+    context_label = (
+        f"{100 * pressure['latest_turn_tokens'] / pressure['context_window']:.1f}% of model window"
+        if pressure.get("available") else str(pressure.get("reason") or target.reason or "Context unavailable")
+    )
+    indexed_stamp = indexed_stamps.get(target.session_id)
+    payload["reason"] = None
+    payload["selected"] = {
+        "session_id": target.session_id,
+        "project_path": session.checkout_path or session.project_path,
+        "tool": session.tool,
+        "model": pressure.get("model") or session.model or "Unknown model",
+        "state": target.state,
+        "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+        "totals_updated_at": indexed_stamp.isoformat() if indexed_stamp else None,
+        "url": f"/?session={quote(target.session_id, safe='')}",
+        "context": pressure,
+        "context_label": context_label,
+        "context_note": (
+            f"{compact_int(pressure['latest_turn_tokens'])} latest input / {compact_int(pressure['context_window'])} model window. "
+            "Includes cached input. Window is a model reference estimate, not the owning app's live display."
+            if pressure.get("available") else "Context unavailable."
+        ),
+        "usage_label": f"Indexed totals: {compact_int(total)} tokens · {session.agent_calls} model calls · {session.tool_calls} tool calls" if total else "Session token totals not recorded",
+        "input_tokens": total_in,
+        "output_tokens": total_out,
+        "input_label": f"Input: {compact_int(total_in)} · Output: {compact_int(total_out)}" if total else "Input/output totals unavailable",
+        "cache_label": f"Cache read: {compact_int(session.cache_read_tokens)} · Cache write: {compact_int(session.cache_write_tokens)} (included in input)" if total else "Cache counters unavailable",
+        "cost_label": f"API-equivalent estimate: ${session.cost_usd:,.2f}; not provider billing" if session.cost_usd > 0 else "API-equivalent cost unavailable; not provider billing",
+        "breakdown_note": "Totals come from the last local scan and include repeated context across calls. Refresh updates context; Scan refreshes totals. Prompt / tools / agent-context composition is not available.",
+    }
+    return payload
 
 
 # Finished-notice tracking, in this process's memory. "Finished" is a
@@ -9743,6 +9845,13 @@ class UIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/companion-usage":
+            if self._is_cross_origin():
+                self._send(403, json.dumps({"error": "Usage answers only the dashboard's own origin"}), "application/json; charset=utf-8")
+                return
+            session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+            self._send(200, json.dumps(build_companion_usage(session_id)), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/companion-preferences":
             self._send(200, json.dumps(companion_preferences()), "application/json; charset=utf-8")

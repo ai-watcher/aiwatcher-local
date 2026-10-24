@@ -366,8 +366,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertGreaterEqual(min(widths), 216, widths)
         # The width came out of the bar's own budget: the collapse button
         # sits 22pt in from the right edge, so the two move together.
-        self.assertIn("let expandedWidth: CGFloat = 626", mac)
-        self.assertIn("collapseButton.frame = NSRect(x: 604,", mac)
+        self.assertIn("let expandedWidth: CGFloat = 706", mac)
+        self.assertIn("collapseButton.frame = NSRect(x: 684,", mac)
 
     def test_the_title_fits_every_workflow_label(self) -> None:
         # The bar's title carries the preflight planner's workflow label on a
@@ -632,7 +632,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('(hardGate ? "!" : "")', mac)
         self.assertIn("waitingCount <= 0 && reviewCount <= 0 && !hardGate", mac)
         self.assertIn("if isHardGate() && !wasHardGate && collapsed {\n            setCollapsed(false)", mac)
-        auto_collapse = mac.split("func scheduleAutoCollapse")[1][:900]
+        auto_collapse = mac.split("func scheduleAutoCollapse", 1)[1].split("\n    func ", 1)[0]
         self.assertIn("if self.isHardGate() {\n                    return", auto_collapse)
         # The rim replaces the flooded-ground and count-badge treatments the
         # soft states never had; they still draw no rim when expanded.

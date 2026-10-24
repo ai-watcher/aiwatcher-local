@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -571,6 +572,26 @@ final class DraggableButton: NSButton {
     }
 }
 
+final class UsagePanelView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+}
+
+final class UsageMeter: NSView {
+    var doubleValue: Double = 0 { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
+        let portion = min(max(doubleValue, 0), 100) / 100
+        if portion > 0 {
+            NSColor.systemBlue.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: bounds.width * portion, height: bounds.height), xRadius: 4, yRadius: 4).fill()
+        }
+    }
+}
+
 final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var window: NSPanel!
     var rootView: NSView!
@@ -651,12 +672,33 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var meterLabel: NSTextField!
     var statsLabel: NSTextField!
     var signalButton: NSButton!
+    var usageButton: NSButton!
+    var usagePopover: NSPopover?
+    var usagePicker: NSPopUpButton!
+    var usageHeading: NSTextField!
+    var usageIdentity: NSTextField!
+    var usageContext: NSTextField!
+    var usageNote: NSTextField!
+    var usageTotals: NSTextField!
+    var usageInput: NSTextField!
+    var usageCache: NSTextField!
+    var usageCost: NSTextField!
+    var usageBoundary: NSTextField!
+    var usageUpdated: NSTextField!
+    var usageMeter: UsageMeter!
+    var usageOpenButton: NSButton!
+    var usageRows: [[String: Any]] = []
+    var usageSessionID = ""
+    var usageSessionURL = ""
+    var usageRequest = 0
+
     // 46 characters of 9pt subtitle measure ~210pt ("claude-code ·
     // aiwatcher-local · waited 12m 30s" is 208), and at 560 the subtitle
     // had 150 beside the meter, so every compact stage read "...calibrat".
     // The extra 66 goes to the subtitle in every layout; everything to its
     // right shifts by the same 66.
-    let expandedWidth: CGFloat = 626
+    // Usage has its own slot; it never displaces a gate or queue action.
+    let expandedWidth: CGFloat = 706
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
     let maxWaitingRows = 5
@@ -1045,6 +1087,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         expandButton.isHidden = true
         rootView.addSubview(expandButton)
 
+        usageButton = NSButton(title: "Usage", target: self, action: #selector(openUsage))
+        usageButton.bezelStyle = .rounded
+        usageButton.controlSize = .small
+        usageButton.toolTip = "Inspect usage for a specific session without opening the dashboard"
+        rootView.addSubview(usageButton)
+
         // Pre-allocated queue rows for the multi-session waiting state. Built
         // once and toggled by isHidden, matching how every other control here
         // is managed, rather than creating views per poll.
@@ -1130,6 +1178,136 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         updateAppearance()
         schedulePulse()
         refreshState()
+    }
+
+    func usageText(_ parent: NSView, y: CGFloat, height: CGFloat = 22, size: CGFloat = 12, bold: Bool = false) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.frame = NSRect(x: 20, y: y, width: 440, height: height)
+        field.font = NSFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        field.textColor = NSColor.labelColor
+        parent.addSubview(field)
+        return field
+    }
+
+    @objc func openUsage() {
+        if usagePopover?.isShown == true {
+            usagePopover?.performClose(nil)
+            return
+        }
+        autoCollapseToken += 1
+        autoCollapseDeadline = nil
+        let content = NSViewController()
+        content.view = UsagePanelView(frame: NSRect(x: 0, y: 0, width: 480, height: 550))
+        usageHeading = usageText(content.view, y: 512, size: 18, bold: true)
+        usageHeading.stringValue = "Session usage"
+        usagePicker = NSPopUpButton(frame: NSRect(x: 16, y: 478, width: 448, height: 28), pullsDown: false)
+        usagePicker.target = self
+        usagePicker.action = #selector(selectUsageSession)
+        usagePicker.addItem(withTitle: "Loading recent sessions…")
+        content.view.addSubview(usagePicker)
+        usageIdentity = usageText(content.view, y: 432, height: 40)
+        usageContext = usageText(content.view, y: 390, height: 36, size: 24, bold: true)
+        usageMeter = UsageMeter(frame: NSRect(x: 20, y: 374, width: 440, height: 10))
+        content.view.addSubview(usageMeter)
+        usageNote = usageText(content.view, y: 312, height: 54, size: 11)
+        usageTotals = usageText(content.view, y: 282, bold: true)
+        usageInput = usageText(content.view, y: 256)
+        usageCache = usageText(content.view, y: 224, height: 30, size: 11)
+        usageCost = usageText(content.view, y: 192, height: 30, size: 11)
+        usageBoundary = usageText(content.view, y: 122, height: 60, size: 11)
+        usageUpdated = usageText(content.view, y: 56, height: 60, size: 11)
+        usageOpenButton = NSButton(title: "Open session in UI", target: self, action: #selector(openUsageSession))
+        usageOpenButton.frame = NSRect(x: 16, y: 16, width: 170, height: 28)
+        usageOpenButton.bezelStyle = .rounded
+        usageOpenButton.isEnabled = false
+        content.view.addSubview(usageOpenButton)
+        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshUsage))
+        refresh.frame = NSRect(x: 372, y: 16, width: 92, height: 28)
+        refresh.bezelStyle = .rounded
+        content.view.addSubview(refresh)
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = content
+        usagePopover = popover
+        popover.show(relativeTo: usageButton.bounds, of: usageButton, preferredEdge: .minY)
+        // Keep a user selection stable; never silently switch to another run.
+        if usageSessionID.isEmpty { usageSessionID = primarySessionID }
+        refreshUsage()
+    }
+
+    @objc func selectUsageSession() {
+        let index = usagePicker.indexOfSelectedItem
+        guard index >= 0 && index < usageRows.count else { return }
+        usageSessionID = usageRows[index]["session_id"] as? String ?? ""
+        refreshUsage()
+    }
+
+    @objc func openUsageSession() {
+        if !usageSessionURL.isEmpty { openURL(usageSessionURL) }
+    }
+
+    @objc func refreshUsage() {
+        usageRequest += 1
+        let requestID = usageRequest
+        var components = URLComponents(string: "\(dashboardBaseURL)/api/companion-usage")!
+        components.queryItems = [URLQueryItem(name: "session_id", value: usageSessionID)]
+        guard let url = components.url else { return }
+        usageContext.stringValue = "Loading…"
+        usageMeter.isHidden = true
+        usageOpenButton.isEnabled = false
+        for field in [usageIdentity, usageNote, usageTotals, usageInput, usageCache, usageCost, usageBoundary, usageUpdated] {
+            field?.stringValue = ""
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            var payload: [String: Any]? = nil
+            if let data = data { payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
+            let json = payload
+            DispatchQueue.main.async {
+                guard self.usageRequest == requestID else { return }
+                guard (response as? HTTPURLResponse)?.statusCode == 200, let json = json else {
+                    self.usageContext.stringValue = "Usage unavailable"
+                    self.usageNote.stringValue = "Could not reach the local dashboard. Retry with Refresh; monitoring continues independently."
+                    return
+                }
+                self.usageRows = json["sessions"] as? [[String: Any]] ?? []
+                self.usagePicker.removeAllItems()
+                self.usagePicker.addItems(withTitles: self.usageRows.map { $0["label"] as? String ?? "Unknown session" })
+                if self.usageRows.isEmpty { self.usagePicker.addItem(withTitle: "No recent sessions") }
+                guard let selected = json["selected"] as? [String: Any] else {
+                    self.usageContext.stringValue = "Usage unavailable"
+                    self.usageNote.stringValue = json["reason"] as? String ?? "Session not available."
+                    return
+                }
+                self.usageSessionID = selected["session_id"] as? String ?? ""
+                if let index = self.usageRows.firstIndex(where: { $0["session_id"] as? String == self.usageSessionID }) {
+                    self.usagePicker.selectItem(at: index)
+                }
+                let model = selected["model"] as? String ?? "Unknown model"
+                let state = selected["state"] as? String ?? "unknown"
+                self.usageIdentity.stringValue = "\(model) · \(state)\nSession \(self.usageSessionID)"
+                self.usageIdentity.toolTip = selected["project_path"] as? String
+                let context = selected["context"] as? [String: Any] ?? [:]
+                let available = context["available"] as? Bool ?? false
+                self.usageContext.stringValue = available ? (selected["context_label"] as? String ?? "") : "Context unavailable"
+                self.usageContext.font = NSFont.systemFont(ofSize: available ? 20 : 24, weight: .semibold)
+                self.usageMeter.isHidden = !available
+                self.usageMeter.doubleValue = min(max((context["pct_of_turn_limit"] as? NSNumber)?.doubleValue ?? 0, 0), 100)
+                self.usageNote.stringValue = available ? (selected["context_note"] as? String ?? "") : (selected["context_label"] as? String ?? "")
+                self.usageTotals.stringValue = selected["usage_label"] as? String ?? ""
+                self.usageInput.stringValue = selected["input_label"] as? String ?? ""
+                self.usageCache.stringValue = selected["cache_label"] as? String ?? ""
+                self.usageCost.stringValue = selected["cost_label"] as? String ?? ""
+                self.usageBoundary.stringValue = selected["breakdown_note"] as? String ?? ""
+                let updated = selected["updated_at"] as? String ?? "unknown"
+                let totalsStamp = selected["totals_updated_at"] as? String ?? "unknown"
+                let total = json["total_recent_sessions"] as? Int ?? 0
+                self.usageUpdated.stringValue = "Last activity: \(updated)\nTotals through: \(totalsStamp)\n\(total) recent sessions · picker limited to 20"
+                self.usageSessionURL = absoluteURL(selected["url"] as? String ?? "/")
+                self.usageOpenButton.isEnabled = true
+            }
+        }.resume()
     }
 
     @objc func openDashboard() {
@@ -1607,6 +1785,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         collapsed = value
         if collapsed {
+            usagePopover?.performClose(nil)
             autoCollapseDeadline = nil
         }
         let targetWidth = collapsed ? collapsedWidth : expandedWidth
@@ -1684,7 +1863,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func applyVisibility() {
         if collapsed {
-            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, collapseButton] {
+            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, usageButton, collapseButton] {
                 view?.isHidden = true
             }
             for view in rowDots { view.isHidden = true }
@@ -1713,7 +1892,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         subtitleLabel.isHidden = false
         dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
         brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
-        collapseButton.frame = NSRect(x: 604, y: 37 + yOff, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 684, y: 37 + yOff, width: 18, height: 18)
         let attention = needsAttentionState()
         // Context review queues need both scopes: a row-level Watch button and
         // a Review all button for the full Context Health list.
@@ -1723,6 +1902,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         askButton.isHidden = attention || showChip || showPrimary
         scanButton.isHidden = attention || showPrimary
         consoleButton.isHidden = false
+        usageButton.isHidden = false
+        usageButton.frame = NSRect(x: 642, y: 10 + yOff, width: 58, height: 24)
         collapseButton.isHidden = false
         expandButton.isHidden = true
         let showContinue = (
@@ -2140,7 +2321,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func scheduleAutoCollapse(after delay: Double) {
-        if collapsed {
+        if collapsed || usagePopover?.isShown == true {
             return
         }
         let deadline = Date().addingTimeInterval(delay)
@@ -2804,7 +2985,7 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    expanded_width = 560
+    expanded_width = 640
     expanded_height = 58
     # 52, not 44: the count badge needs room inside the bubble -- see the
     # matching constant in the Swift bar.
@@ -3962,6 +4143,112 @@ def run_native_presence(
             except tk.TclError:
                 pass
 
+    usage_state: dict[str, object] = {"window": None, "session_id": "", "request": 0}
+
+    def open_usage() -> None:
+        existing = usage_state["window"]
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        panel = tk.Toplevel(root)
+        panel.title("AIWatcher · Session usage")
+        panel.geometry("560x610")
+        panel.attributes("-topmost", True)
+        usage_state["window"] = panel
+        body = ttk.Frame(panel, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Session usage", font=("TkDefaultFont", 16, "bold")).pack(anchor="w", pady=(0, 10))
+        picker = ttk.Combobox(body, state="readonly")
+        picker.pack(fill="x", pady=(0, 10))
+        text_vars = {key: tk.StringVar(value="") for key in (
+            "identity", "context", "note", "totals", "input", "cache", "cost", "boundary", "updated",
+        )}
+        ttk.Label(body, textvariable=text_vars["identity"], wraplength=520).pack(anchor="w")
+        ttk.Label(body, textvariable=text_vars["context"], font=("TkDefaultFont", 18, "bold"), wraplength=520).pack(anchor="w", pady=(12, 6))
+        meter_slot = ttk.Frame(body)
+        meter_slot.pack(fill="x")
+        meter = ttk.Progressbar(meter_slot, maximum=100)
+        for key in ("note", "totals", "input", "cache", "cost", "boundary", "updated"):
+            ttk.Label(body, textvariable=text_vars[key], wraplength=520).pack(anchor="w", pady=(5, 2))
+        footer = ttk.Frame(body)
+        footer.pack(side="bottom", fill="x", pady=(12, 0))
+        selected_url = {"value": ""}
+        open_button = ttk.Button(footer, text="Open session in UI", command=lambda: webbrowser.open(selected_url["value"]))
+        open_button.pack(side="left")
+        choices: list[dict[str, object]] = []
+
+        def refresh_usage() -> None:
+            usage_state["request"] = int(usage_state["request"]) + 1
+            request_id = usage_state["request"]
+            query = urllib.parse.urlencode({"session_id": usage_state["session_id"]})
+            request_url = f"{_api_base(url)}/api/companion-usage?{query}"
+            for var in text_vars.values():
+                var.set("")
+            text_vars["context"].set("Loading…")
+            meter.pack_forget()
+            open_button.state(["disabled"])
+            result: dict[str, object] = {}
+
+            def fetch() -> None:
+                try:
+                    with urllib.request.urlopen(request_url, timeout=5) as response:
+                        result["payload"] = json.loads(response.read().decode("utf-8"))
+                except (OSError, ValueError):
+                    result["error"] = True
+                finally:
+                    result["done"] = True
+
+            def render_result() -> None:
+                if not panel.winfo_exists() or request_id != usage_state["request"]:
+                    return
+                if not result.get("done"):
+                    root.after(80, render_result)
+                    return
+                payload = result.get("payload")
+                if not isinstance(payload, dict):
+                    text_vars["context"].set("Usage unavailable")
+                    text_vars["note"].set("Could not reach the local dashboard. Retry with Refresh; monitoring continues independently.")
+                    return
+                choices[:] = payload.get("sessions") or []
+                picker["values"] = [row["label"] for row in choices]
+                selected = payload.get("selected")
+                if not isinstance(selected, dict):
+                    text_vars["context"].set("Usage unavailable")
+                    text_vars["note"].set(str(payload.get("reason") or "Session not available."))
+                    return
+                sid = str(selected["session_id"])
+                usage_state["session_id"] = sid
+                for index, choice in enumerate(choices):
+                    if choice["session_id"] == sid:
+                        picker.current(index)
+                        break
+                context = selected.get("context") or {}
+                available = context.get("available")
+                text_vars["identity"].set(f"{selected['model']} · {selected['state']}\nSession {sid}")
+                text_vars["context"].set(str(selected["context_label"]) if available else "Context unavailable")
+                if available:
+                    meter["value"] = min(100, max(0, context.get("pct_of_turn_limit") or 0))
+                    meter.pack(fill="x", pady=8)
+                text_vars["note"].set(str(selected["context_note"] if available else selected["context_label"]))
+                for key, value in (("totals", "usage_label"), ("input", "input_label"), ("cache", "cache_label"), ("cost", "cost_label"), ("boundary", "breakdown_note")):
+                    text_vars[key].set(str(selected[value]))
+                text_vars["updated"].set(f"Last activity: {selected.get('updated_at') or 'unknown'}\nTotals through: {selected.get('totals_updated_at') or 'unknown'}\n{payload['total_recent_sessions']} recent sessions · picker limited to 20")
+                selected_url["value"] = f"{_api_base(url)}{selected['url']}"
+                open_button.state(["!disabled"])
+
+            threading.Thread(target=fetch, daemon=True).start()
+            root.after(80, render_result)
+
+        def select_session(_event: object) -> None:
+            index = picker.current()
+            if 0 <= index < len(choices):
+                usage_state["session_id"] = choices[index]["session_id"]
+                refresh_usage()
+
+        picker.bind("<<ComboboxSelected>>", select_session)
+        ttk.Button(footer, text="Refresh", command=refresh_usage).pack(side="right")
+        refresh_usage()
+
     plan_button = ttk.Button(frame, text="Plan", width=6, style="Presence.TButton", command=open_prompt)
     plan_button.pack(side="left", padx=(8, 4))
     ask_button = ttk.Button(frame, text="Ask", width=5, style="Presence.TButton", command=open_ask)
@@ -3974,6 +4261,8 @@ def run_native_presence(
     skip_button = ttk.Button(frame, textvariable=skip_label_var, width=9, style="Presence.TButton", command=skip_current)
     console_button = ttk.Button(frame, text="UI", width=4, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
+    usage_button = ttk.Button(frame, text="Usage", width=7, style="Presence.TButton", command=open_usage)
+    usage_button.pack(side="left", padx=(4, 0))
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")

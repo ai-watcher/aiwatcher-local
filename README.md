@@ -108,6 +108,16 @@ If `pipx` is not installed yet, expand [Other Install Methods](#other-install-me
 for short platform-specific instructions. Do not clone the repository just to
 use AIWatcher.
 
+In the expanded Companion, click **Usage** to inspect one session before
+opening the Console. Pick a project/tool/session, view its latest recorded
+input against the model's reference window, and inspect indexed input/output,
+cache, call, and API-equivalent cost totals. Activity and totals timestamps
+stay separate. **Refresh** rechecks the selected context; **Scan** in the bar
+refreshes indexed totals. An unknown window or unavailable transcript shows an
+explanation rather than a 0% meter. Detailed prompt/tool/system composition
+is not available from these local measurements. **Open session in UI** takes
+you to that exact session for the fuller review.
+
 ## Already Installed
 
 If `pipx install` says AIWatcher is already installed, that is expected. Update

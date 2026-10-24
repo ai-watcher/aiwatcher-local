@@ -122,7 +122,7 @@ supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
-`/api/companion-scan`, `/api/sessions`, `/api/agent-hierarchy`, `/api/session`,
+`/api/companion-scan`, `/api/companion-usage`, `/api/sessions`, `/api/agent-hierarchy`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`,
 `/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
@@ -168,6 +168,17 @@ never returns secret values and never calls a model.
 `/api/companion-preferences` returns local Companion notification preferences
 for Settings, including whether advisory Fresh Start context reviews appear in
 the Companion and whether completed runs stay quiet or expand the bar.
+`/api/companion-usage?session_id=...` is an internal, read-only Companion detail
+route. It returns up to 20 recent session identities and usage for one selected
+session, reading at most that transcript through the existing context cache.
+An explicit selection is retained even when it becomes inactive; an unknown
+selection is unavailable and never falls back to a different session. The
+latest recorded input and model-table window are separate from indexed session
+totals, whose evidence timestamp is returned independently of activity time.
+The route exposes no transcript bodies, chat titles, or transcript file paths.
+Refresh does not trigger a full session scan or a provider call. Cross-origin
+browser requests are rejected; the dashboard's own origin and native clients
+are allowed. Unavailable context has a reason and no fabricated percentage.
 `/api/delivery-reviews` returns recent privacy-safe delivery receipts. Changed
 paths are reconstructed only while the exact local Git range remains available;
 objective text is never rehydrated from AIWatcher state. A receipt is `ready`
