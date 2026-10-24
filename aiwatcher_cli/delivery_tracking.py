@@ -104,7 +104,10 @@ def active_commit_hook_path(repo: str) -> str | None:
     path = result.stdout.strip()
     if not os.path.isabs(path):
         path = os.path.join(repo, path)
-    return os.path.normpath(os.path.realpath(path))
+    # Preserve the hook entry itself. Resolving a symlink here would make an
+    # atomic update replace the target file while hiding that Git reaches it
+    # through a symlink managed by another hook tool.
+    return os.path.normpath(os.path.abspath(path))
 
 
 def custom_hooks_configuration(repo: str) -> dict[str, str] | None:
@@ -219,6 +222,36 @@ def _replace_marked_block(existing: str, body: str) -> tuple[str | None, str]:
     return updated, "current" if updated == existing else "updated"
 
 
+def _valid_receipt_block(content: str) -> bool:
+    """Return whether the single marked block invokes AIWatcher receipts."""
+    pattern = re.compile(
+        re.escape(COMMIT_HOOK_MARKER) + r"(.*?)" + re.escape(COMMIT_HOOK_END),
+        re.DOTALL,
+    )
+    matches = list(pattern.finditer(content))
+    if len(matches) != 1:
+        return False
+    commands = [
+        line.strip()
+        for line in matches[0].group(1).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if len(commands) != 1:
+        return False
+    try:
+        tokens = shlex.split(commands[0])
+    except ValueError:
+        return False
+    while tokens and "=" in tokens[0] and not tokens[0].startswith(("/", "./", "../")):
+        tokens.pop(0)
+    if not tokens:
+        return False
+    executable = os.path.basename(tokens[0]).lower()
+    if executable in {"aiwatcher", "aiwatcher.exe"}:
+        return len(tokens) >= 2 and tokens[1] == "commit-receipt"
+    return len(tokens) >= 4 and tokens[1:4] == ["-m", "aiwatcher_cli", "commit-receipt"]
+
+
 def install_commit_hook(
     repo: str,
     *,
@@ -264,8 +297,10 @@ def install_commit_hook(
     thread_lock = _hook_thread_lock(path)
     try:
         with thread_lock, _hook_file_lock(path):
-            existing = Path(path).read_text(encoding="utf-8", errors="replace") if os.path.exists(path) else ""
-            existing_mode = stat.S_IMODE(os.stat(path).st_mode) if os.path.exists(path) else None
+            path_exists = os.path.lexists(path)
+            is_symlink = os.path.islink(path)
+            existing = Path(path).read_text(encoding="utf-8", errors="replace") if path_exists else ""
+            existing_mode = stat.S_IMODE(os.stat(path).st_mode) if path_exists else None
             if existing.strip() and not _is_shell_hook(existing):
                 return {
                     "ok": False,
@@ -286,9 +321,25 @@ def install_commit_hook(
             if updated is not None:
                 if marker_status == "current":
                     return {"ok": True, "status": "current", "changed": False, "repo": repo, "path": path}
+                if is_symlink:
+                    return {
+                        "ok": False,
+                        "status": "symlink_hook_requires_manual_update",
+                        "repo": repo,
+                        "path": path,
+                        "detail": "The active post-commit hook is a symlink; left unchanged to preserve its owner.",
+                    }
                 _atomic_write(path, updated, mode=existing_mode)
                 return {"ok": True, "status": "updated", "changed": True, "repo": repo, "path": path}
             if existing.strip():
+                if is_symlink:
+                    return {
+                        "ok": False,
+                        "status": "symlink_hook_requires_manual_update",
+                        "repo": repo,
+                        "path": path,
+                        "detail": "The active post-commit hook is a symlink; left unchanged to preserve its owner.",
+                    }
                 if not allow_existing:
                     return {
                         "ok": False,
@@ -308,11 +359,18 @@ def install_commit_hook(
     return {"ok": True, "status": status_value, "changed": True, "repo": repo, "path": path}
 
 
-def remove_commit_hook(repo: str) -> dict[str, Any]:
-    """Remove AIWatcher's block without disturbing another hook."""
-    path = active_commit_hook_path(repo) or commit_hook_path(repo)
+def _remove_commit_hook_at_path(repo: str, path: str) -> dict[str, Any]:
+    """Remove AIWatcher's block from one concrete hook path."""
     if not path or not os.path.exists(path):
         return {"ok": True, "status": "not_installed", "repo": repo, "path": path}
+    if os.path.islink(path):
+        return {
+            "ok": False,
+            "status": "symlink_hook_requires_manual_update",
+            "repo": repo,
+            "path": path,
+            "detail": "The post-commit hook is a symlink; left unchanged to preserve its owner.",
+        }
     try:
         with _hook_thread_lock(path), _hook_file_lock(path):
             existing = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -338,6 +396,42 @@ def remove_commit_hook(repo: str) -> dict[str, Any]:
     except (OSError, TimeoutError) as exc:
         return {"ok": False, "status": "write_failed", "repo": repo, "path": path, "detail": str(exc)}
     return {"ok": True, "status": "removed_block", "repo": repo, "path": path}
+
+
+def remove_commit_hook(repo: str) -> dict[str, Any]:
+    """Remove AIWatcher from active and dormant standard hooks."""
+    candidates = [active_commit_hook_path(repo), commit_hook_path(repo)]
+    paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = os.path.normcase(os.path.abspath(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(candidate)
+    if not paths:
+        return {"ok": True, "status": "not_installed", "repo": repo, "path": None, "paths": []}
+
+    results = [_remove_commit_hook_at_path(repo, path) for path in paths]
+    failures = [result for result in results if not result.get("ok")]
+    if failures:
+        failure = failures[0]
+        return {**failure, "paths": paths, "results": results}
+    removed = [result for result in results if result.get("status") != "not_installed"]
+    if not removed:
+        return {"ok": True, "status": "not_installed", "repo": repo, "path": paths[0], "paths": paths}
+    primary = removed[0]
+    status_value = primary["status"] if len(removed) == 1 else "removed_blocks"
+    return {
+        "ok": True,
+        "status": status_value,
+        "repo": repo,
+        "path": primary.get("path"),
+        "paths": [result.get("path") for result in removed],
+        "results": results,
+    }
 
 
 def _candidate_paths(item: Any) -> tuple[Any, ...]:
@@ -433,6 +527,8 @@ def _inspect_installed_hook(path: str | None) -> tuple[bool, bool, str | None, s
             return False, True, "malformed_marker", "The active AIWatcher marker is incomplete or duplicated."
         if marker_count != 1:
             return False, True, "existing_hook_requires_confirmation", "A pre-existing post-commit hook was left unchanged."
+        if not _valid_receipt_block(content):
+            return False, True, "invalid_aiwatcher_hook", "The marked block does not invoke AIWatcher commit receipts."
         if os.name != "nt" and not os.access(path, os.X_OK):
             return False, True, "hook_not_executable", "The active post-commit hook is not executable."
         return True, True, None, None

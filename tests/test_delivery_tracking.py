@@ -223,6 +223,60 @@ class AutomaticDeliveryTrackingTests(unittest.TestCase):
         self.assertIn("echo existing", contents)
         self.assertEqual(contents.count(COMMIT_HOOK_MARKER), 1)
 
+    def test_updating_a_symlinked_hook_preserves_the_symlink_and_target(self) -> None:
+        repo = self.root / "repo"
+        init_repo(repo)
+        target = self.root / "managed-post-commit"
+        target.write_text(
+            "#!/bin/sh\n" + delivery_tracking.commit_hook_body("/old/aiwatcher"),
+            encoding="utf-8",
+        )
+        target.chmod(0o755)
+        hook = repo / ".git" / "hooks" / "post-commit"
+        hook.symlink_to(target)
+        original = target.read_bytes()
+
+        result = install_commit_hook(str(repo), command="/new/aiwatcher")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "symlink_hook_requires_manual_update")
+        self.assertTrue(hook.is_symlink())
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_uninstall_removes_dormant_standard_hook_after_hooks_path_changes(self) -> None:
+        repo = self.root / "repo"
+        init_repo(repo)
+        installed = install_commit_hook(str(repo), command="aiwatcher")
+        self.assertTrue(installed["ok"])
+        standard = repo / ".git" / "hooks" / "post-commit"
+        git(repo, "config", "core.hooksPath", ".githooks")
+        custom = repo / ".githooks" / "post-commit"
+        custom.parent.mkdir()
+        custom.write_text("#!/bin/sh\necho custom\n", encoding="utf-8")
+
+        result = remove_commit_hook(str(repo))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(standard.exists())
+        self.assertEqual(custom.read_text(encoding="utf-8"), "#!/bin/sh\necho custom\n")
+
+    def test_marker_only_hook_is_not_reported_as_tracked(self) -> None:
+        repo = self.root / "repo"
+        init_repo(repo)
+        hook = repo / ".git" / "hooks" / "post-commit"
+        hook.write_text(
+            "#!/bin/sh\n" + COMMIT_HOOK_MARKER + "\necho not-a-receipt\n"
+            "# <<< aiwatcher commit receipt <<<\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+
+        status = delivery_tracking_status([session(repo)])
+
+        self.assertEqual(status["tracked_repositories"], 0)
+        self.assertEqual(status["needs_attention"], 1)
+        self.assertEqual(status["repositories"][0]["issue"], "invalid_aiwatcher_hook")
+
     def test_concurrent_installers_leave_one_complete_marker_block(self) -> None:
         repo = self.root / "repo"
         init_repo(repo)

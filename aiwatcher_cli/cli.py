@@ -4835,6 +4835,8 @@ def command_uninstall_commit_hook(args: argparse.Namespace) -> int:
         print(f"No AIWatcher commit receipt found for {repo}.")
     elif result.get("status") == "removed_file":
         print(f"Removed {path} (it contained nothing else).")
+    elif result.get("status") == "removed_blocks":
+        print(f"Removed AIWatcher commit receipts from {len(result.get('paths') or [])} hook locations.")
     else:
         print(f"Removed AIWatcher commit receipt from {path}")
     return 0
