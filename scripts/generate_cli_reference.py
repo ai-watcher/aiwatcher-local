@@ -39,7 +39,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Getting started",
         "First run, detection, and health checks.",
-        ["start", "restart", "setup", "update", "status", "doctor"],
+        ["start", "restart", "setup", "delivery-tracking", "update", "status", "doctor"],
     ),
     (
         "Daily loop",
@@ -103,6 +103,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
 # without an example, so this never blocks a new command from being documented.
 EXAMPLES: dict[str, list[str]] = {
     "restart": ["aiwatcher restart --open-ui"],
+    "delivery-tracking": ["aiwatcher delivery-tracking enable", "aiwatcher delivery-tracking status"],
     # Zero-argument commands get no example: it would be identical to the usage
     # line directly above it. Same for status, doctor, hook-status, tools, and
     # projects, which are already absent.

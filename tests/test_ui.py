@@ -802,6 +802,7 @@ class DashboardServeTests(unittest.TestCase):
                 post_payload = json.dumps({
                     "fresh_start_context": False,
                     "finished_sessions": "expanded",
+                    "motion_mode": "expressive",
                 }).encode("utf-8")
                 post_request = request.Request(
                     f"{base}/api/companion-preferences",
@@ -825,6 +826,7 @@ class DashboardServeTests(unittest.TestCase):
                     server.server_close()
 
         self.assertEqual(posted["finished_sessions"], "expanded")
+        self.assertEqual(posted["motion_mode"], "expressive")
         self.assertFalse(posted["fresh_start_context"])
         self.assertEqual(fetched, posted)
 
@@ -877,6 +879,47 @@ class DashboardServeTests(unittest.TestCase):
                     server.server_close()
 
         self.assertEqual(posted["finished_sessions"], "expanded")
+
+    def test_delivery_tracking_enable_is_routable_and_same_origin_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=[]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+            ):
+                server, thread, base = self._serve_one()
+                payload = json.dumps({"enabled": True}).encode("utf-8")
+                own_request = request.Request(
+                    f"{base}/api/delivery-tracking",
+                    data=payload,
+                    headers={"Content-Type": "application/json", "Origin": base},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(own_request, timeout=5) as response:
+                        posted = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+                server, thread, base = self._serve_one()
+                foreign_request = request.Request(
+                    f"{base}/api/delivery-tracking",
+                    data=json.dumps({"enabled": False}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "Origin": "http://localhost:3000"},
+                    method="POST",
+                )
+                try:
+                    with self.assertRaises(error.HTTPError) as raised:
+                        request.urlopen(foreign_request, timeout=5)
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+        self.assertTrue(posted["enabled"])
+        self.assertEqual(posted["observed_repositories"], 0)
+        self.assertEqual(raised.exception.code, 403)
 
     def test_companion_group_snooze_records_project_cooldowns(self) -> None:
         server, thread, base = self._serve_one()

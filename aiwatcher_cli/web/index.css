@@ -2123,6 +2123,15 @@
     .workflow-check-row small { display: block; color: var(--text-quiet); font-size: var(--fs-1); line-height: 1.35; }
     .ai-assist-fields .check-row { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); }
     .ai-assist-fields .check-row input { width: 16px; height: 16px; accent-color: var(--blue); }
+    .companion-motion { border: 0; padding: 0; margin: 0 0 var(--sp-2); }
+    .companion-motion legend { color: var(--text-quiet); font-size: var(--fs-1); margin-bottom: var(--sp-1); }
+    .companion-motion-options { display: inline-grid; grid-template-columns: repeat(3, minmax(84px, 1fr)); border: 1px solid var(--border); border-radius: var(--r-1); overflow: hidden; }
+    .companion-motion-options label { display: block; min-width: 0; }
+    .companion-motion-options input { position: absolute; opacity: 0; pointer-events: none; }
+    .companion-motion-options span { display: block; padding: 7px 12px; text-align: center; color: var(--t-muted); background: var(--bg-muted); border-right: 1px solid var(--border); cursor: pointer; }
+    .companion-motion-options label:last-child span { border-right: 0; }
+    .companion-motion-options input:checked + span { color: var(--t-base); background: var(--primary-soft); box-shadow: inset 0 0 0 1px var(--primary); }
+    .companion-motion-options input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: -2px; }
     .ai-assist-provider-strip { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
     .provider-chip {
       border: 1px solid var(--line);

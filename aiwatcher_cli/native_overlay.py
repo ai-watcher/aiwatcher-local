@@ -57,6 +57,63 @@ def _normalize_signal_kind(value: str | None) -> str:
     return normalized if normalized in {"session_blocked", "critical_context", "loop", "velocity", "runway", "generic"} else "generic"
 
 
+def _reduce_motion_requested() -> bool:
+    """Honor the host preference in the Tk fallback, with an env override."""
+    override = os.environ.get("AIWATCHER_REDUCE_MOTION")
+    if override is not None:
+        return override.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ["defaults", "read", "com.apple.universalaccess", "reduceMotion"],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+                check=False,
+            )
+            return result.stdout.strip() == "1"
+        if sys.platform == "win32":
+            import ctypes
+
+            enabled = ctypes.c_int(1)
+            ok = ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0)
+            return bool(ok) and not bool(enabled.value)
+        gsettings = shutil.which("gsettings")
+        if gsettings:
+            result = subprocess.run(
+                [gsettings, "get", "org.gnome.desktop.interface", "enable-animations"],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+                check=False,
+            )
+            return result.stdout.strip().lower() == "false"
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        pass
+    return False
+
+
+def _companion_expression(
+    state: str,
+    *,
+    working: bool,
+    needs_attention: bool,
+    phase: int,
+    reduce_motion: bool,
+) -> tuple[int, int, str]:
+    """Return the Tk Companion's gaze and eye colour for observable state."""
+    if state == "offline":
+        return 0, 1, "#808f9f"
+    if needs_attention:
+        return 1, -1, "#ffd6ad"
+    if state == "session_finished":
+        return 0, -1, "#7fdbff"
+    if working:
+        gaze = (0, 0) if reduce_motion else ((-1, 0), (0, 1), (1, 0), (0, -1))[phase % 4]
+        return gaze[0], gaze[1], "#78f0c2"
+    return 0, 0, "#7fdbff"
+
+
 def overlay_config(
     signal_kind: str | None,
     *,
@@ -611,6 +668,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var brandBlueRing: CALayer!
     var collapsedMarkView: NSView!
     var collapsedBlueRing: CALayer!
+    var collapsedFacePanel: CALayer!
+    var collapsedLeftEye: CALayer!
+    var collapsedRightEye: CALayer!
     var rimLayer: CAShapeLayer!
     var collapsedBadge: NSTextField!
     var orbitLayer: CAShapeLayer!
@@ -633,6 +693,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var collapsed = false
     var stateName = "watching"
     var pulseOn = false
+    var expressionPhase = 0
+    var expressionScheduleToken = 0
     var autoCollapseToken = 0
     var autoCollapseDeadline: Date? = nil
     var suppressPassiveRefreshUntil: Date? = nil
@@ -644,6 +706,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingReturnAvailable: [Bool] = []
     var waitingWants: [String] = []
     var waitingRowKinds: [String] = []
+    var waitingRowSections: [String] = []
+    var waitingRowActionLabels: [String] = []
     // Compaction rows: one window each, with its own command. A row whose
     // action is empty is a fact (compacting, compacted) and draws no button.
     var waitingRowTags: [String] = []
@@ -654,6 +718,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var workingCount = 0
     var finishedCount = 0
     var reviewCount = 0
+    var motionMode = "standard"
+    var activityTone = ""
+    var deliveryConfirmed = false
+    var deliveryReceiptID = ""
     var detailText = ""
     var pressureAvailable = false
     var pressurePct = 0
@@ -739,9 +807,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // and away digests all reuse this row surface so the badge can explain
     // itself instead of dropping the user into an unlabeled count.
     var visibleWaitingRows: Int {
-        if !["session_waiting", "session_finished", "away_digest", "control_review", "context_review", "prompt_status", "compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty {
-            return 0
-        }
+        if waitingRowTexts.isEmpty { return 0 }
         return min(waitingRowTexts.count, maxWaitingRows)
     }
 
@@ -754,9 +820,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         if stateName == "session_finished" && visibleWaitingRows > 0 {
             if finishedCount > visibleWaitingRows {
-                return "\(visibleWaitingRows) of \(finishedCount) completed runs"
+                return "\(visibleWaitingRows) of \(finishedCount) ready to check"
             }
-            return "\(finishedCount) completed run\(finishedCount == 1 ? "" : "s")"
+            return "\(finishedCount) ready to check"
         }
         return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(40))
     }
@@ -786,6 +852,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind.hasPrefix("prompt_") {
             return row["text"] as? String ?? ""
         }
+        if let text = row["text"] as? String, !text.isEmpty {
+            return text
+        }
+        if ["working", "delivery_confirmed"].contains(kind) {
+            return row["text"] as? String ?? ""
+        }
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
@@ -794,8 +866,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let activity = row["activity_label"] as? String ?? ""
         let scope = row["scope_label"] as? String ?? ""
         let prefix: String
-        if kind == "finished" {
-            prefix = "Completed"
+        if ["finished", "recently_observed"].contains(kind) {
+            prefix = "Ready to check"
+        } else if kind == "session_waiting" {
+            prefix = "Waiting"
         } else if kind == "context_review" {
             prefix = "Context health"
         } else if kind.isEmpty {
@@ -814,6 +888,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func rowActionLabel(index: Int) -> String {
+        if index < waitingRowActionLabels.count, !waitingRowActionLabels[index].isEmpty {
+            return waitingRowActionLabels[index]
+        }
         let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
         if kind == "compact" { return "Review" }
         if kind.hasPrefix("prompt_") { return "Open" }
@@ -847,13 +924,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.waitingReturnAvailable = []
         self.waitingWants = []
         self.waitingRowKinds = []
+        self.waitingRowSections = []
+        self.waitingRowActionLabels = []
         self.waitingRowTags = []
         self.waitingRowActions = []
         self.waitingRowCommands = []
         self.waitingRowShas = []
         self.waitingCount = 0
+        self.workingCount = 0
         self.finishedCount = 0
         self.reviewCount = 0
+        self.activityTone = ""
         self.skipState = ""
         self.skipSessionID = ""
         self.skipProject = ""
@@ -1022,6 +1103,23 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let collapsedMark = makeBrandMark(height: 22, ink: brandInkOnLight)
         collapsedMarkView.layer?.addSublayer(collapsedMark.mark)
         collapsedBlueRing = collapsedMark.blueRing
+        // Companion-only expression: the official mark stays intact everywhere
+        // else, while its front ring becomes a tiny watchful viewport here.
+        // The panel remains inside the ring stroke, so the silhouette and both
+        // brand rings are still recognizable at 52pt.
+        collapsedFacePanel = CALayer()
+        collapsedFacePanel.frame = CGRect(x: 10.2, y: 3.2, width: 14.3, height: 8.2)
+        collapsedFacePanel.cornerRadius = 3.0
+        collapsedFacePanel.backgroundColor = brandInkOnLight.cgColor
+        collapsedLeftEye = CALayer()
+        collapsedLeftEye.frame = CGRect(x: 2.5, y: 4.0, width: 2.8, height: 1.45)
+        collapsedLeftEye.cornerRadius = 0.72
+        collapsedRightEye = CALayer()
+        collapsedRightEye.frame = CGRect(x: 9.0, y: 4.0, width: 2.8, height: 1.45)
+        collapsedRightEye.cornerRadius = 0.72
+        collapsedFacePanel.addSublayer(collapsedLeftEye)
+        collapsedFacePanel.addSublayer(collapsedRightEye)
+        collapsedMarkView.layer?.addSublayer(collapsedFacePanel)
         collapsedMarkView.isHidden = true
         rootView.addSubview(collapsedMarkView)
 
@@ -1177,6 +1275,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.orderFrontRegardless()
         updateAppearance()
         schedulePulse()
+        scheduleExpression()
         refreshState()
     }
 
@@ -1320,6 +1419,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if index < waitingRowActions.count, waitingRowActions[index] == "copy_compact",
            index < waitingRowCommands.count, !waitingRowCommands[index].isEmpty {
             copyCompactRow(index: index)
+            return
+        }
+        if index < waitingRowActions.count, waitingRowActions[index] == "copy_fresh_start",
+           index < waitingSessionIDs.count, !waitingSessionIDs[index].isEmpty {
+            primarySessionID = waitingSessionIDs[index]
+            primaryURL = waitingURLs[index]
+            copyFreshStartFromCompanion()
             return
         }
         if index < waitingReturnAvailable.count, waitingReturnAvailable[index],
@@ -1795,6 +1901,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.layer?.cornerRadius = collapsed ? targetHeight / 2 : 16
         applyVisibility()
         updateAppearance()
+        scheduleExpression(after: 0.1)
     }
 
     // session_waiting belongs in both lists. Left out, the widget renders the
@@ -1804,7 +1911,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        let states = ["offline", "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest", "compact_recommended"]
+        let states = ["offline", "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest", "compact_recommended", "delivery_review_ready"]
         // Only the nudge step of a compaction carries a button. The later
         // steps -- copied, compacting, compacted -- are facts about a thing
         // already done, and a button would ask for it again.
@@ -1813,6 +1920,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func needsAttentionState() -> Bool {
+        if !activityTone.isEmpty {
+            return activityTone == "attention"
+        }
         return ["prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
     }
 
@@ -1832,9 +1942,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if needsAttentionState() {
             return true
         }
-        // Soft attention: finished work and the away digest force the window
+        // Soft attention: recently quiet work and the away digest force the window
         // visible even in nudges-only mode, without the orange treatment.
-        if ["session_finished", "away_digest"].contains(stateName) {
+        if ["session_finished", "away_digest", "delivery_review_ready"].contains(stateName) {
             return true
         }
         // A commit just landed in the session being typed into: same soft
@@ -1993,7 +2103,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             let action = index < waitingRowActions.count ? waitingRowActions[index] : ""
             rowDots[index].isHidden = !visible
             rowLabels[index].isHidden = !visible
-            rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)
+            rowButtons[index].isHidden = !visible || action == "none" || (kind == "compact" && action.isEmpty)
             // Compaction rows carry their stage where waiting rows carry
             // what the session wants.
             // Prompt rows carry "working 3 min" or "done" in the same place.
@@ -2004,14 +2114,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             if !visible { continue }
             let rowY = yOff - rowHeight * CGFloat(index + 1)
             rowDots[index].frame = NSRect(x: 30, y: rowY + 14, width: 7, height: 7)
-            // Digest rows color by kind -- mint for finished work and for a
+            // Digest rows color by kind -- mint for recently quiet work and for a
             // compaction (a good moment, not an alarm), amber for signals;
             // waiting rows keep hottest-first by position.
             let dotColor: NSColor
             if kind == "prompt_working" {
                 // Work in progress is neither done nor a signal: brand blue.
                 dotColor = NSColor(calibratedRed: 0.23, green: 0.51, blue: 0.96, alpha: 1)
-            } else if kind == "finished" || kind == "compact" || kind == "prompt_done" {
+            } else if ["finished", "recently_observed", "delivery_confirmed", "compact", "prompt_done"].contains(kind) {
                 dotColor = NSColor(calibratedRed: 0.36, green: 0.79, blue: 0.65, alpha: 1)
             } else if !kind.isEmpty {
                 dotColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
@@ -2022,7 +2132,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             }
             rowDots[index].layer?.backgroundColor = dotColor.cgColor
             rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty && !kind.hasPrefix("prompt_") ? 462 : 350, height: 17)
-            rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
+            let section = index < waitingRowSections.count ? waitingRowSections[index] : ""
+            let text = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
+            rowLabels[index].stringValue = section.isEmpty ? text : "\(section.uppercased())   \(text)"
             rowTags[index].frame = NSRect(x: 400, y: rowY + 10, width: 112, height: 14)
             rowTags[index].stringValue = kind == "compact" ? tag : (kind.hasPrefix("prompt_") ? tag : (wants.isEmpty ? "" : "wants: \(wants)"))
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
@@ -2065,6 +2177,100 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.frame = NSRect(x: 0, y: 0, width: expandedWidth, height: target)
     }
 
+    func updateWatcherExpression(blink: Bool = false) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let needsAttention = needsAttentionState()
+        var gaze = CGPoint.zero
+        if stateName == "offline" {
+            gaze = CGPoint(x: 0, y: -0.9)
+        } else if needsAttention {
+            // The badge and action surface live above and to the right of the
+            // viewport. Looking there makes the motion directional, not merely
+            // decorative.
+            gaze = CGPoint(x: 1.0, y: 0.8)
+        } else if stateName == "session_finished" {
+            gaze = CGPoint(x: 0, y: 0.7)
+        } else if workingCount > 0 && !reduceMotion && motionMode == "expressive" {
+            // A calm left/down/right scan communicates active observation more
+            // specifically than another loading spinner.
+            let scan = [
+                CGPoint(x: -1.0, y: 0.2),
+                CGPoint(x: 0.0, y: -0.8),
+                CGPoint(x: 1.0, y: 0.1),
+                CGPoint(x: 0.0, y: 0.5),
+            ]
+            gaze = scan[expressionPhase % scan.count]
+        }
+
+        let eyeColor: NSColor
+        if stateName == "offline" {
+            eyeColor = NSColor(calibratedRed: 0.50, green: 0.56, blue: 0.64, alpha: 1)
+        } else if needsAttention {
+            eyeColor = NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.68, alpha: 1)
+        } else if stateName == "session_finished" {
+            eyeColor = NSColor(calibratedRed: 0.50, green: 0.86, blue: 1.00, alpha: 1)
+        } else if workingCount > 0 {
+            eyeColor = NSColor(calibratedRed: 0.47, green: 0.94, blue: 0.76, alpha: 1)
+        } else {
+            eyeColor = NSColor(calibratedRed: 0.50, green: 0.86, blue: 1.00, alpha: 1)
+        }
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration((reduceMotion || motionMode == "quiet") ? 0 : 0.22)
+        collapsedFacePanel.opacity = stateName == "offline" ? 0.62 : 1.0
+        collapsedLeftEye.backgroundColor = eyeColor.cgColor
+        collapsedRightEye.backgroundColor = eyeColor.cgColor
+        collapsedLeftEye.frame = CGRect(x: 2.5 + gaze.x, y: 4.0 + gaze.y, width: 2.8, height: 1.45)
+        collapsedRightEye.frame = CGRect(x: 9.0 + gaze.x, y: 4.0 + gaze.y, width: 2.8, height: 1.45)
+        CATransaction.commit()
+
+        if blink && !reduceMotion && motionMode != "quiet" && workingCount == 0 && !needsAttention && stateName != "offline" {
+            let close = CAKeyframeAnimation(keyPath: "transform.scale.y")
+            close.values = [1.0, 0.12, 1.0]
+            close.keyTimes = [0.0, 0.45, 1.0]
+            close.duration = 0.22
+            collapsedLeftEye.add(close, forKey: "blink")
+            collapsedRightEye.add(close, forKey: "blink")
+        }
+    }
+
+    func playWatcherTransition(previousState: String, previousWorkingCount: Int, previousDeliveryReceiptID: String, previousNeedsAttention: Bool) {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || motionMode == "quiet" { return }
+        // Keep the expanded product mark completely canonical. Expressive
+        // motion belongs only to the compact Companion surface.
+        if !collapsed { return }
+        let enteredAttention = needsAttentionState() && !previousNeedsAttention
+        let activityChanged = (previousWorkingCount > 0) != (workingCount > 0)
+        let delivered = !deliveryReceiptID.isEmpty && deliveryReceiptID != previousDeliveryReceiptID
+        let recovered = previousState == "offline" && stateName != "offline"
+        if !enteredAttention && !activityChanged && !delivered && !recovered { return }
+
+        let focus = CAKeyframeAnimation(keyPath: "transform.scale")
+        focus.values = [1.0, 1.13, 0.97, 1.0]
+        focus.keyTimes = [0.0, 0.38, 0.72, 1.0]
+        focus.duration = 0.46
+        focus.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        collapsedMarkView.layer?.add(focus, forKey: "watcher-focus-lock")
+    }
+
+    func scheduleExpression(after delay: Double = 1.1) {
+        expressionScheduleToken += 1
+        let token = expressionScheduleToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            if token != self.expressionScheduleToken { return }
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let expressive = self.collapsed && self.window.isVisible && !reduceMotion && self.motionMode == "expressive"
+            if expressive {
+                self.expressionPhase += 1
+                let resting = self.workingCount == 0 && !self.needsAttentionState() && self.stateName != "offline"
+                self.updateWatcherExpression(blink: resting)
+            }
+            let activelyScanning = expressive && self.workingCount > 0 && self.stateName != "session_finished"
+            let dormant = !self.collapsed || !self.window.isVisible || reduceMotion || self.motionMode == "quiet"
+            self.scheduleExpression(after: activelyScanning ? 1.1 : (dormant ? 30.0 : 8.0))
+        }
+    }
+
     func updateAppearance() {
         applyWindowSize()
         applyVisibility()
@@ -2096,16 +2302,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapsedBlueRing.borderColor = ringColor.cgColor
         brandBlueRing.borderColor = ringColor.cgColor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let shouldOrbit = collapsed && workingCount > 0 && !needsAttention && !reduceMotion
-        orbitLayer.isHidden = !shouldOrbit
-        if shouldOrbit && orbitLayer.animation(forKey: "orbit") == nil {
+        let showOrbit = collapsed && window.isVisible && workingCount > 0 && !needsAttention
+        let animateOrbit = showOrbit && !reduceMotion && motionMode != "quiet"
+        orbitLayer.isHidden = !showOrbit
+        if animateOrbit && orbitLayer.animation(forKey: "orbit") == nil {
             let spin = CABasicAnimation(keyPath: "transform.rotation.z")
             spin.fromValue = 0
             spin.toValue = -2 * Double.pi
             spin.duration = 2.8
             spin.repeatCount = .infinity
             orbitLayer.add(spin, forKey: "orbit")
-        } else if !shouldOrbit {
+        } else if !animateOrbit {
             orbitLayer.removeAnimation(forKey: "orbit")
         }
         // The rim outranks the orbit arc the way attention outranks running.
@@ -2114,7 +2321,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // still a whole ring.
         let hardGate = isHardGate()
         rimLayer.isHidden = !collapsed || !needsAttention
-        rimLayer.opacity = (hardGate && !reduceMotion && !pulseOn) ? 0.3 : 1.0
+        rimLayer.opacity = (hardGate && !reduceMotion && motionMode != "quiet" && !pulseOn) ? 0.3 : 1.0
         // The collapsed bubble reserves numbers for things needing attention.
         // Completed work is reward/status text after expansion, not a mystery
         // count sitting on screen all day. A hard gate carries no count, and
@@ -2128,12 +2335,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if collapsed {
             collapsedBadge.isHidden = waitingCount <= 0 && reviewCount <= 0 && !hardGate
         }
+        updateWatcherExpression()
         applyWindowVisibility()
     }
 
     func schedulePulse(after delay: Double = 0.8) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            let animate = self.isHardGate() && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            let animate = self.window.isVisible && self.isHardGate() && !reduceMotion && self.motionMode != "quiet"
             if animate {
                 self.pulseOn.toggle()
                 self.updateAppearance()
@@ -2141,7 +2350,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.pulseOn = false
                 self.updateAppearance()
             }
-            self.schedulePulse(after: animate ? 0.8 : 10.0)
+            let dormant = !self.window.isVisible || reduceMotion || self.motionMode == "quiet"
+            self.schedulePulse(after: animate ? 0.8 : (dormant ? 30.0 : 10.0))
         }
     }
 
@@ -2185,11 +2395,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if let hold = suppressPassiveRefreshUntil, hold <= Date() {
             suppressPassiveRefreshUntil = nil
         }
+        let previousState = self.stateName
+        let previousWorkingCount = self.workingCount
+        let previousDeliveryReceiptID = self.deliveryReceiptID
+        let previousNeedsAttention = needsAttentionState()
         let wasHardGate = isHardGate()
         self.stateName = incomingState
         self.detailText = json["detail"] as? String ?? ""
-        // The away digest's history entries ride the same row machinery as
-        // the waiting queue; a payload carries one list or the other.
+        // New payloads carry all live categories at once. Older dashboards
+        // still fall back to the winning state's single row collection.
         var waiting = json["waiting_sessions"] as? [[String: Any]] ?? []
         if waiting.isEmpty {
             waiting = json["digest_rows"] as? [[String: Any]] ?? []
@@ -2197,11 +2411,39 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if incomingState == "compact_recommended" {
             waiting = json["compact_rows"] as? [[String: Any]] ?? []
         }
+        var sectionLabels: [String] = []
+        var activitySectionCount = 0
+        if let sections = json["activity_sections"] as? [[String: Any]] {
+            let activeSections = sections.filter { (($0["rows"] as? [[String: Any]])?.isEmpty == false) }
+            activitySectionCount = activeSections.count
+            var grouped: [[String: Any]] = []
+            for (sectionIndex, section) in activeSections.enumerated() {
+                let label = section["label"] as? String ?? ""
+                let rows = section["rows"] as? [[String: Any]] ?? []
+                let remainingSections = activeSections.count - sectionIndex - 1
+                let allowance = max(1, maxWaitingRows - grouped.count - remainingSections)
+                for (index, source) in rows.prefix(allowance).enumerated() {
+                    var row = source
+                    row["_section_label"] = index == 0 ? label : ""
+                    grouped.append(row)
+                }
+            }
+            if !grouped.isEmpty { waiting = grouped }
+        }
+        sectionLabels = waiting.prefix(maxWaitingRows).map { row in
+            (row["_section_label"] as? String) ?? ""
+        }
+        self.waitingRowSections = sectionLabels
         self.waitingRowTags = waiting.prefix(maxWaitingRows).map { row in
             String(((row["tag"] as? String) ?? "").prefix(16))
         }
         self.waitingRowActions = waiting.prefix(maxWaitingRows).map { row in
-            (row["action"] as? String) ?? ""
+            let normalized = row["normalized_action"] as? [String: Any]
+            return (normalized?["type"] as? String) ?? (row["action"] as? String) ?? ""
+        }
+        self.waitingRowActionLabels = waiting.prefix(maxWaitingRows).map { row in
+            let normalized = row["normalized_action"] as? [String: Any]
+            return (normalized?["label"] as? String) ?? ""
         }
         self.waitingRowCommands = waiting.prefix(maxWaitingRows).map { row in
             (row["command"] as? String) ?? ""
@@ -2210,13 +2452,16 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             (row["sha"] as? String) ?? ""
         }
         self.waitingURLs = waiting.prefix(maxWaitingRows).map { row in
-            absoluteURL((row["url"] as? String) ?? "/")
+            let normalized = row["normalized_action"] as? [String: Any]
+            return absoluteURL((normalized?["url"] as? String) ?? (row["url"] as? String) ?? "/")
         }
         self.waitingSessionIDs = waiting.prefix(maxWaitingRows).map { row in
-            (row["session_id"] as? String) ?? ""
+            let normalized = row["normalized_action"] as? [String: Any]
+            return (normalized?["session_id"] as? String) ?? (row["session_id"] as? String) ?? ""
         }
         self.waitingReturnAvailable = waiting.prefix(maxWaitingRows).map { row in
-            (row["return_available"] as? Bool) ?? false
+            let normalized = row["normalized_action"] as? [String: Any]
+            return ((normalized?["type"] as? String) == "runtime_return") || ((row["return_available"] as? Bool) ?? false)
         }
         self.waitingWants = waiting.prefix(maxWaitingRows).map { row in
             String(((row["wants"] as? String) ?? "").prefix(16))
@@ -2228,6 +2473,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.waitingRowTexts = waiting.prefix(maxWaitingRows).map { row in
             rowDisplayText(row)
         }
+        let preferences = json["companion_preferences"] as? [String: Any]
+        self.motionMode = preferences?["motion_mode"] as? String ?? "standard"
+        self.activityTone = json["tone"] as? String ?? ""
+        self.deliveryConfirmed = json["delivery_confirmed"] as? Bool ?? false
+        self.deliveryReceiptID = json["delivery_receipt_id"] as? String ?? ""
         let presence = json["presence"] as? [String: Any]
         self.workingCount = presence?["working"] as? Int ?? 0
         let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
@@ -2276,10 +2526,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // The longest label the preflight planner emits is 32.
         self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(40))
         var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
+        if activitySectionCount > 1 {
+            subtitleText = String((json["activity_line"] as? String ?? subtitleText).prefix(46))
+        }
         if ["prompt_gate", "command_gate"].contains(incomingState), let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
             subtitleText += " · \(remaining)s"
         }
         self.subtitleLabel.stringValue = subtitleText
+        self.expandButton.setAccessibilityLabel("AIWatcher Companion")
+        self.expandButton.setAccessibilityValue(String((json["activity_line"] as? String ?? subtitleText).prefix(120)))
         if reviewKinds.contains(incomingState), visibleWaitingRows > 0 {
             self.titleLabel.stringValue = reviewTitle()
             self.subtitleLabel.stringValue = reviewSubtitle()
@@ -2318,6 +2573,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         } else {
             self.updateAppearance()
         }
+        playWatcherTransition(
+            previousState: previousState,
+            previousWorkingCount: previousWorkingCount,
+            previousDeliveryReceiptID: previousDeliveryReceiptID,
+            previousNeedsAttention: previousNeedsAttention
+        )
     }
 
     func scheduleAutoCollapse(after delay: Double) {
@@ -2975,6 +3236,14 @@ def run_native_presence(
         return 2
 
     root = tk.Tk()
+    reduce_motion_state = {"value": _reduce_motion_requested(), "checked_at": time.monotonic()}
+
+    def reduce_motion_active() -> bool:
+        now = time.monotonic()
+        if now - float(reduce_motion_state["checked_at"]) >= 5.0:
+            reduce_motion_state["value"] = _reduce_motion_requested()
+            reduce_motion_state["checked_at"] = now
+        return bool(reduce_motion_state["value"])
     root.title("AIWatcher Companion")
     root.configure(bg="#0d141f")
     root.attributes("-topmost", True)
@@ -3065,6 +3334,8 @@ def run_native_presence(
     waiting_row_return: list[bool] = []
     waiting_row_wants: list[str] = []
     waiting_row_kinds: list[str] = []
+    waiting_row_sections: list[str] = []
+    waiting_row_action_labels: list[str] = []
     # Compaction rows: one window each, with its own command; an empty action
     # is a fact (compacting, compacted) and draws no button.
     waiting_row_tags: list[str] = []
@@ -3075,7 +3346,13 @@ def run_native_presence(
     working_count_var = tk.IntVar(value=0)
     finished_count_var = tk.IntVar(value=0)
     review_count_var = tk.IntVar(value=0)
+    motion_mode_var = tk.StringVar(value="standard")
+    activity_tone_var = tk.StringVar(value="")
+    delivery_confirmed_var = tk.BooleanVar(value=False)
+    delivery_receipt_id_var = tk.StringVar(value="")
     orbit_angle_var = tk.IntVar(value=0)
+    expression_phase_var = tk.IntVar(value=0)
+    focus_lock_ticks_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
     pressure_severity_var = tk.StringVar(value="ok")
@@ -3141,6 +3418,10 @@ def run_native_presence(
         # (chat name and figures, never prompt text).
         if kind.startswith("prompt_"):
             return str(row.get("text") or "")
+        if row.get("text"):
+            return str(row.get("text"))
+        if kind in {"working", "delivery_confirmed"}:
+            return str(row.get("text") or "")
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
@@ -3148,8 +3429,10 @@ def run_native_presence(
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
         scope = str(row.get("scope_label") or "")
-        if kind == "finished":
-            parts = ["Completed", project, tool, waited]
+        if kind in {"finished", "recently_observed"}:
+            parts = ["Ready to check", project, tool, waited]
+        elif kind == "session_waiting":
+            parts = ["Waiting", project, tool, waited]
         elif kind == "context_review":
             parts = ["Context health", scope, project, tool, severity, activity, review]
         elif kind:
@@ -3169,8 +3452,8 @@ def run_native_presence(
             count = int(finished_count_var.get() or 0)
             shown = visible_waiting_rows()
             if shown and count > shown:
-                return f"{shown} of {count} completed runs"
-            return f"{count} completed run{'' if count == 1 else 's'}"
+                return f"{shown} of {count} ready to check"
+            return f"{count} ready to check"
         return title_var.get()[:34]
 
     def review_subtitle() -> str:
@@ -3192,6 +3475,8 @@ def run_native_presence(
         return subtitle_var.get()[:46]
 
     def row_action_label(index: int) -> str:
+        if index < len(waiting_row_action_labels) and waiting_row_action_labels[index]:
+            return waiting_row_action_labels[index]
         kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
         if kind == "compact":
             return "Review"
@@ -3214,19 +3499,24 @@ def run_native_presence(
 
     def apply_offline_state() -> None:
         nonlocal offline_expanded
+        root.title("AIWatcher Companion: UI offline")
         waiting_row_texts.clear()
         waiting_row_urls.clear()
         waiting_row_session_ids.clear()
         waiting_row_return.clear()
         waiting_row_wants.clear()
         waiting_row_kinds.clear()
+        waiting_row_sections.clear()
+        waiting_row_action_labels.clear()
         waiting_row_tags.clear()
         waiting_row_actions.clear()
         waiting_row_commands.clear()
         waiting_row_shas.clear()
         waiting_count_var.set(0)
+        working_count_var.set(0)
         finished_count_var.set(0)
         review_count_var.set(0)
+        activity_tone_var.set("")
         skip_state_var.set("")
         skip_session_id_var.set("")
         skip_project_var.set("")
@@ -3255,7 +3545,18 @@ def run_native_presence(
             return
         if suppress_passive_refresh_until.get() <= time.time():
             suppress_passive_refresh_until.set(0.0)
-        was_hard_gate = state_var.get() in {"prompt_gate", "command_gate"}
+        previous_state = state_var.get()
+        previous_working_count = int(working_count_var.get() or 0)
+        previous_delivery_receipt_id = delivery_receipt_id_var.get()
+        previous_needs_attention = (
+            activity_tone_var.get() == "attention"
+            if activity_tone_var.get()
+            else previous_state in {
+                "prompt_gate", "command_gate", "control_recommended", "control_review",
+                "optimize_available", "clipboard_confirm", "session_waiting",
+            }
+        )
+        was_hard_gate = previous_state in {"prompt_gate", "command_gate"}
         state_var.set(incoming_state)
         waiting_row_texts.clear()
         waiting_row_urls.clear()
@@ -3263,6 +3564,8 @@ def run_native_presence(
         waiting_row_return.clear()
         waiting_row_wants.clear()
         waiting_row_kinds.clear()
+        waiting_row_sections.clear()
+        waiting_row_action_labels.clear()
         waiting_row_tags.clear()
         waiting_row_actions.clear()
         waiting_row_commands.clear()
@@ -3275,21 +3578,52 @@ def run_native_presence(
             waiting_sessions = payload.get("digest_rows")
         if incoming_state == "compact_recommended":
             waiting_sessions = payload.get("compact_rows")
+        activity_sections = payload.get("activity_sections")
+        grouped_rows: list[dict[str, object]] = []
+        if isinstance(activity_sections, list):
+            active_sections: list[tuple[str, list[object]]] = []
+            for section in activity_sections:
+                if not isinstance(section, dict):
+                    continue
+                label = str(section.get("label") or "")
+                rows = section.get("rows")
+                if not isinstance(rows, list) or not rows:
+                    continue
+                active_sections.append((label, rows))
+            for active_index, (label, rows) in enumerate(active_sections):
+                remaining_sections = len(active_sections) - active_index - 1
+                allowance = max(1, max_waiting_rows - len(grouped_rows) - remaining_sections)
+                for section_index, source in enumerate(rows[:allowance]):
+                    if not isinstance(source, dict):
+                        continue
+                    grouped_rows.append({**source, "_section_label": label if section_index == 0 else ""})
+        if grouped_rows:
+            waiting_sessions = grouped_rows
         if isinstance(waiting_sessions, list):
             for row in waiting_sessions[:max_waiting_rows]:
                 if not isinstance(row, dict):
                     continue
                 waiting_row_texts.append(row_display_text(row))
-                path = str(row.get("url") or "/")
+                normalized_action = row.get("normalized_action")
+                normalized_action = normalized_action if isinstance(normalized_action, dict) else {}
+                path = str(normalized_action.get("url") or row.get("url") or "/")
                 waiting_row_urls.append(path if path.startswith("http") else f"{url.rstrip('/')}{path}")
-                waiting_row_session_ids.append(str(row.get("session_id") or ""))
-                waiting_row_return.append(bool(row.get("return_available")))
+                waiting_row_session_ids.append(str(normalized_action.get("session_id") or row.get("session_id") or ""))
+                waiting_row_return.append(normalized_action.get("type") == "runtime_return" or bool(row.get("return_available")))
                 waiting_row_wants.append(str(row.get("wants") or "")[:16])
                 waiting_row_kinds.append(str(row.get("kind") or ""))
+                waiting_row_sections.append(str(row.get("_section_label") or ""))
                 waiting_row_tags.append(str(row.get("tag") or "")[:16])
-                waiting_row_actions.append(str(row.get("action") or ""))
+                waiting_row_actions.append(str(normalized_action.get("type") or row.get("action") or ""))
+                waiting_row_action_labels.append(str(normalized_action.get("label") or ""))
                 waiting_row_commands.append(str(row.get("command") or ""))
                 waiting_row_shas.append(str(row.get("sha") or ""))
+        preferences = payload.get("companion_preferences")
+        if isinstance(preferences, dict):
+            motion_mode_var.set(str(preferences.get("motion_mode") or "standard"))
+        activity_tone_var.set(str(payload.get("tone") or ""))
+        delivery_confirmed_var.set(bool(payload.get("delivery_confirmed")))
+        delivery_receipt_id_var.set(str(payload.get("delivery_receipt_id") or ""))
         presence = payload.get("presence")
         try:
             presence_waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
@@ -3299,6 +3633,20 @@ def run_native_presence(
             working_count_var.set(int(presence.get("working") or 0) if isinstance(presence, dict) else 0)
         except (TypeError, ValueError, tk.TclError):
             working_count_var.set(0)
+        current_needs_attention = (
+            activity_tone_var.get() == "attention"
+            if activity_tone_var.get()
+            else incoming_state in {
+                "prompt_gate", "command_gate", "control_recommended", "control_review",
+                "optimize_available", "clipboard_confirm", "session_waiting",
+            }
+        )
+        entered_attention = current_needs_attention and not previous_needs_attention
+        activity_changed = (previous_working_count > 0) != (int(working_count_var.get() or 0) > 0)
+        delivered = bool(delivery_receipt_id_var.get()) and delivery_receipt_id_var.get() != previous_delivery_receipt_id
+        recovered = previous_state == "offline" and incoming_state != "offline"
+        if not reduce_motion_active() and motion_mode_var.get() != "quiet" and (entered_attention or activity_changed or delivered or recovered):
+            focus_lock_ticks_var.set(2)
         finished_sessions = payload.get("finished_sessions")
         digest_rows = payload.get("digest_rows")
         badge = payload.get("badge")
@@ -3361,10 +3709,13 @@ def run_native_presence(
         # bar, where 18 cut it to "Continue only afte".
         title_var.set(str(payload.get("label") or "AIWatcher")[:34])
         subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
+        if isinstance(activity_sections, list) and len(activity_sections) > 1:
+            subtitle_text = str(payload.get("activity_line") or subtitle_text)[:46]
         remaining = payload.get("expires_in_seconds")
         if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
         subtitle_var.set(subtitle_text)
+        root.title(f"AIWatcher Companion: {str(payload.get('activity_line') or subtitle_text)[:120]}")
         if incoming_state in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
             title_var.set(review_title())
             subtitle_var.set(review_subtitle())
@@ -3771,7 +4122,7 @@ def run_native_presence(
         # it, so "review when ready" never wears the orange treatment.
         states = {
             "offline", "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm",
-            "session_waiting", "session_finished", "away_digest", "compact_recommended",
+            "session_waiting", "session_finished", "away_digest", "compact_recommended", "delivery_review_ready",
         }
         # Only the nudge step of a compaction carries a button; the later
         # steps are facts about a thing already done.
@@ -3782,7 +4133,7 @@ def run_native_presence(
         # One row per actionable item. Waiting, context review, finished
         # batches, and away digests all reuse this row surface so the badge can
         # explain itself instead of dropping the user into an unlabeled count.
-        if state_var.get() not in {"session_waiting", "session_finished", "away_digest", "control_review", "context_review", "prompt_status", "compact_recommended"} or not waiting_row_texts:
+        if not waiting_row_texts:
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
@@ -3826,6 +4177,16 @@ def run_native_presence(
             copy_compact_row(index)
             return
         if (
+            index < len(waiting_row_actions)
+            and waiting_row_actions[index] == "copy_fresh_start"
+            and index < len(waiting_row_session_ids)
+            and waiting_row_session_ids[index]
+        ):
+            primary_session_id_var.set(waiting_row_session_ids[index])
+            primary_url_var.set(waiting_row_urls[index])
+            copy_fresh_start_from_companion()
+            return
+        if (
             index < len(waiting_row_return)
             and waiting_row_return[index]
             and index < len(waiting_row_session_ids)
@@ -3845,17 +4206,22 @@ def run_native_presence(
     def apply_waiting_rows() -> None:
         rows = 0 if collapsed.get() else visible_waiting_rows()
         for index in range(min(rows, len(waiting_row_texts))):
-            row_widgets[index][1].configure(text=waiting_row_texts[index])
+            section = waiting_row_sections[index] if index < len(waiting_row_sections) else ""
+            label = waiting_row_texts[index]
+            row_widgets[index][1].configure(text=f"{section.upper()}   {label}" if section else label)
             row_widgets[index][2].configure(
                 text=row_action_label(index),
             )
             kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
-            if kind == "compact":
+            action = waiting_row_actions[index] if index < len(waiting_row_actions) else ""
+            if action == "none":
+                row_widgets[index][2].pack_forget()
+                row_widgets[index][3].configure(text="")
+            elif kind == "compact":
                 # The stage where a waiting row shows what the session wants;
                 # no button once the compaction is under way.
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
-                action = waiting_row_actions[index] if index < len(waiting_row_actions) else ""
                 if action:
                     row_widgets[index][2].pack(side="right")
                 else:
@@ -3893,7 +4259,7 @@ def run_native_presence(
             "clipboard_confirm", "session_waiting",
         }:
             return True
-        if state_var.get() in {"session_finished", "away_digest", "compact_recommended"}:
+        if state_var.get() in {"session_finished", "away_digest", "compact_recommended", "delivery_review_ready"}:
             return True
         if visibility == "nudges-only":
             return False
@@ -3941,10 +4307,14 @@ def run_native_presence(
             pass
 
     def update_attention_style() -> None:
-        needs_attention = state_var.get() in {
-            "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
-            "clipboard_confirm", "session_waiting",
-        }
+        needs_attention = (
+            activity_tone_var.get() == "attention"
+            if activity_tone_var.get()
+            else state_var.get() in {
+                "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
+                "clipboard_confirm", "session_waiting",
+            }
+        )
         # A hard gate holds the user's own prompt until they act; softer
         # attention blocks nothing. Mirrors the Swift bar's isHardGate.
         hard_gate = state_var.get() in {"prompt_gate", "command_gate"}
@@ -3983,13 +4353,42 @@ def run_native_presence(
             ink="#141314",
         )
         collapsed_canvas.move("all", 7.0, 13.0)
+        # Companion-only expression inside the front ring. The dashboard and
+        # expanded bar keep the official mark untouched; this small viewport
+        # makes the persistent bubble feel watchful without introducing an
+        # unrelated mascot or another asset format.
+        working = int(working_count_var.get() or 0) > 0
+        offline = state_var.get() == "offline"
+        reduce_motion = reduce_motion_active()
+        gaze_x, gaze_y, eye_colour = _companion_expression(
+            state_var.get(),
+            working=working,
+            needs_attention=needs_attention,
+            phase=int(expression_phase_var.get()),
+            reduce_motion=reduce_motion or motion_mode_var.get() != "expressive",
+        )
+        collapsed_canvas.create_oval(16, 16, 23, 23, fill="#141314", outline="")
+        collapsed_canvas.create_rectangle(19, 16, 25, 23, fill="#141314", outline="")
+        collapsed_canvas.create_oval(21, 16, 28, 23, fill="#141314", outline="")
+        eye_width = 3 if int(focus_lock_ticks_var.get() or 0) > 0 else 2
+        collapsed_canvas.create_line(
+            18 + gaze_x, 19 + gaze_y, 20 + gaze_x, 19 + gaze_y,
+            fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
+        )
+        collapsed_canvas.create_line(
+            24 + gaze_x, 19 + gaze_y, 26 + gaze_x, 19 + gaze_y,
+            fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
+        )
+        if int(focus_lock_ticks_var.get() or 0) > 0 and not needs_attention:
+            collapsed_canvas.create_oval(5, 7, 33, 35, outline=ring_colour, width=2)
         # The running indicator: a mint arc stepping around the bubble's rim
         # while any session is working, advanced on the existing pulse tick.
         # Coarser than the Swift bar's continuous orbit, which is the Tk
         # fallback's usual fidelity. Attention outranks it. A third of the
         # circle at 4 wide, the Swift bar's 5 x 33% scaled to this canvas.
         if int(working_count_var.get() or 0) > 0 and not needs_attention:
-            orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
+            if not reduce_motion and motion_mode_var.get() != "quiet":
+                orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
             collapsed_canvas.create_arc(
                 2, 4, 34, 36, start=orbit_angle_var.get(), extent=120,
                 style="arc", outline="#43d9a3", width=4,
@@ -4001,7 +4400,7 @@ def run_native_presence(
         # holds steady.
         if needs_attention:
             rim_colour = "#ed6a24"
-            if hard_gate and not pulse_var.get():
+            if hard_gate and not reduce_motion and motion_mode_var.get() != "quiet" and not pulse_var.get():
                 rim_colour = "#f8cdb5"
             collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)
         # The collapsed bubble reserves numbers for things needing attention.
@@ -4025,7 +4424,6 @@ def run_native_presence(
             collapsed_canvas.create_text(
                 27, 10, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
-        offline = state_var.get() == "offline"
         for button in (plan_button, ask_button, scan_button, console_button):
             button.state(["disabled"] if offline else ["!disabled"])
         if not restart_requested:
@@ -4120,10 +4518,25 @@ def run_native_presence(
         apply_window_visibility()
 
     def pulse_attention() -> None:
-        pulse_var.set(not pulse_var.get())
-        update_attention_style()
+        reduce_motion = reduce_motion_active()
+        visible_surface = should_show_window()
+        animate_surface = (
+            not reduce_motion
+            and motion_mode_var.get() != "quiet"
+            and collapsed.get()
+            and visible_surface
+            and (int(working_count_var.get() or 0) > 0 or state_var.get() in {"prompt_gate", "command_gate"})
+        )
+        if animate_surface:
+            pulse_var.set(not pulse_var.get())
+            if motion_mode_var.get() == "expressive" and int(working_count_var.get() or 0) > 0:
+                expression_phase_var.set((int(expression_phase_var.get()) + 1) % 4)
+            if int(focus_lock_ticks_var.get() or 0) > 0:
+                focus_lock_ticks_var.set(int(focus_lock_ticks_var.get()) - 1)
+        if visible_surface:
+            update_attention_style()
         try:
-            root.after(800, pulse_attention)
+            root.after(800 if animate_surface else (30000 if not visible_surface else 8000), pulse_attention)
         except tk.TclError:
             pass
 
@@ -4283,7 +4696,17 @@ def run_native_presence(
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.
-    collapsed_canvas = tk.Canvas(collapsed_frame, width=36, height=40, bg="#ffffff", highlightthickness=0, bd=0)
+    collapsed_canvas = tk.Canvas(
+        collapsed_frame,
+        width=36,
+        height=40,
+        bg="#ffffff",
+        highlightthickness=1,
+        highlightcolor="#0052F5",
+        highlightbackground="#ffffff",
+        bd=0,
+        takefocus=True,
+    )
     collapsed_canvas.pack(fill="both", expand=True)
 
     # The canvas covers the whole bubble, so it has to carry the move as well
@@ -4311,6 +4734,8 @@ def run_native_presence(
     collapsed_canvas.bind("<ButtonPress-1>", collapsed_button_press)
     collapsed_canvas.bind("<B1-Motion>", collapsed_button_motion)
     collapsed_canvas.bind("<ButtonRelease-1>", collapsed_button_release)
+    collapsed_canvas.bind("<Return>", lambda _event: toggle_collapsed())
+    collapsed_canvas.bind("<space>", lambda _event: toggle_collapsed())
     set_collapsed(True)
     refresh_state()
     pulse_attention()

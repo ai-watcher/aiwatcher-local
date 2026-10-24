@@ -634,6 +634,7 @@ class TrimmedHomeTest(unittest.TestCase):
             "aiAssistSetupTitle", "aiAssistSourceAccess", "aiAssistWorking",
             "companionBatchFinished", "companionBlockedSessions", "companionFinishedExpanded",
             "companionFreshStartContext",
+            "deliveryTrackingEnabled",
             "deliveryReviewCreateButton", "deliveryReviewObjective", "deliveryReviewProject",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffNextOutcome", "handoffSources", "handoffStatus", "handoffType",
@@ -1626,6 +1627,7 @@ class SettingsTest(unittest.TestCase):
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
 
     def test_the_duplicate_coverage_view_is_gone(self):
         # 36 of its 38 sentences were already in Settings, and its only entry
@@ -1673,6 +1675,19 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("aiAssistFormDirty = true", self.js)
         self.assertIn("aiAssistFormDirty = false", self.js)
         self.assertIn("!(aiAssistFormDirty && activeSettingsPanel === 'ai')", self.js)
+
+    def test_delivery_tracking_is_one_explicit_settings_choice(self):
+        self.assertIn('id="deliveryTrackingMount"', self.html)
+        self.assertIn("function renderDeliveryTracking", self.js)
+        self.assertIn("Automatically configure commit tracking", self.js)
+        self.assertIn("One repository hook covers every branch and linked worktree", self.js)
+        self.assertIn("fetch('/api/delivery-tracking'", self.js)
+
+    def test_companion_motion_is_a_three_mode_persisted_control(self):
+        self.assertIn("['quiet', 'standard', 'expressive']", self.js)
+        self.assertIn('name="companionMotion"', self.js)
+        self.assertIn("motion_mode:", self.js)
+        self.assertIn(".companion-motion-options", self.css)
 
     def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
