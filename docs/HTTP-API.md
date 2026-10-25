@@ -179,6 +179,15 @@ The route exposes no transcript bodies, chat titles, or transcript file paths.
 Refresh does not trigger a full session scan or a provider call. Cross-origin
 browser requests are rejected; the dashboard's own origin and native clients
 are allowed. Unavailable context has a reason and no fabricated percentage.
+`POST /api/delivery-tracking` enables or stops automatic repository hook
+management with `{"enabled": true | false}`. Enabling immediately configures
+Git repositories found in local session metadata; later dashboard refreshes
+configure newly observed repositories. One repository hook covers its branches
+and linked worktrees. Custom or pre-existing hooks are left unchanged and
+reported as needing attention. Disabling stops future management and leaves
+installed hooks active. Discovery is processed in bounded, recent-first batches;
+the response reports deferred candidate directories. This route is same-origin
+only.
 `/api/delivery-reviews` returns recent privacy-safe delivery receipts. Changed
 paths are reconstructed only while the exact local Git range remains available;
 objective text is never rehydrated from AIWatcher state. A receipt is `ready`

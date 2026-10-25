@@ -278,6 +278,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-approve", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-viewed", ui.SAME_ORIGIN_ONLY_ROUTES)
+        self.assertIn("/api/delivery-tracking", ui.SAME_ORIGIN_ONLY_ROUTES)
 
 
 if __name__ == "__main__":
