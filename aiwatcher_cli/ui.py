@@ -3883,6 +3883,7 @@ def _finalize_delivery_review(
         checks=payload.get("verifications") or [],
         linked_commit_shas=linked_commit_shas,
         excluded_delegated_sessions=excluded_delegated_sessions,
+        observed_through=event.get("observed_at") or "unavailable",
     )
     if (
         infer_objective

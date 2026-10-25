@@ -88,6 +88,30 @@ class WorkUnderstandingTests(unittest.TestCase):
         self.assertEqual(review["opening_objective"], "Opening")
         self.assertEqual(review["latest_request"], "Actually latest")
 
+    def test_delivery_boundary_excludes_later_and_unbounded_turns(self) -> None:
+        review = build_work_understanding([
+            {"at": "2026-10-09T10:00:00Z", "prompt": "Opening"},
+            {"at": "2026-10-09T10:01:00Z", "prompt": "Last request before delivery"},
+            {"at": "2026-10-09T10:03:00Z", "prompt": "Request for later work"},
+            {"prompt": "Timestamp unavailable"},
+        ], observed_through="2026-10-09T10:02:00Z")
+
+        self.assertEqual(review["turn_count"], 2)
+        self.assertEqual(review["latest_request"], "Last request before delivery")
+        self.assertEqual(review["excluded_out_of_window_turns"], 2)
+        self.assertEqual(review["intent_window_ends_at"], "2026-10-09T10:02:00Z")
+        self.assertIn("no later than the delivery event", review["limitation"])
+
+    def test_invalid_delivery_boundary_fails_closed(self) -> None:
+        review = build_work_understanding([
+            {"at": "2026-10-09T10:00:00Z", "prompt": "Do not infer this without an event time"},
+        ], commits=[{"sha": "abc123", "subject": "Observed commit"}], observed_through="unavailable")
+
+        self.assertEqual(review["turn_count"], 0)
+        self.assertIsNone(review["opening_objective"])
+        self.assertEqual(review["excluded_out_of_window_turns"], 1)
+        self.assertIn("no transcript intent was included", review["limitation"])
+
 
 if __name__ == "__main__":
     unittest.main()

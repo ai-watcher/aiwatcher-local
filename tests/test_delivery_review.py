@@ -10,11 +10,13 @@ from unittest.mock import patch
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.delivery_review import (
     DeliveryReviewUnavailable,
+    _workflow_stats,
     build_work_receipt,
     format_work_receipt,
     hydrate_persisted_receipt,
     work_receipt_evidence_hash,
 )
+from aiwatcher_cli.delivery import ContributionEdge
 from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.outcome_evidence import verification_git_fingerprint
 
@@ -179,6 +181,25 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         self.assertIn("AIWatcher Delivery Review", text)
         self.assertIn("No exact-state verification", text)
         self.assertNotIn("developer productivity", text.lower())
+
+    def test_workflow_turn_count_excludes_compaction_summaries(self) -> None:
+        contribution = ContributionEdge(
+            session_id="session-1", commit_shas=(self.head,), strength="exact", provenance="observed",
+        )
+        session = type("Session", (), {
+            "session_id": "session-1", "source_path": str(self.root / "session.jsonl"),
+            "agent_calls": 2, "tool_calls": 3,
+        })()
+        segments = [
+            {"prompt": "Implement the feature.", "took_seconds": 5},
+            {"prompt": "This session is being continued", "compact_summary": True, "took_seconds": 10},
+        ]
+
+        with patch("aiwatcher_cli.delivery_review.segment_session_by_prompt", return_value=segments):
+            stats = _workflow_stats((contribution,), [session])
+
+        self.assertEqual(stats.user_turns, 1)
+        self.assertEqual(stats.observed_request_seconds, 5)
 
     def test_push_wrapper_creates_review_only_after_confirmed_current_head_push(self) -> None:
         remote = self.root / "remote.git"

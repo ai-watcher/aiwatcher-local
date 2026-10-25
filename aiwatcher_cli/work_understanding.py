@@ -67,14 +67,25 @@ def build_work_understanding(
     exact_session_link: bool = False,
     linked_commit_shas: Iterable[object] = (),
     excluded_delegated_sessions: int = 0,
+    observed_through: object = None,
 ) -> dict[str, Any] | None:
     """Connect transient intent to observed work without claiming completion."""
-    turns = [
+    candidate_turns = [
         {**row, "_input_order": index} for index, row in enumerate(segments)
         if isinstance(row, dict)
         and not row.get("compact_summary")
         and _clean_text(row.get("prompt"))
     ]
+    boundary_requested = bool(_clean_text(observed_through, 100))
+    boundary = _turn_timestamp(observed_through)
+    excluded_out_of_window_turns = 0
+    turns = []
+    for row in candidate_turns:
+        timestamp = _turn_timestamp(row.get("at"))
+        if boundary_requested and (boundary is None or timestamp is None or timestamp > boundary):
+            excluded_out_of_window_turns += 1
+            continue
+        turns.append(row)
     turns.sort(key=lambda row: (
         _turn_timestamp(row.get("at")) is None,
         _turn_timestamp(row.get("at")) or 0,
@@ -133,6 +144,17 @@ def build_work_understanding(
         }
         for row in turns
     ], sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    limitation = (
+        "AIWatcher connects observed intent, Git, and verification evidence. "
+        "It does not prove that the implementation satisfies every prose requirement."
+    )
+    if boundary_requested and boundary is None:
+        limitation += " Delivery-event time was unavailable, so no transcript intent was included."
+    elif boundary_requested:
+        limitation += (
+            " Intent includes only timestamped developer turns observed no later than the delivery event; "
+            "earlier unrelated turns in a linked session may still be present."
+        )
     return {
         "opening_objective": opening or None,
         "latest_request": latest or None,
@@ -153,13 +175,12 @@ def build_work_understanding(
         "passed_check_count": len(passed_checks),
         "exact_session_link": exact_commits,
         "excluded_delegated_sessions": max(0, int(excluded_delegated_sessions)),
+        "excluded_out_of_window_turns": excluded_out_of_window_turns,
+        "intent_window_ends_at": _clean_text(observed_through, 100) if boundary is not None else None,
         "confidence": confidence,
         "alignment_status": "confirmation_required",
         "alignment_label": alignment_label,
-        "limitation": (
-            "AIWatcher connects observed intent, Git, and verification evidence. "
-            "It does not prove that the implementation satisfies every prose requirement."
-        ),
+        "limitation": limitation,
         "intent_source_hash": (
             hashlib.sha256(intent_seed.encode("utf-8")).hexdigest()
             if opening or latest else None

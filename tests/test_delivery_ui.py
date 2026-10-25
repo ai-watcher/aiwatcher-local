@@ -416,6 +416,54 @@ class DeliveryReviewApiTests(unittest.TestCase):
 
         self.assertFalse(stale["approval_valid"])
 
+    def test_request_after_delivery_does_not_rewrite_approved_intent(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        source = self.root / "session.jsonl"
+
+        def write_turns(include_later: bool) -> None:
+            rows = [
+                ("1", "2026-10-09T12:00:00Z", "Implement delivery review."),
+                ("2", "2026-10-09T12:01:00Z", "Keep the summary concise."),
+            ]
+            if include_later:
+                rows.append(("3", "2026-10-09T12:03:00Z", "Begin unrelated follow-up work."))
+            source.write_text("".join(json.dumps({
+                "uuid": row_id, "type": "user", "sessionId": "session-1",
+                "timestamp": stamp, "message": {"content": prompt},
+            }) + "\n" for row_id, stamp, prompt in rows), encoding="utf-8")
+
+        write_turns(False)
+        local_state.record_commit_receipt({
+            "sha": head, "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-window",
+        })
+        build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-window", event_observed_at="2026-10-09T12:02:00Z",
+            remote="origin", remote_ref="feature", sessions=[],
+        )
+        session = LocalSession(session_id="session-1", tool="claude-code", source_path=str(source))
+
+        with patch.object(ui, "_known_delegated_session_ids", return_value=set()), patch.object(
+            ui, "_find_session_row", return_value=session,
+        ):
+            review = ui.build_delivery_reviews()["reviews"][0]
+            approved = ui.approve_delivery_review({
+                "receipt_id": review["receipt_id"], "evidence_hash": review["evidence_hash"],
+                "objective": review["objective"]["text"], "confirmed": True,
+            })
+            self.assertTrue(approved["approval_valid"])
+            write_turns(True)
+            unchanged = ui.build_delivery_reviews()["reviews"][0]
+
+        self.assertTrue(unchanged["approval_valid"])
+        self.assertEqual(unchanged["work_understanding"]["turn_count"], 2)
+        self.assertEqual(unchanged["work_understanding"]["latest_request"], "Keep the summary concise.")
+        self.assertEqual(unchanged["work_understanding"]["excluded_out_of_window_turns"], 1)
+
     def test_delivery_mutations_reject_cross_origin_pages(self) -> None:
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-approve", ui.SAME_ORIGIN_ONLY_ROUTES)

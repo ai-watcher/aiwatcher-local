@@ -224,6 +224,8 @@ def _workflow_stats(contributions: tuple[ContributionEdge, ...], sessions: Itera
     idle_seconds: list[float] = []
     for row in selected:
         for segment in segment_session_by_prompt(row.source_path, max_chars=1):
+            if segment.get("compact_summary"):
+                continue
             turns += 1
             took = segment.get("took_seconds")
             gap = segment.get("gap_seconds")
