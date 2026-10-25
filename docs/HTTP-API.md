@@ -116,6 +116,12 @@ than appending, so the call is idempotent.
 
 ## Internal endpoints
 
+Session detail (`/api/session`) includes a `review` decision with its status,
+reason, observation, benefit, and check timestamp. It rechecks the selected
+session through the context cache. Status distinguishes historical, actionable,
+waiting, advisory, clear, and unknown evidence; a fast metadata response alone
+never establishes the current recommendation. See [Companion review contract](COMPANION_REVIEWS.md).
+
 The dashboard also serves the endpoints below. They exist to render the UI,
 their shapes track whatever the current dashboard needs, and they are **not
 supported for external callers** — treat them as private and expect them to

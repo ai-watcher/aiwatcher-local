@@ -952,14 +952,14 @@ function renderSessionContextHealth(sessionId) {
   if (!row || !row.chart) return '';
   const verdict = runwayVerdict(row.chart);
   return `<section class="detail-section session-health">
-    <h2>Context health</h2>
+    <h2>Indexed context history</h2><p class="tool-link-note">From the last analysis. The decision above rechecks the selected session; these historical charts may describe an earlier state.</p>
     ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> &mdash; ${esc(verdict.detail)}</p>` : ''}
     <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
     <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
     <p class="health-facts">${healthFacts(row).map(group => `<span>${esc(group)}</span>`).join('')}</p>
     ${row.intent_summary || row.context_summary ? `<div class="health-evidence">
-      ${row.intent_summary ? `<div class="label">Inferred intent</div><p>${esc(row.intent_summary)}</p>` : ''}
-      ${row.context_summary ? `<div class="label">Context AIWatcher will carry</div><p>${esc(row.context_summary)}</p>` : ''}
+      ${row.intent_summary ? `<div class="label">Suggested next step</div><p>${esc(row.intent_summary)}</p>` : ''}
+      ${row.context_summary ? `<div class="label">Recorded context evidence</div><p>${esc(row.context_summary)}</p>` : ''}
     </div>` : ''}
   </section>`;
 }
@@ -1039,7 +1039,7 @@ function renderIdentityStrip(item, runtime, sourcePath) {
   </div>`;
 }
 function confidenceLabel(s) {
-  if (s.outcome) return { label: 'Verified outcome', tone: 'verified' };
+  if (s.outcome) return { label: 'User-marked outcome', tone: 'verified' };
   if (s.inferred_outcome) return { label: 'Inferred outcome', tone: 'inferred' };
   if (s.evidence_captured) return { label: 'Observed evidence', tone: 'observed' };
   return { label: 'Local metadata', tone: 'unknown' };
@@ -1361,24 +1361,28 @@ function verdictLines(s) {
 
   const evidence = s.outcome_evidence || {};
   const commits = evidence.commits || [];
+  const commitScope = evidence.commit_attribution === 'session_bound' ? 'session-linked' : 'nearby';
+  const commitBoundary = evidence.commit_attribution === 'session_bound'
+    ? 'Commit receipts link these to the session; delivery is checked separately.'
+    : 'Proximity does not prove this session authored or delivered them.';
   const checked = survivalStatus(evidence.survival);
   const plural = commits.length === 1 ? '' : 's';
   let worth;
   let tone = 'unknown';
   if (!commits.length) {
-    worth = 'No commit has landed near this session yet, so there is nothing to judge it by.';
+    worth = 'No nearby commit evidence is available yet; usefulness is not established.';
   } else if (checked && checked.status === 'survived') {
     tone = 'healthy';
-    worth = `${commits.length} commit${plural} landed, and the work was still standing at the ${checked.bucket}-day check.`;
+    worth = `${commits.length} ${commitScope} commit${plural} found, and their changes were still standing at the ${checked.bucket}-day check.`;
   } else if (checked && checked.status === 'churned') {
     tone = 'warning';
-    worth = `${commits.length} commit${plural} landed, but the work was gone by the ${checked.bucket}-day check.`;
+    worth = `${commits.length} ${commitScope} commit${plural} found, but their changes were gone by the ${checked.bucket}-day check.`;
   } else if (checked) {
     // The check ran and could not tell. That is not a pass, and colouring it as
     // one is how a non-answer starts reading like an answer.
-    worth = `${commits.length} commit${plural} landed. The ${checked.bucket}-day check could not tell whether the work stuck.`;
+    worth = `${commits.length} ${commitScope} commit${plural} found. The ${checked.bucket}-day check could not tell whether the work stuck.`;
   } else {
-    worth = `${commits.length} commit${plural} landed near this session. Whether the work stuck is judged after 7 days.`;
+    worth = `${commits.length} ${commitScope} commit${plural} found. ${commitBoundary} Retention can be checked after 7 days.`;
   }
   lines.push({ key: 'worth', label: 'Was it worth it', tone, body: worth });
 
@@ -4249,46 +4253,33 @@ function renderSessionHero(s) {
     <h2 class="session-title">${esc(s.title || s.project_short || s.project || 'Session')}</h2>
     <p class="session-meta">${s.title ? `${esc(s.project_short || s.project || 'unknown project')} · ` : ''}${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
-    <div class="session-hero-pressure">
-      <span>${esc(s.tokens_scope_label || 'Session total')}</span><strong>${esc(s.tokens_label || '—')}</strong>
-      <em>${esc(s.api_value || '—')} API-equivalent</em>
-    </div>
     <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
   </section>`;
 }
+function renderSessionUsageTotals(s) {
+  return `    <div class="session-hero-pressure">
+      <span>${esc(s.tokens_scope_label || 'Session total')}</span><strong>${esc(s.tokens_label || '—')}</strong>
+      <em>${esc(s.api_value || '—')} API-equivalent</em>
+    </div>
+`;
+}
+function openUsageEvidence() {
+  const panel = document.getElementById('usageEvidence');
+  if (!panel) return;
+  panel.open = true;
+  panel.scrollIntoView({ block: 'start' });
+}
+function openOutcomeReview() {
+  const panel = document.getElementById('outcomePanel');
+  if (!panel) return;
+  panel.open = true;
+  panel.scrollIntoView({ block: 'center' });
+}
 function renderSessionSummary(s, label = 'Loading detailed evidence...') {
-  const actions = s.actions || [];
-  const action = actions.find(item => item.primary) || actions[0] || null;
-  const actionButton = action
-    ? action.id === 'handoff' && action.label !== 'Inspect evidence'
-      ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">${esc(action.label || 'Build Fresh Start brief')}</button>`
-      : action.id === 'review_outcome'
-        ? `<button class="btn-primary" disabled>${esc(action.label || 'Review outcome')}</button>`
-        : `<button class="btn-primary" disabled>${esc(action.label || 'Review session')}</button>`
-    : '';
-  const completion = renderFreshStartCompletion(s);
-  return `<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
-  ${completion || `
-  <section class="detail-section recommended-action loading-action">
-    <div class="section-title">
-      <div><h3>${esc(action ? action.label : 'Review session')}</h3><p>${esc(action ? action.reason : 'AIWatcher is loading full local evidence for this session.')}</p></div>
-      <span class="session-state recent">loading</span>
-    </div>
-    <div class="copy-row">${actionButton}</div>
-    <div class="ai-loading-panel" aria-live="polite">
-      <div class="ai-loading-mark">AI</div>
-      <div>
-        <strong>${esc(label)}</strong>
-        <p>Timeline, outcome, git, and prompt evidence are indexing in the background. You can use the primary action while details finish loading.</p>
-        <div class="ai-loading-bar" aria-hidden="true"></div>
-      </div>
-    </div>
-  </section>`}
-  ${completion ? `<div class="ai-loading-panel" aria-live="polite">
-    <div class="ai-loading-mark">AI</div><div><strong>${esc(label)}</strong>
-    <p>Timeline, outcome, git, and prompt evidence are indexing in the background.</p>
-    <div class="ai-loading-bar" aria-hidden="true"></div></div>
-  </div>` : ''}</div>`;
+  return `<div class="session-review-shell">${renderSessionHero(s)}${renderSessionActions(s)}
+    ${renderFreshStartCompletion(s)}
+    <div class="ai-loading-panel" aria-live="polite"><div><strong>${esc(label)}</strong><p>Checking the selected session; historical totals alone do not establish a live warning.</p></div></div>
+  </div>`;
 }
 function renderFreshStartCompletion(s) {
   const completion = s.fresh_start_completion || null;
@@ -4309,75 +4300,48 @@ function renderFreshStartCompletion(s) {
       ${completion.confidence ? `<span class="pill">${esc(completion.confidence)} confidence</span>` : ''}
     </div>
     <div class="action-buttons">${nextButton}<button class="btn-quiet" onclick="showView('receipts'); closeDrawer()">View receipt</button></div>
-    <p class="tool-link-note">${completed ? 'The context chart remains as historical evidence; this recommendation is no longer outstanding.' : 'The receipt remains open until an explicit follow-up link is available.'}</p>
+    <p class="tool-link-note">${completed ? 'This handoff has a confirmed follow-up. Any current context signal is checked separately.' : 'The receipt remains open until an explicit follow-up link is available.'}</p>
   </section>`;
 }
 function renderSessionActions(s) {
-  const actions = s.actions || [];
-  const handoffAction = actions.find(action => action.id === 'handoff') || null;
-  const hasHandoff = !!handoffAction;
-  const needsOutcome = actions.some(action => action.id === 'review_outcome');
-  const primaryId = (actions.find(action => action.primary) || {}).id || (needsOutcome ? 'review_outcome' : hasHandoff ? 'handoff' : 'optimize_next_prompt');
-  const runtime = s.runtime_attachment || actions.find(action => action.id === 'open_tool') || {};
-  const openAction = actions.find(action => action.id === 'open_tool') || {};
-  const title = hasHandoff
-    ? 'Recommended: Continue in a fresh session'
-    : needsOutcome
-      ? 'Recommended: mark the outcome'
-      : 'Recommended: tighten the next prompt';
-  const body = hasHandoff
-    ? 'This session has enough context, model calls, or tool calls that a Fresh Start brief is safer than replaying the whole history.'
-    : needsOutcome
-      ? 'Mark whether this worked so AIWatcher can measure value per useful change instead of only tokens.'
-      : 'Use this session as evidence, then preflight the next prompt before sending it.';
-  const openToolNote = runtime.reason || openAction.reason || 'No safe return target is available for this session yet.';
-  // When there is no live return there is no action, so nothing here may carry
-  // button shape. It used to render a disabled button of exactly the same
-  // height, border and padding as the three real ones beside it, with the
-  // reason hidden in a title attribute where it could not be read.
-  const openButton = openAction.available
-    ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
-    : `<span class="action-note">${esc(openAction.label || runtime.action_label || 'No live return')} — ${esc(openToolNote)}</span>`;
-  const evidenceChips = [
-    s.calls ? `${s.calls} model calls` : '',
-    s.tool_calls ? `${s.tool_calls} tool calls` : '',
-    runtime.exact_return_available ? 'Exact return available' : (runtime.available ? 'App focus only' : 'Log only'),
-  ].filter(Boolean).slice(0, 5).map(item => `<span class="pill">${esc(item)}</span>`).join('');
-  // A session already judged useful and verified is not making a demand of
-  // anyone. It kept a critical-toned "Needs action" eyebrow directly under its
-  // own "Outcome: useful" and "Verified outcome" chips, which is the UI arguing
-  // with itself.
-  // confidenceLabel() renders "Verified outcome" purely from s.outcome being
-  // set -- a recorded judgement rather than an inferred one -- so that is the
-  // same condition. There is no separate verified flag to read.
-  const settled = s.outcome === 'useful';
-  return `<section class="detail-section recommended-action action-composer${settled ? ' settled' : ''}">
+  const review = s.review || {
+    status: 'checking', title: 'Checking whether action is needed',
+    reason: 'Rechecking this session before recommending a change.',
+    benefit: 'The review will separate current context pressure from historical usage.',
+  };
+  const runtime = s.runtime_attachment || {};
+  const status = review.status;
+  const actionable = ['actionable', 'waiting'].includes(status);
+  const ready = status !== 'checking';
+  const origin = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
+  const fromCompanion = origin && origin.get('session') === s.session_id && origin.get('review') === 'context';
+  const openAction = (s.actions || []).find(action => action.id === 'open_tool') || {};
+  const returnButton = openAction.available
+    ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')">${esc(openAction.label || 'Open owning tool')}</button>` : '';
+  return `<section class="detail-section recommended-action action-composer${actionable ? '' : ' settled'}" data-review-status="${esc(status)}">
     <div class="action-composer-head">
-      <h3>${settled ? 'Optional next step' : 'Needs action'}</h3>
-      <strong>${esc(title.replace(/^Recommended: /, ''))}</strong>
-      <p>${esc(body)}</p>
+      <h3>${fromCompanion ? 'Why Companion brought you here' : 'Your next step'}</h3>
+      <strong>${esc(review.title)}</strong>
+      <p>${esc(review.reason)}</p>
     </div>
-    <div class="action-evidence">${evidenceChips}</div>
-    <!-- Two questions were being asked at once here -- "what next" and "grade
-         what happened" -- across five same-sized controls wrapping onto two
-         rows, with nothing ranking them. Two stay visible; the rest fold into
-         More. "Mark outcome" is gone: it only scrolled to the outcome triad,
-         which is its own step further down with its own question. The server's
-         recommendation still decides which control is primary. -->
-    <div class="action-buttons">
-      ${hasHandoff
-        ? `<button class="btn-primary" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label === 'Inspect evidence' ? 'Inspect evidence' : 'Start fresh')}</button>
-           <button class="btn-quiet" onclick="continueFromSession('${esc(s.session_id)}')">Continue here</button>`
-        : `<button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>`}
-      <details class="action-more">
-        <summary>More</summary>
-        <div class="action-more-body">
-          ${hasHandoff ? `<button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>` : ''}
-          ${openButton}
-        </div>
-      </details>
-    </div>
-    <p class="tool-link-note">${esc(openToolNote)}</p>
+    ${review.observation ? `<p class="review-observation">${esc(review.observation)}</p>` : ''}
+    <div class="review-benefit"><span class="label">What you get</span><p>${esc(review.benefit)}</p></div>
+    ${ready ? `<div class="action-buttons">
+      ${status === 'clear' ? '<button class="btn-primary" onclick="closeDrawer()">Keep working</button>'
+        : status === 'waiting' && returnButton ? returnButton
+        : status === 'advisory' ? `<button class="btn-primary" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus()">Review my next prompt</button>`
+        : ['unknown', 'waiting'].includes(status) ? '<button class="btn-primary" onclick="openUsageEvidence()">Review available evidence</button>'
+        : `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Preview continuation brief</button>`}
+      ${status === 'historical' ? `<button class="btn-quiet" onclick="openOutcomeReview()">Review outcome</button>` : ''}
+      ${status !== 'clear' ? '<button class="btn-quiet" onclick="closeDrawer()">Not now</button>' : ''}
+      <details class="action-more"><summary>More options</summary><div class="action-more-body">
+        ${['clear', 'unknown', 'advisory', 'waiting'].includes(status) ? `<button class="btn-quiet" onclick="openHandoff('${esc(s.session_id)}')">Preview continuation brief</button>` : ''}
+        ${status !== 'waiting' ? returnButton : ''}
+        <button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus()">Review my next prompt</button>
+      </div></details>
+    </div>` : '<p class="loading" role="status">Checking local evidence…</p>'}
+    ${review.objective && ['historical', 'actionable'].includes(status) ? `<details class="aiw-details"><summary>What the brief preserves and how completion is checked</summary><div class="details-body"><p>${esc(review.objective)}</p><p>${esc(review.completion)}</p></div></details>` : ''}
+    ${review.checked_at ? `<p class="tool-link-note">Checked ${esc(dateLabel(review.checked_at))}. ${esc(runtime.reason || 'Exact live return is not confirmed.')}</p>` : ''}
   </section>`;
 }
 // A session that has just started may not be in the index yet, so a miss is
@@ -4388,7 +4352,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   // retrying -- left whichever finished last on screen, including a retry for a
   // session you had already navigated away from. Each selection claims a token
   // and stale continuations stop writing.
-  if (token === null) token = openDrawer('Session review');
+  if (token === null) token = openDrawer('Session review', 'Local metadata · rechecking this session');
   const isCurrent = () => isCurrentDrawer(token);
   if (!isCurrent()) return;
   document.getElementById('drawerTitle').textContent = 'Session review';
@@ -4438,6 +4402,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     return;
   }
   document.getElementById('drawerTitle').textContent = 'Session review';
+  setDrawerSubtitle('Processed locally · includes transcript excerpts');
   const summary = s.timeline_summary || {};
   const costliest = summary.costliest;
   const costliestCallout = costliest
@@ -4494,15 +4459,15 @@ async function selectSession(sessionId, attempt = 0, token = null) {
         </div>
         ${outcomeButtons}
       </div></details>`
-    : `<div id="outcomePanel" class="outcome-control"><h3>Was this work useful?</h3>
-        <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
+    : `<details id="outcomePanel" class="aiw-details outcome-control"><summary>Mark this session's outcome (optional)</summary><div class="details-body">
+        <p>Keep your judgement alongside the evidence. Marking an outcome does not resolve a current context warning.</p>
         <div class="outcome-help">
           <div><strong>Useful</strong> means this session moved the work forward.</div>
           <div><strong>Needs rework</strong> means the output helped but required correction or another pass.</div>
           <div><strong>Abandoned</strong> means the session did not produce useful progress.</div>
         </div>
         ${outcomeButtons}
-      </div>`;
+      </div></details>`;
   // These are threshold trips phrased as guidance ("High API-equivalent value:
   // $61.16"), sitting one section away from the coaching block that names the
   // actual turn and says what to change. Kept, because occasionally one is not a
@@ -4518,28 +4483,28 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     const opener = `<details class="aiw-details"><summary>Session opening prompt</summary><div class="details-body"><p class="prompt-opener">${esc(pa.opening_prompt)}</p></div></details>`;
     const c = pa.coaching;
     const coaching = c
-      ? `<section class="detail-section"><h3>Prompt worth tightening <span class="risk-tag risk-${esc(c.risk)}">${esc(c.risk)} risk</span></h3>
+      ? `<section class="detail-section"><h3>Specific prompt improvement <span class="risk-tag">${esc(c.risk)} scope/safety signal</span></h3>
           <p>Turn #${esc(c.turn)} (${esc(c.api_value)}) — the costliest ask with something to tighten.</p>
           <div class="prompt-text">${esc(compactText(c.prompt, 700))}</div>
           ${String(c.prompt || '').length > 700 ? `<details class="aiw-details"><summary>Show full prompt</summary><div class="details-body"><div class="prompt-text">${esc(c.prompt)}</div></div></details>` : ''}
           ${c.findings && c.findings.length ? `<h4>Findings</h4><ul class="insight-list">${c.findings.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
           ${c.suggestions && c.suggestions.length ? `<h4>Suggestions</h4><ul class="insight-list">${c.suggestions.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-          <h4>Tighter prompt for next time</h4>
+          <h4>Suggested execution checkpoint</h4>
           <div class="prompt-suggested">${esc(compactText(c.suggested_prompt, 900))}</div>
-          ${String(c.suggested_prompt || '').length > 900 ? `<details class="aiw-details"><summary>Show full tighter prompt</summary><div class="details-body"><div class="prompt-suggested">${esc(c.suggested_prompt)}</div></div></details>` : ''}
+          ${String(c.suggested_prompt || '').length > 900 ? `<details class="aiw-details"><summary>Show full checkpoint template</summary><div class="details-body"><div class="prompt-suggested">${esc(c.suggested_prompt)}</div></div></details>` : ''}
         </section>`
-      : `<section class="detail-section"><h3>Prompt worth tightening</h3>
-          <p>No single prompt stood out as under-specified — cost accumulated across ${esc(pa.turns)} turns. For work this long, checkpoint or start a fresh session between chunks to keep context (and cost) from compounding.</p>
+      : `<section class="detail-section"><h3>Prompt review</h3>
+          <p>No specific prompt improvement was established. Costly prompts alone do not prove poor instructions or wasted work.</p>
         </section>`;
     // Coaching first: it names the turn, quotes the prompt and says what to
     // change. The per-prompt costs are the evidence for that, so they follow.
     promptReview = `${coaching}${renderPromptReceipts(s.prompt_receipts, s.session_id)}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
-  setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
-    ${renderFreshStartCompletion(s) || renderSessionActions(s)}
-    ${renderVerdict(s)}
+  setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}${s.review?.status === 'resolved' ? '' : renderSessionActions(s)}
+    ${renderFreshStartCompletion(s)}
+    <section class="detail-section"><details id="usageEvidence" class="aiw-details"><summary>Usage and context evidence</summary><div class="details-body">${renderSessionUsageTotals(s)}${renderSessionContextHealth(s.session_id)}${renderVerdict(s)}</div></details></section>
     ${outcomeActions}
-    ${promptReview}
+    <section class="detail-section"><details class="aiw-details"><summary>Prompt analysis and usage breakdown</summary><div class="details-body">${promptReview}</div></details></section>
     <div id="evidencePanel">${renderEvidence(s.outcome_evidence)}</div>
     ${renderEvidenceRail(s, costliest, meaningfulEvents)}
     ${insights}
@@ -4607,7 +4572,7 @@ function renderPromptReceipts(receipts, sessionId) {
     ? `<p class="receipts-note-line">${esc(receipts.unpriced_prompts)} prompt(s) used a model with no list price and are not in these figures.</p>`
     : '';
   const heading = total > 0 ? `Where this chat's ${esc(receipts.total_label)} went` : 'What each prompt cost';
-  return `<section class="detail-section receipts-section"><div class="receipts-head"><h3>${heading}</h3><span class="receipts-tag">API list prices · on a plan, where usage went, not a bill</span></div>
+  return `<section class="detail-section receipts-section"><div class="receipts-head"><h3>${heading}</h3><span class="receipts-tag">API list prices · recorded prompt segments, not a bill. This subtotal can differ from indexed session totals when events are not assigned to a prompt.</span></div>
     ${split}${breakCallout}${topBlock}${unpriced}
     <details class="aiw-details receipts-all"><summary>See all ${esc(receipts.prompts)} prompts</summary><div class="details-body" id="promptReceipts">${promptReceiptsBody(receipts)}</div></details></section>`;
 }

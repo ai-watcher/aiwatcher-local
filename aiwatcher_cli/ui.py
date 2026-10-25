@@ -524,6 +524,30 @@ def _foreground_matches_fresh_start_bubble(bubble: dict[str, object]) -> bool:
     return active in {item for item in allowed if item}
 
 
+# Bounded, process-local rechecks. A cleared warning stays cleared for this
+# transcript state, not for the project forever. No prompt/source bodies stored.
+_CONTEXT_REVIEW_CHECKS: dict[str, tuple[datetime, str | None, bool]] = {}
+
+
+def _context_intervention_current(row: dict[str, object]) -> bool:
+    intervention = row.get("intervention")
+    if not isinstance(intervention, dict):
+        return False
+    observed = _parse_iso_datetime(intervention.get("observed_at"))
+    if not (intervention.get("eligible") is True and observed and
+            0 <= (datetime.now(timezone.utc) - observed).total_seconds() <= ACTIVE_SESSION_MINUTES * 60):
+        return False
+    checked = _CONTEXT_REVIEW_CHECKS.get(str(row.get("session_id") or ""))
+    if checked and not checked[2] and observed <= checked[0]:
+        try:
+            unchanged = not checked[1] or os.path.getmtime(checked[1]) <= checked[0].timestamp()
+        except OSError:
+            unchanged = True  # an unreadable source cannot justify reviving a warning
+        if unchanged:
+            return False
+    return True
+
+
 def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str, object]]:
     rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
     candidates: list[dict[str, object]] = []
@@ -532,6 +556,8 @@ def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str
         if not isinstance(row, dict):
             continue
         if row.get("severity") not in {"critical", "warning"} or not row.get("can_handoff"):
+            continue
+        if not _context_intervention_current(row):
             continue
         project = str(row.get("project_full") or "")
         if _fresh_start_project_quiet(project):
@@ -603,12 +629,12 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
             "project": _project_basename(project) or str(row.get("project") or "this project"),
             "waited_label": impact,
             "impact_label": impact,
-            "review_label": _context_review_signal_label(impact),
+            "review_label": str((row.get("intervention") or {}).get("label") or _context_review_signal_label(impact)),
             "severity_label": severity,
             "activity_label": _context_review_activity_label(row),
             "scope": "general",
             "scope_label": "Review when ready",
-            "url": f"/?session={quote(session_id, safe='')}" if session_id else "/?view=watch#contextHealth",
+            "url": f"/?session={quote(session_id, safe='')}&review=context" if session_id else "/?view=watch#contextHealth",
             "kind": "context_review",
         })
     return rows
@@ -2970,14 +2996,15 @@ def build_prompt_analysis(
     # If none qualifies, cost accumulated across turns rather than from any single weak ask.
     coaching = None
     for seg in by_cost:
-        analysis = analyze_prompt(str(seg["prompt"]), tool=row.tool, cwd=row.project_path)
-        if int(analysis["score"]) > 0:
+        analysis = analyze_prompt(str(seg["prompt"]), tool=row.tool, cwd=row.project_path, include_estimate=False)
+        findings = [item for item in analysis["findings"] if not str(item).startswith("No obvious cost or safety risk")]
+        if int(analysis["score"]) > 0 and findings and analysis.get("suggested_prompt") != str(seg["prompt"]):
             coaching = {
                 "prompt": seg["prompt"],
                 "turn": seg["turn"],
                 "api_value": money(float(seg["cost_usd"])),
                 "risk": analysis["risk"],
-                "findings": analysis["findings"],
+                "findings": findings,
                 "suggestions": analysis["suggestions"],
                 "suggested_prompt": analysis["suggested_prompt"],
             }
@@ -3241,6 +3268,98 @@ def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict
     return {"pressure": pressure, "replay": replay}
 
 
+def build_session_review(
+    row: LocalSession, verdict: dict[str, object], *, completion: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Decision-first review. Outcome votes never resolve a live pressure signal."""
+    fresh = _freshened_for_presence([row])[0]
+    state = session_state(fresh)
+    presence = presence_for_sessions([fresh])
+    pressure = _pressure_block(presence, [fresh], session_id=row.session_id)
+    latest = pressure.get("latest_turn_tokens")
+    window = pressure.get("context_window")
+    old_pressure = verdict.get("pressure") or {}
+    at_limit = bool(pressure.get("available") and latest >= window)
+    next_does_not_fit = bool(
+        pressure.get("available") and old_pressure.get("latest_turn_tokens") == latest
+        and old_pressure.get("context_window") == window and old_pressure.get("next_prompt_may_not_fit")
+    )
+    active = state.get("status") == "active" and any(item.live and item.measurable for item in presence)
+    waiting = active and any(item.state == "waiting" for item in presence)
+    signal = None
+    for record in recent_ambient_interventions(limit=20):
+        stamp = _parse_iso_datetime(record.get("updated_at") or record.get("created_at"))
+        if record.get("session_id") != row.session_id or record.get("signal_kind") not in {"loop", "velocity", "runway", "usage_pressure", "prompt_blocked"}:
+            continue
+        if stamp and 0 <= (datetime.now(timezone.utc) - stamp).total_seconds() <= RECENT_SIGNAL_WINDOW_MINUTES * 60:
+            signal = record
+            break
+    observation = (
+        f"Latest recorded input: {compact_int(latest)} / {compact_int(window)} model window ({100 * latest / window:.1f}%)."
+        if pressure.get("available") else str(pressure.get("reason") or "Current context unavailable.")
+    )
+    if state.get("status") != "active":
+        status, title = "historical", "Review before resuming"
+        reason = "This is historical or unverified activity. No live intervention is established."
+        benefit = "If you resume this work, preview a continuation brief to preserve the objective, completed work, unresolved tasks, and next checkpoint."
+    elif not active:
+        status, title = "unknown", "Check the owning tool before changing chats"
+        reason = "The log is recent, but AIWatcher cannot verify live activity from this tool."
+        benefit = "Check the owning tool's current status before deciding whether to continue, compact, or change chats."
+    elif waiting:
+        status, title = "waiting", "Check what this session needs from you"
+        reason = next(item.label for item in presence if item.state == "waiting")
+        benefit = "Review the request in the owning tool so this run can continue. Opening a tool does not approve its request."
+    elif at_limit or next_does_not_fit:
+        status, title = "actionable", "Prepare the next checkpoint before continuing"
+        reason = "Latest input reaches the model reference window." if at_limit else "A prompt as large as one already observed may not fit in the remaining window."
+        benefit = "Preview a Fresh Start brief before changing chats. Preserve the task and verification gaps without replaying the full conversation."
+    elif signal:
+        kind = str(signal["signal_kind"])
+        status, title = "advisory", f"Review the recent {_TRANSIENT_SIGNAL_LABELS.get(kind, kind).lower()} signal"
+        reason = "This signal was recorded for this session; its underlying condition has not been reverified."
+        benefit = {
+            "loop": "Compare the repeated attempts with the intended result, then choose one checkpoint before another retry.",
+            "velocity": "Review the recent request burst and choose a bounded next task before continuing.",
+            "runway": "Check the tool's current allowance and choose a smaller checkpoint; local history cannot prove remaining provider quota.",
+            "usage_pressure": "Inspect the recorded usage signal and current allowance before choosing the next task.",
+            "prompt_blocked": "Review the prompt's findings and scope before deciding whether to run it in the owning tool.",
+        }[kind]
+    elif pressure.get("available"):
+        status, title = "clear", "No immediate context action needed"
+        reason = "The current measurement does not establish an imminent context-limit condition. An earlier warning may no longer apply."
+        benefit = "Keep working on the current checkpoint. Prepare a continuation brief when you choose to change tasks or chats."
+    else:
+        status, title = "unknown", "Check the owning tool before changing chats"
+        reason = "AIWatcher cannot verify current context pressure from this source."
+        benefit = "Inspect the owning tool, or preview a continuation brief if you already intend to move the work."
+    completed_at = _parse_iso_datetime((completion or {}).get("created_at"))
+    source_stamp = fresh.updated_at
+    if source_stamp and source_stamp.tzinfo is None:
+        source_stamp = source_stamp.replace(tzinfo=timezone.utc)
+    if (completion or {}).get("status") == "completed" and completed_at and source_stamp and source_stamp <= completed_at:
+        status, title = "resolved", "Continuation confirmed"
+        reason = "An explicit follow-up linked this handoff, and no newer activity was observed in the source session."
+        benefit = "Continue in the linked session. This source remains available as historical evidence."
+    if fresh.updated_at:
+        stamp = fresh.updated_at
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        with _SUMMARY_CACHE_LOCK:
+            if row.session_id not in _CONTEXT_REVIEW_CHECKS and len(_CONTEXT_REVIEW_CHECKS) >= 64:
+                _CONTEXT_REVIEW_CHECKS.pop(next(iter(_CONTEXT_REVIEW_CHECKS)), None)
+            _CONTEXT_REVIEW_CHECKS[row.session_id] = (stamp, row.source_path, bool(status != "resolved" and active and (at_limit or next_does_not_fit)))
+    return {
+        "status": status, "title": title, "reason": reason, "benefit": benefit,
+        "observation": observation, "checked_at": datetime.now(timezone.utc).isoformat(),
+        "last_activity": fresh.updated_at.isoformat() if fresh.updated_at else None,
+        "context_available": bool(pressure.get("available")),
+        "completion": "Copying a brief prepares the handoff; it does not prove a new chat started. Explicit follow-up evidence closes the receipt.",
+        "signal_observed_at": (signal.get("updated_at") or signal.get("created_at")) if signal else None,
+        "objective": "Confirm the objective and next outcome in the brief before editing if they were not captured.",
+    }
+
+
 def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool = False) -> dict[str, object]:
     row = _find_session_row(session_id, days=days)
     if not row:
@@ -3272,11 +3391,14 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
         record_evidence_snapshot(session_id, evidence.to_json())
     except OSError:
         pass
+    verdict = _session_verdict_inputs(row, events)
+    completion = _fresh_start_completion(row.session_id)
     return {
         **session_json(row),
-        "fresh_start_completion": _fresh_start_completion(row.session_id),
+        "review": build_session_review(row, verdict, completion=completion),
+        "fresh_start_completion": completion,
         "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
-        "verdict": _session_verdict_inputs(row, events),
+        "verdict": verdict,
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
         "prompt_receipts": build_prompt_receipts(segments),
@@ -4395,8 +4517,8 @@ def _context_health_card(
         else "Compact or prepare a Fresh Start before the next broad task."
     )
     context_summary = (
-        f"{action['label']} because {health.tool} is replaying about "
-        f"{compact_int(health.latest_turn_tokens)} tokens in the latest turn."
+        f"{action['label']}: {health.tool} recorded about "
+        f"{compact_int(health.latest_turn_tokens)} input tokens on the latest call."
     )
     if len(group) > 1:
         # A live session is charted ahead of a worse ended one, so the claim is
@@ -4474,7 +4596,22 @@ def _context_health_card(
         "analyzed_cost_label": f"${analyzed_cost:.2f}" if bloat_measurable else "n/a",
         "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
         "intent_summary": intent_summary,
+        "recommendation_summary": intent_summary,
         "context_summary": context_summary,
+        "intervention": {
+            "eligible": bool(status and status.get("status") == "active" and (
+                health.is_context_critical or health.next_prompt_may_not_fit
+            )),
+            "observed_at": session.updated_at.isoformat() if session and session.updated_at else None,
+            "label": "Model window reached" if health.is_context_critical else "Next prompt may not fit",
+            "reason": (
+                "Latest recorded input reaches the model reference window."
+                if health.is_context_critical else
+                "A prompt as large as one already observed could exceed the remaining model window."
+                if health.next_prompt_may_not_fit else
+                "Historical age or replay metrics; no immediate context-limit condition established."
+            ),
+        },
         "identity_label": identity_label,
         "return_label": return_label,
         "session_status": str((status or {}).get("status") or ""),
@@ -4659,6 +4796,7 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
         primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Prepare Fresh Start"
     reason = str(candidate.get("recommendation") or candidate.get("action", {}).get("reason") or body)
     return {
+        "intervention": candidate.get("intervention"),
         "session_id": candidate.get("session_id"),
         "project": project,
         "project_full": candidate.get("project_full"),
@@ -9630,7 +9768,7 @@ def _build_companion_state() -> dict[str, object]:
             "detail": "Review a listed session or all recommendations in Watch. Snooze all quiets these projects for 48 hours.",
         }
     bubble = summary.get("handoff_bubble")
-    if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id"):
+    if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id") and _context_intervention_current(bubble):
         session_id = str(bubble.get("session_id"))
         bubble_project = str(bubble.get("project_full") or "")
         if _fresh_start_project_quiet(bubble_project):

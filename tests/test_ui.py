@@ -1103,7 +1103,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('data-view="prompt"', ui.HTML)
         self.assertIn('data-view="receipts"', ui.HTML)
         self.assertIn('data-view="setup"', ui.HTML)
-        self.assertIn("Needs action", ui.HTML)
+        self.assertIn("What you get", ui.HTML)
         self.assertIn("Every row says what AIWatcher knows", ui.HTML)
         self.assertIn('id="handoffDecisionRows"', ui.HTML)
         # The standalone coverage view is gone; Settings holds the one copy.
@@ -1129,12 +1129,12 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("showToast(`Outcome saved:", ui.HTML)
         self.assertIn("Outcome evidence", ui.HTML)
         self.assertIn('recommended-action action-composer', ui.HTML)
-        self.assertIn('recommended-action loading-action', ui.HTML)
+        self.assertIn('Checking whether action is needed', ui.HTML)
         self.assertIn('ai-loading-panel', ui.HTML)
         # Sentence case: this sits under an uppercase NEEDS ACTION eyebrow, and
         # a lowercase headline beneath an uppercase one read as a broken string.
-        self.assertIn("Recommended: Continue in a fresh session", ui.HTML)
-        self.assertIn("Build Fresh Start brief", ui.HTML)
+        self.assertIn("Preview continuation brief", ui.HTML)
+        self.assertIn("What you get", ui.HTML)
         self.assertIn("Fresh Start", ui.HTML)
         self.assertIn("renderIdentityStrip", ui.HTML)
         self.assertIn("identity_label", ui.HTML)
@@ -1188,7 +1188,7 @@ class DashboardWindowTests(unittest.TestCase):
         # The cluster now shows two controls at rest and folds the rest into
         # More, so handoff is unconditionally primary when it exists. The
         # server's recommendation still ranks the no-handoff case.
-        self.assertIn("primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'", ui.HTML)
+        self.assertIn("data-review-status", ui.HTML)
         self.assertIn('class="action-more"', ui.HTML)
         self.assertIn("onclick=\"openHandoff", ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
@@ -1207,8 +1207,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Fresh Start receipt saved", ui.HTML)
         self.assertIn("Snooze all 48h", ui.HTML)
         self.assertIn("continueFreshStartProject", ui.HTML)
-        self.assertIn("Inferred intent", ui.HTML)
-        self.assertIn("Context AIWatcher will carry", ui.HTML)
+        self.assertIn("Suggested next step", ui.HTML)
+        self.assertIn("Recorded context evidence", ui.HTML)
         self.assertIn("session_short", ui.HTML)
         self.assertNotIn("Copy handoff", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
@@ -2217,6 +2217,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
             "handoff_bubble": {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "sess-1",
                 "tool": "codex-cli",
                 "severity": "critical",
@@ -2249,12 +2250,14 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "context_health": [{
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-1",
                     "project_full": "/repo/app",
                     "severity": "critical",
                     "can_handoff": True,
                 }],
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-1",
                     "project_full": "/repo/app",
                     "tool": "codex-cli",
@@ -2284,6 +2287,7 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "build_summary_cached", return_value={
                 "context_health": [
                     {
+                        "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                         "session_id": "sess-1",
                         "project": "app",
                         "project_full": "/repo/app",
@@ -2294,6 +2298,7 @@ class DashboardWindowTests(unittest.TestCase):
                         "runtime_attachment": {"surface": "cli"},
                     },
                     {
+                        "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                         "session_id": "sess-2",
                         "project": "api",
                         "project_full": "/repo/api",
@@ -2305,6 +2310,7 @@ class DashboardWindowTests(unittest.TestCase):
                     },
                 ],
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-1",
                     "project_full": "/repo/app",
                     "tool": "codex-cli",
@@ -2338,6 +2344,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_handoff_bubble_skips_project_during_fresh_start_cooldown(self) -> None:
         rows = [
             {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "skipped",
                 "project": "skipped",
                 "project_full": "/repo/skipped",
@@ -2347,6 +2354,7 @@ class DashboardWindowTests(unittest.TestCase):
                 "estimated_replayed_context_label": "200.0k",
             },
             {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "ready",
                 "project": "ready",
                 "project_full": "/repo/ready",
@@ -2370,6 +2378,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-1",
                     "tool": "claude-code",
                     "severity": "critical",
@@ -2480,6 +2489,7 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "mark_active_prompt_gate_seen") as mark_seen,
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-1",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
@@ -2516,6 +2526,7 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "mark_active_command_gate_seen") as mark_seen,
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-1",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
@@ -2607,6 +2618,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-live",
                     "tool": "codex-cli",
                     "severity": "critical",
@@ -2639,6 +2651,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-live",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
@@ -2661,6 +2674,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-live",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
@@ -2685,6 +2699,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-live",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
@@ -2711,6 +2726,7 @@ class DashboardWindowTests(unittest.TestCase):
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-live",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
@@ -2801,6 +2817,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_ask_aiwatcher_answers_context_health_from_local_evidence(self) -> None:
         with patch.object(ui, "build_summary_cached", return_value={
             "context_health": [{
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "sess-1",
                 "project": "/repo/app",
                 "tool": "codex-cli",
@@ -2846,6 +2863,7 @@ class DashboardWindowTests(unittest.TestCase):
                 patch.object(ui, "build_summary_cached", return_value={
                     "totals": {"window_label": "Last 7 days", "sessions": 2, "tokens_label": "120.0k"},
                     "context_health": [{
+                        "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                         "session_id": "sess-1",
                         "project_full": "/repo/app",
                         "tool": "codex-cli",
@@ -3015,6 +3033,7 @@ class DashboardWindowTests(unittest.TestCase):
             )
             summary = {
                 "context_health": [{
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-prompt",
                     "project_full": temp_dir,
                     "tool": "claude-code",
@@ -3988,6 +4007,7 @@ class DashboardWindowTests(unittest.TestCase):
             },
             summary={
                 "handoff_bubble": {
+                    "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                     "session_id": "sess-other",
                     "project": "/repo/unrelated",
                     "tool": "claude-code",
@@ -4321,6 +4341,7 @@ class DashboardWindowTests(unittest.TestCase):
 
     def test_handoff_bubble_does_not_auto_open_unverified_desktop_app(self) -> None:
         bubble = ui._handoff_bubble([{
+            "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
             "session_id": "claude-desktop",
             "project": "/repo/app",
             "tool": "claude-code",
@@ -6553,7 +6574,7 @@ class InsightFeedRankingTests(unittest.TestCase):
     contract is: ranked by money, and nothing in it that lacks a comparison."""
 
     def _card(self, card_id: str, impact):
-        return {"id": card_id, "title": card_id, "body": "", "impact_usd": impact,
+        return {"intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()}, "id": card_id, "title": card_id, "body": "", "impact_usd": impact,
                 "session_id": None, "severity": "info"}
 
     def test_dollar_cards_rank_above_and_within_themselves(self) -> None:

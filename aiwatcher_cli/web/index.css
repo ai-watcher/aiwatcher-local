@@ -2452,3 +2452,11 @@
 
     .compact-review { overflow-wrap: anywhere; }
     .compact-review code { white-space: normal; }
+
+/* Keep the value of an intervention visible before its evidence inventory. */
+.review-benefit { padding: 12px 14px; margin: 14px 0; background: var(--surface-soft, rgba(90,140,230,.08)); border-left: 3px solid var(--accent, #3676ef); border-radius: var(--r-2); }
+.review-benefit p { margin: 4px 0 0; }
+.review-observation { font-variant-numeric: tabular-nums; }
+
+.session-review-shell > .recommended-action.settled { border-left-color: var(--blue); }
+.session-review-shell > .recommended-action[data-review-status="clear"] { border-left-color: var(--green); }

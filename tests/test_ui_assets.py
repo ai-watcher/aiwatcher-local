@@ -77,7 +77,7 @@ class WebAssetsTest(unittest.TestCase):
         source = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "index.js").read_text(encoding="utf-8")
         hero = js_function_source(source, "renderSessionHero")
         project = js_function_source(source, "renderProjectSessionRow")
-        self.assertIn("s.tokens_scope_label", hero)
+        self.assertIn("s.tokens_scope_label", js_function_source(source, "renderSessionUsageTotals"))
         self.assertIn("s.tokens_scope_label", project)
 
     def test_overlay_keeps_no_second_copy_of_the_nudge_titles(self):
@@ -638,7 +638,7 @@ class TrimmedHomeTest(unittest.TestCase):
             "deliveryReviewCreateButton", "deliveryReviewObjective", "deliveryReviewProject",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffNextOutcome", "handoffSources", "handoffStatus", "handoffType",
-            "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
+            "optimizeCleanupPrompt", "optimizeReward", "outcomePanel", "usageEvidence",
             "planDerivedZone", "promptBrief", "promptReceipts", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
@@ -694,7 +694,8 @@ class SessionDrawerTest(unittest.TestCase):
         hero = hero[:hero.index("\nfunction ")]
         self.assertNotIn("session-hero-grid", hero)
         self.assertNotIn("Next step", hero)
-        self.assertIn("session-hero-pressure", hero)
+        self.assertNotIn("session-hero-pressure", hero)
+        self.assertIn("session-hero-pressure", js_function_source(self.js, "renderSessionUsageTotals"))
 
     def test_the_hero_number_is_named_for_what_it_measures(self):
         # It was labelled "Context pressure" while carrying the session's
@@ -703,7 +704,7 @@ class SessionDrawerTest(unittest.TestCase):
         # every real session. Context pressure means tokens per turn elsewhere in
         # the product, and the session payload has no per-turn figure.
         hero = js_function_source(self.js, "renderSessionHero")
-        self.assertIn("s.tokens_scope_label", hero)
+        self.assertIn("s.tokens_scope_label", js_function_source(self.js, "renderSessionUsageTotals"))
         self.assertNotIn("Context pressure", hero)
         self.assertNotIn("session-meter", hero)
         self.assertNotIn("function contextPressure(", self.js)
@@ -713,7 +714,8 @@ class SessionDrawerTest(unittest.TestCase):
         the token count -- the two are read together -- and nowhere else that is
         visible without opening something."""
         hero = js_function_source(self.js, "renderSessionHero")
-        self.assertIn("s.api_value", hero)
+        self.assertNotIn("s.api_value", hero)
+        self.assertIn("s.api_value", js_function_source(self.js, "renderSessionUsageTotals"))
         actions = js_function_source(self.js, "renderSessionActions")
         self.assertNotIn("API-equivalent", actions)
         self.assertNotIn("s.tokens_label", actions)
@@ -725,11 +727,13 @@ class SessionDrawerTest(unittest.TestCase):
         self.assertIn("Needs confirmation", completion)
         self.assertIn("Open follow-up", completion)
         self.assertIn("View receipt", completion)
-        self.assertIn("historical evidence", completion)
+        self.assertIn("checked separately", completion)
         summary = js_function_source(self.js, "renderSessionSummary")
         self.assertIn("renderFreshStartCompletion(s)", summary)
         select = js_function_source(self.js, "selectSession")
-        self.assertIn("renderFreshStartCompletion(s) || renderSessionActions(s)", select)
+        self.assertIn("renderFreshStartCompletion(s)", select)
+        self.assertIn("renderSessionActions(s)", select)
+        self.assertNotIn("renderFreshStartCompletion(s) || renderSessionActions(s)", select)
 
     def test_receipts_keep_possible_followup_distinct_from_confirmed_next_session(self):
         receipts = js_function_source(self.js, "renderHandoffDecisionRows")
@@ -779,7 +783,7 @@ class SessionDrawerTest(unittest.TestCase):
         # The worth line is unknowable for about a week. It must render as a
         # not-yet rather than suppress the two that are knowable now.
         verdict = js_function_source(self.js, "verdictLines")
-        self.assertIn("judged after 7 days", verdict)
+        self.assertIn("checked after 7 days", verdict)
         self.assertIn("tone: 'unknown'", verdict)
 
     def test_the_broken_token_threshold_is_gone(self):
@@ -2018,7 +2022,7 @@ class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):
         # assertion passing on a prefix of the old name.
         for mark in ('class="health-verdict"', 'class="meter-host"',
                      'class="trend-host"', 'class="health-facts"',
-                     "Inferred intent", "Context AIWatcher will carry"):
+                     "Suggested next step", "Recorded context evidence"):
             with self.subTest(mark=mark):
                 self.assertIn(mark, self.drawer)
                 self.assertNotIn(mark, self.row)
@@ -2606,15 +2610,16 @@ class InformationArchitectureTest(unittest.TestCase):
         # mixed two questions: "what next" and "grade what happened".
         actions = js_function_source(self.js, "renderSessionActions")
         self.assertIn('class="action-more"', actions)
-        self.assertIn("Start fresh", actions)
-        self.assertIn("Continue here", actions)
+        self.assertIn("Preview continuation brief", actions)
+        self.assertIn("Keep working", actions)
         # It only scrolled to the outcome triad, which is its own labelled step.
         self.assertNotIn(">Mark outcome<", actions)
 
     def test_a_settled_session_does_not_make_a_demand(self):
         actions = js_function_source(self.js, "renderSessionActions")
-        self.assertIn("Optional next step", actions)
-        self.assertIn("const settled = s.outcome === 'useful'", actions)
+        self.assertIn("const actionable", actions)
+        self.assertNotIn("s.outcome === 'useful'", actions)
+        self.assertIn("['actionable', 'waiting']", actions)
         self.assertIn(".recommended-action.settled", self.css)
 
     def test_the_copied_brief_is_the_fresh_start_focus(self):
