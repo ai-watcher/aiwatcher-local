@@ -8226,14 +8226,14 @@ def _finished_companion_rows(finished_notices: list[tuple[float, SessionPresence
     rows: list[dict[str, object]] = []
     for finished_at, row in finished_notices[:3]:
         rows.append({
-            "kind": "finished",
+            "kind": "recently_observed",
             "session_id": row.session_id,
             "tool": tool_label(row.tool),
             "project": _project_basename(row.project_path) or "this machine",
             "waited_label": (
-                f"completed {int((time.time() - finished_at) // 60)}m"
+                f"quiet {int((time.time() - finished_at) // 60)}m"
                 if finished_at <= time.time() - 60
-                else "completed now"
+                else "quiet now"
             ),
             "url": f"/?session={quote(row.session_id, safe='')}",
         })
@@ -8241,9 +8241,9 @@ def _finished_companion_rows(finished_notices: list[tuple[float, SessionPresence
 
 
 def _completed_work_block(finished_notices: list[tuple[float, SessionPresence]]) -> dict[str, object]:
-    """Recently observed completions for the Companion's reward/status line."""
+    """Recently observed quiet transitions for the Companion status line."""
     recent = len(finished_notices)
-    label = f"{recent} completed recently" if recent else ""
+    label = f"{recent} recently quiet" if recent else ""
     return {"recent": recent, "label": label}
 
 
@@ -8672,14 +8672,14 @@ def _current_prompt_cached(path: str, *, read_title: bool = True) -> tuple[dict[
 
 def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object] | None:
     """Each live Claude Code or Codex chat's current prompt: what it is costing
-    while the agent works, and its receipt once the chat has gone quiet.
+    while the agent works, and its observed cost once the chat has gone quiet.
 
     Question per item: what is this prompt costing, or what did it cost? Unit
     and scope: list-price dollars for that one prompt's requests, the same
     figures as the session review (build_prompt_receipts), so the bar and the
     drawer never disagree. "Working" is the presence rule (a write within
-    WORKING_SECONDS); "done" is quiet and holds until the next prompt, because
-    the next prompt replaces the segment. Chats are named, prompts are never
+    WORKING_SECONDS); "ready to check" is quiet and holds until the next prompt,
+    because the next prompt replaces the segment. Chats are named, prompts are never
     quoted: no prompt text on the Companion.
     """
     by_id = {session.session_id: session for session in sessions}
@@ -8721,10 +8721,10 @@ def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSessio
             tag = f"working {_duration_label(elapsed)}" if elapsed is not None and elapsed <= PROMPT_RECEIPT_RESUMED_SECONDS else "working"
         elif detail["after_break"]:
             parts = [cost_label, str(detail["note"])]
-            tag = "done"
+            tag = "ready to check"
         else:
             parts = [cost_label, str(detail["added_label"] or ""), str(detail["took_label"] or "")]
-            tag = "done"
+            tag = "ready to check"
         items.append({
             "session_id": row.session_id,
             "name": name,
@@ -8752,7 +8752,7 @@ def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> d
     detail_text = "List-price cost of each chat's current prompt, the same figures as the session review. No prompt text is shown in the Companion."
     if len(items) == 1:
         item = items[0]
-        label = "Working" if item["working"] else "Prompt done"
+        label = "Working" if item["working"] else "Ready to check"
         return {
             **base,
             "state": "prompt_status",
@@ -8767,7 +8767,7 @@ def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> d
             "detail": detail_text,
         }
     working, done = int(block.get("working") or 0), int(block.get("done") or 0)
-    label = " · ".join(part for part in (f"{working} working" if working else "", f"{done} done" if done else "") if part)
+    label = ", ".join(part for part in (f"{working} working" if working else "", f"{done} ready" if done else "") if part)
     if len(label) > 18:
         label = f"{len(items)} chats"
     total = sum(float(item.get("cost_usd") or 0.0) for item in items)
@@ -9005,7 +9005,225 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
     }
 
 
-def build_companion_state() -> dict[str, object]:
+def _activity_action(row: dict[str, object], *, fallback_label: str = "Open") -> dict[str, object]:
+    """Normalize one row action so native clients do not infer it from kind."""
+    action_type = str(row.get("action") or "open_url")
+    if row.get("return_available"):
+        action_type = "runtime_return"
+        label = "Return"
+    elif action_type in {"copy_compact", "copy_fresh_start"}:
+        label = "Copy"
+    else:
+        label = fallback_label
+    available = action_type not in {"", "none"}
+    return {
+        "label": label,
+        "type": action_type if available else "none",
+        "url": str(row.get("url") or "/"),
+        "session_id": str(row.get("session_id") or ""),
+        "available": available,
+    }
+
+
+def _base_companion_activity(
+    presence_rows: list[SessionPresence],
+    session_rows: list[LocalSession],
+    waiting_signals: dict[str, object],
+    prompt_status: dict[str, object] | None,
+    finished_payload: list[dict[str, object]],
+    delivery_receipt: dict[str, object] | None,
+) -> dict[str, object]:
+    """Simultaneous live activity independent of the headline's priority."""
+    rich_by_session: dict[str, dict[str, object]] = {}
+    if isinstance(prompt_status, dict):
+        for item in prompt_status.get("items") or []:
+            if not isinstance(item, dict) or not item.get("working"):
+                continue
+            session_id = str(item.get("session_id") or "")
+            rich_by_session[session_id] = {
+                "kind": "working",
+                "session_id": session_id,
+                "text": _fit_name(str(item.get("name") or "AI session"), str(item.get("rest") or ""), 56),
+                "tag": str(item.get("tag") or "working")[:16],
+                "url": str(item.get("url") or "/"),
+            }
+
+    working: list[dict[str, object]] = []
+    for row in presence_rows:
+        if row.analyst_run or not row.measurable or row.state != "working":
+            continue
+        session_id = str(row.session_id or "")
+        item = rich_by_session.get(session_id) or {
+            "kind": "working",
+            "session_id": session_id,
+            "text": " · ".join(part for part in (
+                tool_label(row.tool), _project_basename(row.project_path),
+            ) if part),
+            "tag": "working",
+            "url": f"/?session={quote(session_id, safe='')}",
+        }
+        item["normalized_action"] = _activity_action(item)
+        working.append(item)
+
+    needs: list[dict[str, object]] = []
+    waiting_rows = sorted(
+        (row for row in presence_rows if row.state == "waiting" and not row.analyst_run and row.measurable),
+        key=lambda row: float(row.idle_seconds or 0.0),
+        reverse=True,
+    )
+    for row in waiting_rows:
+        signal = waiting_signals.get(str(row.session_id))
+        signal = signal if isinstance(signal, dict) else {}
+        item = {
+            "kind": "session_waiting",
+            "session_id": str(row.session_id or ""),
+            "tool": tool_label(row.tool),
+            "project": _project_basename(row.project_path) or "this machine",
+            "waited_label": _waited_fragment(row.label),
+            "url": f"/?session={quote(str(row.session_id or ''), safe='')}",
+            "return_available": _waiting_row_return_available(str(row.session_id or ""), session_rows),
+            "wants": str(signal.get("wants") or ""),
+        }
+        item["normalized_action"] = _activity_action(item)
+        needs.append(item)
+
+    recent: list[dict[str, object]] = []
+    for raw in finished_payload:
+        item = {
+            **raw,
+            "kind": "recently_observed",
+            "tag": "ready to check",
+        }
+        item["normalized_action"] = _activity_action(item, fallback_label="Review")
+        recent.append(item)
+
+    if isinstance(delivery_receipt, dict):
+        event = delivery_receipt.get("event") if isinstance(delivery_receipt.get("event"), dict) else {}
+        receipt_id = str(delivery_receipt.get("receipt_id") or "")
+        delivery = {
+            "kind": "delivery_confirmed",
+            "receipt_id": receipt_id,
+            "text": "Remote delivery confirmed",
+            "tag": "confirmed",
+            "url": f"/?view=receipts&delivery={quote(receipt_id, safe='')}",
+            "delivery_kind": str(event.get("kind") or "delivery"),
+        }
+        delivery["normalized_action"] = _activity_action(delivery, fallback_label="Review")
+        recent.insert(0, delivery)
+
+    return {"needs_you": needs, "working": working, "recently_observed": recent}
+
+
+def _companion_activity_contract(payload: dict[str, object]) -> dict[str, object]:
+    """Add grouped rows and shared state semantics for every Companion client."""
+    state = str(payload.get("state") or "watching")
+    primary_url = str(payload.get("primary_url") or "/")
+    primary_action = str(payload.get("primary_action") or "open_url")
+    attention_states = {"prompt_gate", "command_gate", "session_waiting", "clipboard_confirm"}
+    actionable_states = attention_states | {
+        "control_recommended", "control_review", "context_review", "optimize_available",
+        "compact_recommended",
+    }
+    soft_visible_states = actionable_states - attention_states | {
+        "delivery_review_ready", "session_finished", "away_digest",
+    }
+    attention = state in attention_states
+    actionable = state in actionable_states
+    base_activity = payload.get("activity") if isinstance(payload.get("activity"), dict) else {}
+    needs = [dict(row) for row in base_activity.get("needs_you", []) if isinstance(row, dict)]
+    working = [dict(row) for row in base_activity.get("working", []) if isinstance(row, dict)]
+    recent = [dict(row) for row in base_activity.get("recently_observed", []) if isinstance(row, dict)]
+    delivery_rows = [row for row in recent if row.get("kind") == "delivery_confirmed"]
+    delivery_confirmed = bool(delivery_rows)
+    delivery_receipt_id = str(delivery_rows[0].get("receipt_id") or "") if delivery_rows else ""
+
+    if actionable:
+        headline_needs: list[dict[str, object]] = []
+        raw_needs = payload.get("compact_rows") if state == "compact_recommended" else payload.get("waiting_sessions")
+        if isinstance(raw_needs, list):
+            headline_needs.extend(dict(row) for row in raw_needs if isinstance(row, dict))
+        if not raw_needs:
+            headline_needs.append({
+                "kind": state,
+                "text": str(payload.get("subtitle") or payload.get("title") or "Review needed"),
+                "url": primary_url,
+                "action": primary_action,
+                "session_id": str(payload.get("primary_session_id") or ""),
+                "return_available": primary_action == "runtime_return",
+                "command": str(payload.get("compact_command") or ""),
+                "sha": str(payload.get("compact_sha") or ""),
+            })
+        for row in headline_needs:
+            label = "Review" if state in {"prompt_gate", "command_gate", "control_review", "context_review"} else "Open"
+            row["normalized_action"] = _activity_action(row, fallback_label=label)
+        needs = headline_needs + needs
+
+    if state == "away_digest" and isinstance(payload.get("digest_rows"), list):
+        for raw in payload["digest_rows"]:
+            if not isinstance(raw, dict):
+                continue
+            item = {**raw, "kind": "recently_observed", "tag": str(raw.get("tag") or "observed")}
+            item["normalized_action"] = _activity_action(item, fallback_label="Review")
+            recent.append(item)
+
+    if state == "delivery_review_ready" and not delivery_rows:
+        delivered = {
+            "kind": "delivery_confirmed",
+            "text": str(payload.get("subtitle") or "Remote delivery confirmed"),
+            "tag": "confirmed",
+            "url": primary_url,
+        }
+        delivered["normalized_action"] = _activity_action(delivered, fallback_label="Review")
+        recent.insert(0, delivered)
+        delivery_confirmed = True
+
+    sections: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for section_id, label, rows in (
+        ("needs_you", "Needs you" if attention else "For review", needs),
+        ("working", "Working", working),
+        ("recently_observed", "Recently observed", recent),
+    ):
+        unique: list[dict[str, object]] = []
+        for row in rows:
+            session_id = str(row.get("session_id") or "")
+            key = session_id or f"{row.get('kind')}:{row.get('text')}:{row.get('url')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        if unique:
+            sections.append({"id": section_id, "label": label, "count": len(unique), "rows": unique})
+
+    counts = {str(section["id"]): int(section["count"]) for section in sections}
+    parts = []
+    if counts.get("needs_you"):
+        count = counts["needs_you"]
+        parts.append(
+            f"{count} need{'s' if count == 1 else ''} you"
+            if attention
+            else f"{count} to review"
+        )
+    if counts.get("working"):
+        parts.append(f"{counts['working']} working")
+    if delivery_confirmed:
+        parts.append("delivery confirmed")
+    elif counts.get("recently_observed"):
+        parts.append(f"{counts['recently_observed']} ready to check")
+
+    return {
+        **payload,
+        "tone": "attention" if attention else ("success" if delivery_confirmed else "calm"),
+        "visibility": "attention" if attention else ("soft" if state in soft_visible_states else "ambient"),
+        "confidence": "confirmed_delivery" if delivery_confirmed else ("observed" if recent else "live"),
+        "activity_line": " · ".join(parts) or str(payload.get("subtitle") or "Watching quietly"),
+        "activity_sections": sections,
+        "delivery_confirmed": delivery_confirmed,
+        "delivery_receipt_id": delivery_receipt_id,
+    }
+
+
+def _build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
     prefs = companion_preferences()
@@ -9033,6 +9251,8 @@ def build_companion_state() -> dict[str, object]:
     fresh_start_context_enabled = bool(prefs.get("fresh_start_context", True))
     _update_away_digest(session_rows, presence_rows)
     _record_compaction_outcomes(presence_rows, session_rows)
+    prompt_status = _prompt_status_block(presence_rows, session_rows)
+    delivery_receipt = _latest_ready_delivery_receipt()
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -9061,7 +9281,15 @@ def build_companion_state() -> dict[str, object]:
         "pressure": _pressure_block(presence_rows, session_rows),
         "recent_signal": _recent_signal_block(),
         "compact": _compact_block(presence_rows, session_rows),
-        "prompt_status": _prompt_status_block(presence_rows, session_rows),
+        "prompt_status": prompt_status,
+        "activity": _base_companion_activity(
+            presence_rows,
+            session_rows,
+            waiting_signals,
+            prompt_status,
+            finished_payload,
+            delivery_receipt,
+        ),
     }
     try:
         gate = active_prompt_gate()
@@ -9235,7 +9463,7 @@ def build_companion_state() -> dict[str, object]:
         signal_count = int(digest.get("signal_count") or 0)
         parts = []
         if finished_count:
-            parts.append(f"{finished_count} finished")
+            parts.append(f"{finished_count} went quiet")
         if signal_count:
             parts.append(f"{signal_count} signal{'s' if signal_count != 1 else ''}")
         parts.append(f"gap {digest.get('gap_label')}")
@@ -9274,7 +9502,6 @@ def build_companion_state() -> dict[str, object]:
         if foreground:
             return _compact_companion_state(base, {**compact, **foreground[0], "sessions": foreground})
 
-    delivery_receipt = _latest_ready_delivery_receipt()
     if delivery_receipt is not None:
         event = delivery_receipt.get("event") if isinstance(delivery_receipt.get("event"), dict) else {}
         snapshot = delivery_receipt.get("snapshot") if isinstance(delivery_receipt.get("snapshot"), dict) else {}
@@ -9334,8 +9561,8 @@ def build_companion_state() -> dict[str, object]:
         return {
             **base,
             "state": "session_finished",
-            "label": f"{finished_count} completed runs" if many_finished else "Run completed",
-            "title": f"{finished_count} completed runs" if many_finished else "Run completed",
+            "label": f"{finished_count} ready to check" if many_finished else "Ready to check",
+            "title": f"{finished_count} ready to check" if many_finished else "Ready to check",
             "subtitle": (
                 "Nice progress. Pick one to review or clear the notice."
                 if many_finished
@@ -9357,12 +9584,12 @@ def build_companion_state() -> dict[str, object]:
             "badge": {
                 "count": finished_count,
                 "tone": "info",
-                "label": f"{finished_count} completed run{'s' if finished_count != 1 else ''}",
+                "label": f"{finished_count} run{'s' if finished_count != 1 else ''} ready to check",
             },
             "detail": (
-                "Completed runs are visible in Sessions. Clear all only dismisses Companion notices."
+                "Recently quiet runs are visible in Sessions. Clear all only dismisses Companion notices."
                 if many_finished
-                else "This run was active a moment ago and has gone quiet -- likely completed work awaiting review."
+                else "This run was active a moment ago and has gone quiet. Open it to verify what finished."
             ),
         }
 
@@ -9621,9 +9848,9 @@ def build_companion_state() -> dict[str, object]:
         base["badge"] = {
             "count": len(finished_notices),
             "tone": "info",
-            "label": f"{len(finished_notices)} completed run{'s' if len(finished_notices) != 1 else ''}",
+            "label": f"{len(finished_notices)} run{'s' if len(finished_notices) != 1 else ''} ready to check",
         }
-        appended = f"{quiet_subtitle} · {len(finished_notices)} completed"
+        appended = f"{quiet_subtitle} · {len(finished_notices)} to check"
         if len(appended) <= 46:
             quiet_subtitle = appended
     # The prompt in progress, or its receipt, is what is happening now in a
@@ -9640,6 +9867,11 @@ def build_companion_state() -> dict[str, object]:
         "primary_label": "Console" if running else "Open",
         "detail": quiet_detail if running else base["detail"],
     }
+
+
+def build_companion_state() -> dict[str, object]:
+    """Return the winning state plus one normalized cross-surface activity model."""
+    return _companion_activity_contract(_build_companion_state())
 
 
 def _build_compact_prompt(health: object) -> str:

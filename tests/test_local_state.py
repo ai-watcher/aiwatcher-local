@@ -896,11 +896,13 @@ class LocalStateTests(unittest.TestCase):
                     "finished_sessions": "expanded",
                     "batch_finished_sessions": False,
                     "blocked_sessions": False,
+                    "motion_mode": "expressive",
                 })
                 reread = local_state.companion_preferences()
                 normalized = local_state.record_companion_preferences({
                     "finished_sessions": "loud",
                     "fresh_start_context": True,
+                    "motion_mode": "dizzy",
                 })
                 string_values = local_state.record_companion_preferences({
                     "blocked_sessions": "false",
@@ -910,12 +912,15 @@ class LocalStateTests(unittest.TestCase):
                 })
 
         self.assertEqual(default["finished_sessions"], "badge_only")
+        self.assertEqual(default["motion_mode"], "standard")
         self.assertTrue(default["fresh_start_context"])
         self.assertEqual(saved["finished_sessions"], "expanded")
         self.assertFalse(saved["fresh_start_context"])
         self.assertFalse(saved["batch_finished_sessions"])
+        self.assertEqual(saved["motion_mode"], "expressive")
         self.assertEqual(reread, saved)
         self.assertEqual(normalized["finished_sessions"], "badge_only")
+        self.assertEqual(normalized["motion_mode"], "standard")
         self.assertFalse(string_values["blocked_sessions"])
         self.assertFalse(string_values["fresh_start_context"])
         self.assertFalse(string_values["batch_finished_sessions"])
