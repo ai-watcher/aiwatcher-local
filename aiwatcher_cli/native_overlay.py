@@ -3260,22 +3260,21 @@ _MARK_PHOTOS: dict[tuple[float, str, str], object] = {}
 _MARK_PHOTOS_UNAVAILABLE = False
 
 
-def _brand_mark_photo(tk_module: object, height: float, blue: str, ink: str) -> object | None:
-    """Return a cached anti-aliased PhotoImage of the mark, or None.
+def _cached_photo(tk_module: object, key: tuple, render) -> object | None:
+    """Return a cached anti-aliased PhotoImage for `key`, or None.
 
-    None means the caller should draw the vector fallback instead: Tk before
-    8.6 cannot read PNG at all, and a bar that renders its mark the old way is
-    better than one that fails to start.
+    None means the caller should draw its Tk fallback instead: Tk before 8.6
+    cannot read PNG at all, and a bar that renders the old way is better than
+    one that fails to start.
     """
     global _MARK_PHOTOS_UNAVAILABLE
     if _MARK_PHOTOS_UNAVAILABLE:
         return None
-    key = (round(float(height), 2), blue, ink)
     photo = _MARK_PHOTOS.get(key)
     if photo is not None:
         return photo
     try:
-        png = brand_mark.render_mark_png(height, blue, ink)
+        png = render()
     except (ValueError, OverflowError):
         return None  # a colour this build does not understand; not fatal
     try:
@@ -3285,6 +3284,101 @@ def _brand_mark_photo(tk_module: object, height: float, blue: str, ink: str) -> 
         return None
     _MARK_PHOTOS[key] = photo
     return photo
+
+
+def _brand_mark_photo(tk_module: object, height: float, blue: str, ink: str) -> object | None:
+    return _cached_photo(
+        tk_module,
+        ("mark", round(float(height), 2), blue, ink),
+        lambda: brand_mark.render_mark_png(height, blue, ink),
+    )
+
+
+def _paint_face(
+    tk_module: object,
+    canvas: object,
+    face: object,
+    eyes: object,
+    eye_thickness: float,
+    gaze: tuple,
+    panel: str,
+    eye_colour: str,
+) -> None:
+    """Draw the Companion's face as one anti-aliased image where Tk allows it.
+
+    Panel and eyes go in together so their curves blend against each other
+    rather than against whatever Tk last drew; as separate canvas items they
+    were the last stair-stepped thing in the bubble once the mark became an
+    image.
+    """
+    gaze_x, gaze_y = gaze
+    segments = tuple(
+        (
+            round(eye.x0 - face.x0 + gaze_x, 2), round(eye.y0 - face.y0 + gaze_y, 2),
+            round(eye.x1 - face.x0 + gaze_x, 2), round(eye.y1 - face.y0 + gaze_y, 2),
+        )
+        for eye in eyes
+    )
+    photo = _cached_photo(
+        tk_module,
+        ("face", round(face.width, 2), round(face.height, 2), segments,
+         round(eye_thickness, 2), panel, eye_colour),
+        lambda: brand_mark.render_face_png(
+            face.width, face.height, segments, eye_thickness, panel, eye_colour,
+        ),
+    )
+    if photo is not None:
+        try:
+            canvas.create_image(face.x0, face.y0, image=photo, anchor="nw")
+            return
+        except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+            pass
+    radius = face.height / 2.0
+    canvas.create_oval(face.x0, face.y0, face.x0 + face.height, face.y1, fill=panel, outline="")
+    canvas.create_oval(face.x1 - face.height, face.y0, face.x1, face.y1, fill=panel, outline="")
+    canvas.create_rectangle(face.x0 + radius, face.y0, face.x1 - radius, face.y1, fill=panel, outline="")
+    for x0, y0, x1, y1 in segments:
+        canvas.create_line(
+            face.x0 + x0, face.y0 + y0, face.x0 + x1, face.y0 + y1,
+            fill=eye_colour, width=eye_thickness, capstyle=tk_module.ROUND,
+        )
+
+
+def _paint_ring(tk_module: object, canvas: object, rect: object, stroke: float, colour: str) -> None:
+    """Draw a circular outline, anti-aliased where Tk allows.
+
+    The running arc is deliberately NOT drawn through here: it moves every
+    frame, so it would need a cached image per angle, and rendering those on
+    the Tk main thread would stutter the first revolution. It stays a Tk arc.
+    """
+    photo = _cached_photo(
+        tk_module,
+        ("ring", round(rect.width, 2), round(stroke, 2), colour),
+        lambda: brand_mark.render_ring_png(rect.width, stroke, colour),
+    )
+    if photo is not None:
+        try:
+            canvas.create_image(rect.x0 - stroke / 2.0, rect.y0 - stroke / 2.0, image=photo, anchor="nw")
+            return
+        except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+            pass
+    canvas.create_oval(*rect, outline=colour, width=stroke)
+
+
+def _paint_disc(tk_module: object, canvas: object, rect: object, colour: str) -> None:
+    """Draw a filled circle -- the count badge -- anti-aliased where Tk allows."""
+    photo = _cached_photo(
+        tk_module,
+        ("disc", round(rect.height, 2), colour),
+        lambda: brand_mark.render_disc_png(rect.height, colour),
+    )
+    if photo is not None:
+        try:
+            canvas.create_image(rect.x0, rect.y0, image=photo, anchor="nw")
+            return
+        except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+            pass
+    canvas.create_oval(*rect, fill=colour, outline="")
 
 
 def _paint_brand_mark(tk_module: object, canvas: object, height: float, blue: str, ink: str) -> None:
@@ -4498,25 +4592,17 @@ def run_native_presence(
             reduce_motion=reduce_motion or motion_mode_var.get() != "expressive",
         )
         face = bubble.face
-        face_radius = face.height / 2.0
-        collapsed_canvas.create_oval(face.x0, face.y0, face.x0 + face.height, face.y1, fill="#141314", outline="")
-        collapsed_canvas.create_oval(face.x1 - face.height, face.y0, face.x1, face.y1, fill="#141314", outline="")
-        collapsed_canvas.create_rectangle(
-            face.x0 + face_radius, face.y0, face.x1 - face_radius, face.y1, fill="#141314", outline="",
-        )
         # A focus lock thickens the gaze; both come from the face's own size.
         eye_width = bubble.eye_thickness * (1.4 if int(focus_lock_ticks_var.get() or 0) > 0 else 1.0)
         # Gaze is a nudge in units of the face, not a fixed pixel, so it stays
         # proportionate if the bubble is ever drawn larger.
         gaze_step = max(1.0, face.height * 0.12)
-        for eye in bubble.eyes:
-            collapsed_canvas.create_line(
-                eye.x0 + gaze_x * gaze_step, eye.y0 + gaze_y * gaze_step,
-                eye.x1 + gaze_x * gaze_step, eye.y1 + gaze_y * gaze_step,
-                fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
-            )
+        _paint_face(
+            tk, collapsed_canvas, face, bubble.eyes, eye_width,
+            (gaze_x * gaze_step, gaze_y * gaze_step), "#141314", eye_colour,
+        )
         if int(focus_lock_ticks_var.get() or 0) > 0 and not needs_attention:
-            collapsed_canvas.create_oval(*bubble.focus_rim, outline=ring_colour, width=2)
+            _paint_ring(tk, collapsed_canvas, bubble.focus_rim, bubble.focus_stroke, ring_colour)
         # The running indicator: a mint arc travelling around the bubble's rim
         # while any session is working. Attention outranks it. A third of the
         # circle at 4 wide, the Swift bar's 5 x 33% scaled to this canvas.
@@ -4544,7 +4630,7 @@ def run_native_presence(
             rim_colour = "#ed6a24"
             if hard_gate and not reduce_motion and motion_mode_var.get() != "quiet" and not pulse_var.get():
                 rim_colour = "#f8cdb5"
-            collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=bubble.orbit_stroke)
+            _paint_ring(tk, collapsed_canvas, bubble.rim, bubble.orbit_stroke, rim_colour)
         # The collapsed bubble reserves numbers for things needing attention.
         # Completed work is reward/status text after expansion, not a mystery
         # count sitting on screen all day.
@@ -4557,9 +4643,9 @@ def run_native_presence(
         # state from being the quietest one.
         badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")
         if badge_text:
-            collapsed_canvas.create_oval(
-                *bubble.badge,
-                fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5", outline="",
+            _paint_disc(
+                tk, collapsed_canvas, bubble.badge,
+                attention_bg if waiting_count > 0 or needs_attention else "#0052F5",
             )
             badge_x, badge_y = bubble.badge.centre
             collapsed_canvas.create_text(

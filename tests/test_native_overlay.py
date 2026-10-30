@@ -625,7 +625,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         )
         self.assertIn('activity_tone_var.get() == "attention"', tk_source)
         self.assertIn("badge_count = waiting_count or review_count", tk_source)
-        self.assertIn('fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
+        # The badge disc is rasterised now, so the colour is an argument to
+        # _paint_disc rather than a fill= on a Tk oval.
+        self.assertIn('attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
 
     def test_the_away_digest_rides_the_queue_rows(self) -> None:
         # History entries reuse the waiting-row machinery: mint/amber dots by
@@ -703,7 +705,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def reduce_motion_active()", tk_source)
         self.assertIn("root.after(800 if animate_surface else (30000 if not visible_surface else 8000)", tk_source)
         self.assertIn("entered_attention or activity_changed or delivered or recovered", tk_source)
-        self.assertIn("capstyle=tk.ROUND", tk_source)
+        # The eyes moved into _paint_face, which draws them into the face
+        # image; the round cap survives as the Tk fallback's stroke.
+        self.assertIn("capstyle=tk_module.ROUND", inspect.getsource(native_overlay._paint_face))
         self.assertIn("working_count_var.set(0)", tk_source.split("def apply_offline_state")[1][:900])
         self.assertIn('activity_tone_var.set("")', tk_source.split("def apply_offline_state")[1][:900])
 
@@ -789,10 +793,15 @@ class NativeOverlayConfigTests(unittest.TestCase):
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('hard_gate = state_var.get() in {"prompt_gate", "command_gate"}', tk_source)
         # The rim is the layout's, not a typed box; brand_mark derives it as
-        # the largest centred circle inside the canvas.
+        # the largest centred circle inside the canvas. It is rasterised now,
+        # with _paint_ring keeping the Tk oval as its fallback.
         self.assertIn(
-            "collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=bubble.orbit_stroke)",
+            "_paint_ring(tk, collapsed_canvas, bubble.rim, bubble.orbit_stroke, rim_colour)",
             tk_source,
+        )
+        self.assertIn(
+            "canvas.create_oval(*rect, outline=colour, width=stroke)",
+            inspect.getsource(native_overlay._paint_ring),
         )
         self.assertIn('rim_colour = "#f8cdb5"', tk_source)
         self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)

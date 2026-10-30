@@ -131,6 +131,60 @@ class BrandMarkRenderTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class ShapeRenderTests(unittest.TestCase):
+    """The layers that are not the mark. Tk drew these as canvas primitives,
+    which is to say with hard pixel edges, and they were the last stair-stepped
+    things in the bubble once the mark became an image."""
+
+    def test_the_badge_disc_is_anti_aliased(self) -> None:
+        png = brand_mark.render_disc_png(25.0, "#0052F5")
+        width, height, rows = decode_rgba(png)
+        self.assertEqual((width, height), (25, 25))
+        alphas = {pixel[3] for row in rows for pixel in row}
+        partial = [a for a in alphas if 0 < a < 255]
+        self.assertGreater(len(partial), 4, "a circle with hard edges is the defect")
+        self.assertEqual(rows[0][0][3], 0, "the box corner sits outside the circle")
+        self.assertEqual(rows[12][12], (0x00, 0x52, 0xF5, 255), "the centre is solid")
+
+    def test_the_face_draws_its_panel_and_both_eyes_anti_aliased(self) -> None:
+        layout = brand_mark.bubble_layout(56, 60)
+        eyes = tuple(
+            (eye.x0 - layout.face.x0, eye.y0 - layout.face.y0,
+             eye.x1 - layout.face.x0, eye.y1 - layout.face.y0)
+            for eye in layout.eyes
+        )
+        png = brand_mark.render_face_png(
+            layout.face.width, layout.face.height, eyes, layout.eye_thickness,
+            "#141314", "#7fdbff",
+        )
+        _width, _height, rows = decode_rgba(png)
+        opaque = {pixel[:3] for row in rows for pixel in row if pixel[3] == 255}
+        self.assertIn((0x14, 0x13, 0x14), opaque, "the panel is missing")
+        self.assertIn((0x7F, 0xDB, 0xFF), opaque, "the eyes are missing")
+        alphas = {pixel[3] for row in rows for pixel in row}
+        # Only a handful of levels: the shipped face is 13x9, so there are few
+        # edge pixels to carry them. More than two is the whole claim -- the
+        # Tk primitives this replaced could only ever be on or off.
+        self.assertGreaterEqual(len([a for a in alphas if 0 < a < 255]), 3)
+        # A stadium, not a rectangle: the corners carry no ink.
+        self.assertEqual(rows[0][0][3], 0)
+
+    def test_a_capsule_covers_its_segment_and_its_round_caps(self) -> None:
+        # The eyes are round-capped strokes, so the cap is part of the shape
+        # and part of why two of them run into each other.
+        on = lambda x, y: brand_mark._in_capsule(x, y, 0.0, 0.0, 10.0, 0.0, 1.0)
+        self.assertTrue(on(5.0, 0.0))
+        self.assertTrue(on(5.0, 0.9))
+        self.assertFalse(on(5.0, 1.5))
+        self.assertTrue(on(-0.9, 0.0), "the round cap extends past the segment")
+        self.assertFalse(on(-1.5, 0.0))
+        self.assertTrue(on(10.9, 0.0))
+
+    def test_a_zero_length_capsule_is_a_dot(self) -> None:
+        self.assertTrue(brand_mark._in_capsule(0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        self.assertFalse(brand_mark._in_capsule(1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+
+
 class BubbleLayoutTests(unittest.TestCase):
     """The invariants that used to live in a comment and a person's eye.
 
@@ -258,7 +312,7 @@ class BrandMarkOverlayWiringTests(unittest.TestCase):
     def test_photos_are_cached_so_tk_does_not_collect_the_pixels(self) -> None:
         # A PhotoImage that falls out of scope blanks the canvas item that
         # references it, which is the classic Tk image bug.
-        source = inspect.getsource(native_overlay._brand_mark_photo)
+        source = inspect.getsource(native_overlay._cached_photo)
         self.assertIn("_MARK_PHOTOS[key] = photo", source)
         self.assertIn("_MARK_PHOTOS.get(key)", source)
         self.assertIsInstance(native_overlay._MARK_PHOTOS, dict)
@@ -270,10 +324,10 @@ class BrandMarkOverlayWiringTests(unittest.TestCase):
         for expression in (
             'collapsed_canvas.move("all", bubble.mark.x0, bubble.mark.y0)',
             "*bubble.rim,",
-            "*bubble.focus_rim,",
-            "*bubble.badge,",
+            "bubble.focus_rim,",
+            "bubble.badge,",
             "face = bubble.face",
-            "for eye in bubble.eyes:",
+            "bubble.eyes,",
         ):
             with self.subTest(expression=expression):
                 self.assertIn(expression, source)

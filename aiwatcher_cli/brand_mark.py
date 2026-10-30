@@ -66,29 +66,25 @@ def mark_size(height: float) -> tuple[int, int]:
     )
 
 
-def render_mark_png(height: float, blue: str, ink: str, supersample: int = SUPERSAMPLE) -> bytes:
-    """Return the mark as RGBA PNG bytes, `height` pixels tall.
+def _rasterise(width: int, height: int, shader, supersample: int = SUPERSAMPLE) -> bytes:
+    """Supersampled coverage render of `shader`, as RGBA PNG bytes.
 
-    Coverage is supersampled `supersample` times per axis, so corners and
-    stroke edges anti-alias instead of stair-stepping.
+    `shader(x, y)` is asked about points in the image's own pixel space and
+    returns an (r, g, b) or None. Coverage is sampled `supersample` times per
+    axis, which is what anti-aliases the edges -- Tk's canvas cannot, so every
+    shape the Companion draws through here stops stair-stepping.
     """
-    width, pixel_height = mark_size(height)
-    colours = (_rgb(blue), _rgb(ink))
-    scale = VIEW_H / float(pixel_height)
     samples = float(supersample * supersample)
     rows = []
-    for iy in range(pixel_height):
+    for iy in range(height):
         row = bytearray(b"\x00")  # PNG filter byte: none
         for ix in range(width):
             red = green = blue_total = alpha = 0.0
             for sy in range(supersample):
-                py = (iy + (sy + 0.5) / supersample) * scale
+                py = iy + (sy + 0.5) / supersample
                 for sx in range(supersample):
-                    px = (ix + (sx + 0.5) / supersample) * scale
-                    hit = None
-                    for index, geometry in enumerate(RINGS):
-                        if _on_ring(px, py, *geometry):
-                            hit = colours[index]  # later rings paint over
+                    px = ix + (sx + 0.5) / supersample
+                    hit = shader(px, py)
                     if hit is not None:
                         red += hit[0]
                         green += hit[1]
@@ -107,7 +103,101 @@ def render_mark_png(height: float, blue: str, ink: str, supersample: int = SUPER
                     round(alpha / samples),
                 ))
         rows.append(bytes(row))
-    return _png(width, pixel_height, b"".join(rows))
+    return _png(width, height, b"".join(rows))
+
+
+def _in_capsule(px, py, x0, y0, x1, y1, radius) -> bool:
+    """Whether a point is within `radius` of the segment -- a round-capped
+    stroke, which is what Tk's capstyle=ROUND draws."""
+    dx, dy = x1 - x0, y1 - y0
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 0.0:
+        return math.hypot(px - x0, py - y0) <= radius
+    t = ((px - x0) * dx + (py - y0) * dy) / length_squared
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return math.hypot(px - (x0 + t * dx), py - (y0 + t * dy)) <= radius
+
+
+def render_mark_png(height: float, blue: str, ink: str, supersample: int = SUPERSAMPLE) -> bytes:
+    """Return the mark as RGBA PNG bytes, `height` pixels tall."""
+    width, pixel_height = mark_size(height)
+    colours = (_rgb(blue), _rgb(ink))
+    scale = VIEW_H / float(pixel_height)
+
+    def shader(px, py):
+        hit = None
+        for index, geometry in enumerate(RINGS):
+            if _on_ring(px * scale, py * scale, *geometry):
+                hit = colours[index]  # later rings paint over
+        return hit
+
+    return _rasterise(width, pixel_height, shader, supersample)
+
+
+def render_disc_png(diameter: float, colour: str, supersample: int = SUPERSAMPLE) -> bytes:
+    """A filled circle -- the count badge, which Tk drew with a jagged edge."""
+    size = max(1, int(round(diameter)))
+    rgb = _rgb(colour)
+    centre = size / 2.0
+    radius = size / 2.0
+
+    def shader(px, py):
+        return rgb if math.hypot(px - centre, py - centre) <= radius else None
+
+    return _rasterise(size, size, shader, supersample)
+
+
+def render_ring_png(diameter: float, stroke: float, colour: str, supersample: int = SUPERSAMPLE) -> bytes:
+    """A circular outline -- the attention and focus rims.
+
+    Tk strokes an oval centred on its path, so the image is `stroke` wider
+    than the bounding box and is drawn half a stroke up and to the left of it.
+    """
+    size = max(1, int(round(diameter + stroke)))
+    rgb = _rgb(colour)
+    centre = size / 2.0
+    path_radius = diameter / 2.0
+    half = stroke / 2.0
+
+    def shader(px, py):
+        distance = math.hypot(px - centre, py - centre)
+        return rgb if abs(distance - path_radius) <= half else None
+
+    return _rasterise(size, size, shader, supersample)
+
+
+def render_face_png(
+    width: float,
+    height: float,
+    eyes,
+    eye_thickness: float,
+    panel: str,
+    eye_colour: str,
+    supersample: int = SUPERSAMPLE,
+) -> bytes:
+    """The Companion's face: a stadium panel with two round-capped eyes.
+
+    `eyes` are segments in the face's own pixel space, gaze already applied.
+    Drawn as one image so the panel's curve and the eyes anti-alias together;
+    drawn as Tk primitives they were the last stair-stepped thing left in the
+    bubble once the mark became an image.
+    """
+    pixel_width = max(1, int(round(width)))
+    pixel_height = max(1, int(round(height)))
+    panel_rgb, eye_rgb = _rgb(panel), _rgb(eye_colour)
+    radius = pixel_height / 2.0
+    eye_radius = max(eye_thickness, 0.1) / 2.0
+
+    def shader(px, py):
+        for x0, y0, x1, y1 in eyes:
+            if _in_capsule(px, py, x0, y0, x1, y1, eye_radius):
+                return eye_rgb
+        waist = min(max(px, radius), pixel_width - radius)
+        if math.hypot(px - waist, py - radius) <= radius:
+            return panel_rgb
+        return None
+
+    return _rasterise(pixel_width, pixel_height, shader, supersample)
 
 
 def _png(width: int, height: int, raw: bytes) -> bytes:
@@ -207,6 +297,7 @@ MIN_FACE_WIDTH_FOR_EYES = (MIN_EYE_THICKNESS + MIN_EYES_GAP) / (
 RIM_MARGIN = 2.0
 FOCUS_RIM_INSET = 3.0
 ORBIT_STROKE = 4.0
+FOCUS_STROKE_FRACTION = 0.5
 
 # The badge sits in the canvas's top-right corner. It is here for the same
 # reason as everything else: it was typed as (26, 2, 42, 18) once, which ran
@@ -233,6 +324,7 @@ class BubbleLayout(NamedTuple):
     eyes: tuple[Rect, Rect]
     badge: Rect
     orbit_stroke: float
+    focus_stroke: float
     eye_thickness: float
     eyes_gap: float
     badge_font_size: int
@@ -334,6 +426,7 @@ def bubble_layout(
         eyes=(eyes[0], eyes[1]),
         badge=badge,
         orbit_stroke=ORBIT_STROKE,
+        focus_stroke=ORBIT_STROKE * FOCUS_STROKE_FRACTION,
         eye_thickness=eye_thickness,
         eyes_gap=(eyes[1].x0 - eye_thickness / 2.0) - (eyes[0].x1 + eye_thickness / 2.0),
         badge_font_size=max(MIN_BADGE_FONT, int(round(badge.height * BADGE_FONT_FRACTION))),
