@@ -138,7 +138,11 @@ class BubbleLayoutTests(unittest.TestCase):
     two of them did not hold at all.
     """
 
-    SIZES = ((36, 40), (28, 28), (52, 52), (64, 48), (24, 32))
+    # The Companion's own canvas is 56x60 (a 72px window less its padding).
+    # Nothing below 28 is swept: the face is then narrower than
+    # MIN_FACE_WIDTH_FOR_EYES and cannot hold two separate eyes at all, which
+    # is asserted directly below rather than hidden by omission.
+    SIZES = ((56, 60), (36, 40), (28, 28), (52, 52), (64, 48))
 
     def test_the_face_stays_inside_the_front_ring_at_every_mark_size(self) -> None:
         # This is the bug that shipped: the face panel covered the front
@@ -151,6 +155,30 @@ class BubbleLayoutTests(unittest.TestCase):
                     layout.front_interior.contains(layout.face),
                     "face %s escaped the ring opening %s" % (layout.face, layout.front_interior),
                 )
+
+    def test_the_eyes_do_not_merge_once_round_caps_are_added(self) -> None:
+        # The eyes are drawn with round caps, so each dash grows by half its
+        # thickness at both ends. They merged into one bar twice before this
+        # was asserted -- once from a typed 2px thickness, once from scaling
+        # the bubble up with the fractions chosen at the smaller size.
+        for width, height in self.SIZES:
+            with self.subTest(canvas=(width, height)):
+                layout = brand_mark.bubble_layout(width, height)
+                self.assertGreater(
+                    layout.eyes_gap, 0.5,
+                    "eyes merge: gap %.2f at canvas %dx%d" % (layout.eyes_gap, width, height),
+                )
+
+    def test_a_face_too_small_for_two_eyes_is_a_known_floor(self) -> None:
+        # Not every canvas can carry this design, and the limit is derived
+        # rather than discovered on screen: below a 5px face the thickness
+        # floor wins and the dashes touch. The shipped bubble is well clear.
+        self.assertAlmostEqual(brand_mark.MIN_FACE_WIDTH_FOR_EYES, 5.0, places=6)
+        cramped = brand_mark.bubble_layout(24, 24)
+        self.assertLess(cramped.face.width, brand_mark.MIN_FACE_WIDTH_FOR_EYES)
+        self.assertLessEqual(cramped.eyes_gap, 0.5)
+        shipped = brand_mark.bubble_layout(56, 60)
+        self.assertGreater(shipped.face.width, brand_mark.MIN_FACE_WIDTH_FOR_EYES * 2)
 
     def test_the_eyes_stay_inside_the_face(self) -> None:
         for height in range(10, 49):

@@ -3340,19 +3340,23 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    # The collapsed bubble's canvas, and every region drawn into it. Derived
-    # once from the artwork rather than typed per layer -- see brand_mark's
-    # layout section for what that was costing.
-    collapsed_canvas_width = 36
-    collapsed_canvas_height = 40
-    bubble = brand_mark.bubble_layout(collapsed_canvas_width, collapsed_canvas_height)
-
     expanded_width = 640
     expanded_height = 58
     # 52, not 44: the count badge needs room inside the bubble -- see the
     # matching constant in the Swift bar.
-    collapsed_width = 52
-    collapsed_height = 52
+    # The one number that sets how large the bubble is. Everything below --
+    # the canvas, the mark, the face, the eyes, the rim, the badge and the
+    # badge's type size -- is derived from it, so this is the only edit a size
+    # change needs. It was 52, which on a 2560-wide display reads as a speck.
+    collapsed_width = 72
+    collapsed_height = 72
+    # The canvas is what is left of the window after the frame's padding. It
+    # used to be typed as 36x40 beside a 52px window and happened to agree;
+    # that is the same trap as everything else in this bubble.
+    collapsed_padding = (8, 6)
+    collapsed_canvas_width = collapsed_width - 2 * collapsed_padding[0]
+    collapsed_canvas_height = collapsed_height - 2 * collapsed_padding[1]
+    bubble = brand_mark.bubble_layout(collapsed_canvas_width, collapsed_canvas_height)
     row_height = 30
     max_waiting_rows = 5
     screen_width = int(root.winfo_screenwidth())
@@ -3424,7 +3428,7 @@ def run_native_presence(
 
     frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
     frame.pack(fill="both", expand=True)
-    collapsed_frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
+    collapsed_frame = ttk.Frame(root, padding=collapsed_padding, style="Presence.TFrame")
     left = ttk.Frame(frame, style="Presence.TFrame")
     left.pack(side="left", fill="both", expand=True)
     title_var = tk.StringVar(value="AIWatcher")
@@ -4559,7 +4563,8 @@ def run_native_presence(
             )
             badge_x, badge_y = bubble.badge.centre
             collapsed_canvas.create_text(
-                badge_x, badge_y, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
+                badge_x, badge_y, text=badge_text, fill="#ffffff",
+                font=("Helvetica", bubble.badge_font_size, "bold"),
             )
         for button in (plan_button, ask_button, scan_button, console_button):
             button.state(["disabled"] if offline else ["!disabled"])

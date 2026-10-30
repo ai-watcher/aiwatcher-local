@@ -181,14 +181,25 @@ class Rect(NamedTuple):
 # ring's stroke visible all the way round -- without it the panel and the ring
 # are the same colour and merge into one solid shape.
 FACE_INSET_FRACTION = 0.16
-EYE_WIDTH_FRACTION = 0.22
-EYE_CENTRE_FRACTIONS = (0.27, 0.73)
+EYE_WIDTH_FRACTION = 0.18
+EYE_CENTRE_FRACTIONS = (0.25, 0.75)
 EYE_Y_FRACTION = 0.46
 # Thickness is a proportion of the face too. It was a typed 2px, which at the
-# real face height of ~5px was 40% of it: the two eyes met in the middle and
-# read as one bar.
-EYE_THICKNESS_FRACTION = 0.30
+# real face height of ~5px was 40% of it: the two eyes met and read as one bar.
+#
+# The eyes are drawn with round caps, which extend each dash by half its
+# thickness at each end -- so thickness eats into the gap between them twice
+# over, and these four fractions are only correct together. `eyes_gap` on the
+# layout reports what actually survives, and a test holds it above zero at
+# every size; picking them by eye at one size is what merged the eyes twice.
+EYE_THICKNESS_FRACTION = 0.24
 MIN_EYE_THICKNESS = 1.0
+MIN_EYES_GAP = 0.6
+# Below this the floor on thickness wins and the two dashes touch: the face is
+# simply too small for two eyes. Derived, not guessed -- see the test sweep.
+MIN_FACE_WIDTH_FOR_EYES = (MIN_EYE_THICKNESS + MIN_EYES_GAP) / (
+    EYE_CENTRE_FRACTIONS[1] - EYE_CENTRE_FRACTIONS[0] - EYE_WIDTH_FRACTION
+)
 
 # The rim circles (orbit, attention, focus) ride just inside the canvas, and
 # the running arc is drawn centred on the rim path, so it reaches ORBIT_STROKE
@@ -203,6 +214,10 @@ ORBIT_STROKE = 4.0
 # (19, 2, 35, 18). Anchoring it to the corner makes that unrepresentable.
 BADGE_DIAMETER_FRACTION = 0.44
 BADGE_MARGIN = (1.0, 2.0)
+# The count inside the badge has to grow with it, or enlarging the bubble
+# leaves an 8pt number rattling around a 25px disc.
+BADGE_FONT_FRACTION = 0.5
+MIN_BADGE_FONT = 7
 
 
 class BubbleLayout(NamedTuple):
@@ -219,6 +234,8 @@ class BubbleLayout(NamedTuple):
     badge: Rect
     orbit_stroke: float
     eye_thickness: float
+    eyes_gap: float
+    badge_font_size: int
 
 
 def _ring_rects(index: int, scale: float) -> tuple[Rect, Rect]:
@@ -282,6 +299,11 @@ def bubble_layout(
         front_interior.width * FACE_INSET_FRACTION,
         front_interior.height * FACE_INSET_FRACTION,
     )
+    # Thickness is capped by the room left between the two dashes, because the
+    # round caps spend it twice. Below a certain face width the floor wins and
+    # the eyes touch -- see MIN_FACE_WIDTH_FOR_EYES.
+    separation = face.width * (EYE_CENTRE_FRACTIONS[1] - EYE_CENTRE_FRACTIONS[0] - EYE_WIDTH_FRACTION)
+    eye_thickness = max(MIN_EYE_THICKNESS, min(face.height * EYE_THICKNESS_FRACTION, separation - MIN_EYES_GAP))
     eye_half = face.width * EYE_WIDTH_FRACTION / 2.0
     eye_y = face.y0 + face.height * EYE_Y_FRACTION
     eyes = tuple(
@@ -312,5 +334,7 @@ def bubble_layout(
         eyes=(eyes[0], eyes[1]),
         badge=badge,
         orbit_stroke=ORBIT_STROKE,
-        eye_thickness=max(MIN_EYE_THICKNESS, face.height * EYE_THICKNESS_FRACTION),
+        eye_thickness=eye_thickness,
+        eyes_gap=(eyes[1].x0 - eye_thickness / 2.0) - (eyes[0].x1 + eye_thickness / 2.0),
+        badge_font_size=max(MIN_BADGE_FONT, int(round(badge.height * BADGE_FONT_FRACTION))),
     )
