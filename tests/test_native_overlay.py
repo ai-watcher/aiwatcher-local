@@ -756,7 +756,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("extent=120", tk_source)
-        self.assertIn('style="arc", outline="#43d9a3", width=4', tk_source)
+        # The width is brand_mark.ORBIT_STROKE now, because the mark's size is
+        # derived from it -- the arc's inner edge is what the mark must clear.
+        self.assertIn('style="arc", outline="#43d9a3", width=bubble.orbit_stroke', tk_source)
+        self.assertEqual(native_overlay.brand_mark.ORBIT_STROKE, 4.0)
 
     def test_a_hard_gate_is_never_the_quietest_state(self) -> None:
         # A prompt or command gate holds the user's own prompt until they act,
@@ -787,7 +790,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('hard_gate = state_var.get() in {"prompt_gate", "command_gate"}', tk_source)
         # The rim is the layout's, not a typed box; brand_mark derives it as
         # the largest centred circle inside the canvas.
-        self.assertIn("collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=4)", tk_source)
+        self.assertIn(
+            "collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=bubble.orbit_stroke)",
+            tk_source,
+        )
         self.assertIn('rim_colour = "#f8cdb5"', tk_source)
         self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)
         self.assertIn("and not was_hard_gate and collapsed.get():\n            set_collapsed(False)", tk_source)

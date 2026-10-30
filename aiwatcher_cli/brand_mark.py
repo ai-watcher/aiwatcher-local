@@ -181,13 +181,21 @@ class Rect(NamedTuple):
 # ring's stroke visible all the way round -- without it the panel and the ring
 # are the same colour and merge into one solid shape.
 FACE_INSET_FRACTION = 0.16
-EYE_WIDTH_FRACTION = 0.26
-EYE_CENTRE_FRACTIONS = (0.30, 0.70)
-EYE_Y_FRACTION = 0.44
+EYE_WIDTH_FRACTION = 0.22
+EYE_CENTRE_FRACTIONS = (0.27, 0.73)
+EYE_Y_FRACTION = 0.46
+# Thickness is a proportion of the face too. It was a typed 2px, which at the
+# real face height of ~5px was 40% of it: the two eyes met in the middle and
+# read as one bar.
+EYE_THICKNESS_FRACTION = 0.30
+MIN_EYE_THICKNESS = 1.0
 
-# The rim circles (orbit, attention, focus) ride just inside the canvas.
+# The rim circles (orbit, attention, focus) ride just inside the canvas, and
+# the running arc is drawn centred on the rim path, so it reaches ORBIT_STROKE
+# / 2 inside it. That inner edge is what the mark has to clear.
 RIM_MARGIN = 2.0
 FOCUS_RIM_INSET = 3.0
+ORBIT_STROKE = 4.0
 
 # The badge sits in the canvas's top-right corner. It is here for the same
 # reason as everything else: it was typed as (26, 2, 42, 18) once, which ran
@@ -209,6 +217,8 @@ class BubbleLayout(NamedTuple):
     face: Rect
     eyes: tuple[Rect, Rect]
     badge: Rect
+    orbit_stroke: float
+    eye_thickness: float
 
 
 def _ring_rects(index: int, scale: float) -> tuple[Rect, Rect]:
@@ -219,9 +229,19 @@ def _ring_rects(index: int, scale: float) -> tuple[Rect, Rect]:
     return outer.scaled(scale), interior.scaled(scale)
 
 
-def fitted_mark_height(width: float) -> float:
-    """The mark height whose width is `width`, keeping the artwork's ratio."""
-    return width * VIEW_H / VIEW_W
+def inscribed_mark_height(rim_width: float, stroke: float = ORBIT_STROKE) -> float:
+    """Largest mark whose corners clear the inside of the rim's stroke.
+
+    The mark is a rectangle inside a circle, so what binds is the diagonal,
+    not the width -- fitting the width instead pushes the corners straight
+    through the running arc.
+
+    This is the rule the old hand-placed 18px turned out to encode: at a 32px
+    rim with a 4px arc it gives 17.67, which rounds to the 22x18 that shipped.
+    The mark size was never the defect; only the face's position was.
+    """
+    clearance = rim_width / 2.0 - stroke / 2.0
+    return 2.0 * clearance / (math.hypot(VIEW_W, VIEW_H) / VIEW_H)
 
 
 def bubble_layout(
@@ -232,10 +252,8 @@ def bubble_layout(
 ) -> BubbleLayout:
     """Every region the collapsed bubble draws into, derived from the artwork.
 
-    `mark_height` defaults to the largest mark that spans the rim circle, which
-    is what makes the strokes thick enough to read: at the old hand-placed 18px
-    the stroke was 2.06px, which no amount of anti-aliasing turns into a
-    rounded corner.
+    `mark_height` defaults to the largest mark whose corners clear the running
+    arc -- see `inscribed_mark_height`.
     """
     canvas = Rect(0.0, 0.0, float(canvas_w), float(canvas_h))
     side = min(canvas.width, canvas.height) - 2 * RIM_MARGIN
@@ -246,7 +264,7 @@ def bubble_layout(
         (canvas.height + side) / 2.0,
     )
     if mark_height is None:
-        mark_height = fitted_mark_height(rim.width)
+        mark_height = inscribed_mark_height(rim.width)
     scale = mark_height / VIEW_H
 
     width, height = mark_size(mark_height)
@@ -293,4 +311,6 @@ def bubble_layout(
         face=face,
         eyes=(eyes[0], eyes[1]),
         badge=badge,
+        orbit_stroke=ORBIT_STROKE,
+        eye_thickness=max(MIN_EYE_THICKNESS, face.height * EYE_THICKNESS_FRACTION),
     )

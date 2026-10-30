@@ -4500,7 +4500,8 @@ def run_native_presence(
         collapsed_canvas.create_rectangle(
             face.x0 + face_radius, face.y0, face.x1 - face_radius, face.y1, fill="#141314", outline="",
         )
-        eye_width = 3 if int(focus_lock_ticks_var.get() or 0) > 0 else 2
+        # A focus lock thickens the gaze; both come from the face's own size.
+        eye_width = bubble.eye_thickness * (1.4 if int(focus_lock_ticks_var.get() or 0) > 0 else 1.0)
         # Gaze is a nudge in units of the face, not a fixed pixel, so it stays
         # proportionate if the bubble is ever drawn larger.
         gaze_step = max(1.0, face.height * 0.12)
@@ -4520,7 +4521,7 @@ def run_native_presence(
         if int(working_count_var.get() or 0) > 0 and not needs_attention:
             orbit_item["id"] = collapsed_canvas.create_arc(
                 *bubble.rim, start=orbit_angle_var.get(), extent=120,
-                style="arc", outline="#43d9a3", width=4,
+                style="arc", outline="#43d9a3", width=bubble.orbit_stroke,
             )
             # The frame timer only exists while there is an arc to move, so
             # drawing one is what starts it.
@@ -4539,7 +4540,7 @@ def run_native_presence(
             rim_colour = "#ed6a24"
             if hard_gate and not reduce_motion and motion_mode_var.get() != "quiet" and not pulse_var.get():
                 rim_colour = "#f8cdb5"
-            collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=4)
+            collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=bubble.orbit_stroke)
         # The collapsed bubble reserves numbers for things needing attention.
         # Completed work is reward/status text after expansion, not a mystery
         # count sitting on screen all day.

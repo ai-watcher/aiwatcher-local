@@ -1,4 +1,5 @@
 import inspect
+import math
 import struct
 import unittest
 import zlib
@@ -187,13 +188,25 @@ class BubbleLayoutTests(unittest.TestCase):
                 self.assertTrue(layout.rim.contains(layout.focus_rim))
                 self.assertTrue(layout.mark.contains(layout.front_interior))
 
-    def test_the_default_mark_spans_the_rim(self) -> None:
-        # The old hand-placed mark was 22x18 in a 36x40 canvas -- a 2.06px
-        # stroke, which no amount of anti-aliasing turns into a rounded
-        # corner. The default now fills the rim circle.
+    def test_the_mark_clears_the_running_arc(self) -> None:
+        # The mark is a rectangle inside a circle, so the diagonal binds. An
+        # earlier draft of this layout fitted the mark's WIDTH to the rim and
+        # drove its corners straight through the arc -- half-diagonal 20.6
+        # against 14.0 of clearance.
+        for width, height in self.SIZES:
+            with self.subTest(canvas=(width, height)):
+                layout = brand_mark.bubble_layout(width, height)
+                half_diagonal = math.hypot(layout.mark.width, layout.mark.height) / 2.0
+                clearance = layout.rim.width / 2.0 - layout.orbit_stroke / 2.0
+                self.assertLessEqual(half_diagonal, clearance + 0.75)
+
+    def test_the_default_reproduces_the_size_that_shipped(self) -> None:
+        # The hand-placed 18px was right, and encoded exactly this rule; it
+        # was the face's position that was wrong. Deriving it must not quietly
+        # resize the mark.
         layout = brand_mark.bubble_layout(36, 40)
-        self.assertAlmostEqual(layout.mark.width, layout.rim.width, delta=1.0)
-        self.assertGreater(layout.mark_height, 24.0)
+        self.assertEqual(brand_mark.mark_size(layout.mark_height), (22, 18))
+        self.assertAlmostEqual(layout.mark_height, 17.67, places=2)
 
     def test_rect_helpers_behave(self) -> None:
         rect = brand_mark.Rect(0.0, 0.0, 10.0, 4.0)
