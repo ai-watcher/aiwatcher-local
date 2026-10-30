@@ -889,6 +889,51 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("Plan Prompt", source)
         self.assertIn("Scan Now", source)
 
+    def test_the_running_arc_spins_on_a_frame_clock_not_the_pulse_tick(self) -> None:
+        # The arc advanced 103 degrees per 800ms pulse: three frames to a
+        # revolution, which reads as a stutter rather than a spin. The angle
+        # now belongs to spin_orbit, which nudges the arc's own canvas item --
+        # update_attention_style rebuilds both canvases and is far too heavy to
+        # run at frame rate.
+        source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("orbit_frame_ms = 50", source)
+        self.assertIn("orbit_step_degrees = 9", source)
+        self.assertIn("def spin_orbit()", source)
+        self.assertNotIn("- 103) % 360", source)
+
+        spin = source[source.index("def spin_orbit()"):][:1400]
+        self.assertIn("collapsed_canvas.itemconfigure(item, start=orbit_angle_var.get())", spin)
+        # Reduced motion, quiet mode and an unmapped window each stop it dead,
+        # and a rebuilt canvas must not be nudged through a stale item id.
+        self.assertIn("not reduce_motion_active()", spin)
+        self.assertIn('motion_mode_var.get() != "quiet"', spin)
+        self.assertIn("root.winfo_viewable()", spin)
+        self.assertIn('orbit_item["id"] = None', source)
+
+        # The frame timer exists only while there is an arc to move: a bar
+        # that sits open all day must cost nothing while nothing is running,
+        # so spin_orbit returns instead of idling, and the redraw that draws
+        # an arc is what starts it again -- without ever stacking two timers.
+        self.assertIn('orbit_item["running"] = False\n            return', spin)
+        self.assertIn('if not orbit_item["running"]:', source)
+        self.assertIn('orbit_item["running"] = True', source)
+
+    def test_the_bar_buttons_are_flat_and_dark_rather_than_stock_clam_chips(self) -> None:
+        # clam's stock button is a light grey chip with a bevel, which on this
+        # dark bar read as a dialog from another decade.
+        source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('"background": "#1b2636"', source)
+        self.assertIn('"borderwidth": 0', source)
+        self.assertIn('"relief": "flat"', source)
+        self.assertIn('style.map("Presence.TButton"', source)
+        self.assertIn('style.map("PresenceMini.TButton"', source)
+        # The attention chip maps its own oranges rather than the dark fills,
+        # so its map is spelled across several lines.
+        self.assertIn('("pressed", "#b84816")', source)
+        self.assertEqual(source.count("style.map("), 3)
+        # Nothing on the dark bar is a near-white chip any more.
+        self.assertNotIn("#f2f6fb", source)
+
     def test_main_routes_tray_mode_separately_from_presence(self) -> None:
         source = inspect.getsource(native_overlay.main)
 
@@ -897,21 +942,19 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("run_native_presence", source)
 
     def test_an_unanswered_probe_is_not_yet_a_claim_that_the_ui_is_down(self) -> None:
-        # The 0.8s probe timeout is a main-thread stall cap, not a verdict: the
-        # dashboard's first scan over a large local history takes tens of
-        # seconds and every probe during it times out. Painting "UI offline"
-        # there offered Restart, which starts that scan again, so the false
-        # alarm renewed itself. Offline must therefore outlive both a failure
-        # count and the scan window before it is claimed.
+        # A probe that did not answer says "not known yet", not "it is down":
+        # the dashboard's first scan over a large local history takes tens of
+        # seconds and every probe during it fails. Painting "UI offline" there
+        # offered Restart, which starts that scan again, so the false alarm
+        # renewed itself. Offline must outlive both a failure count and the
+        # scan window before it is claimed.
         source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("offline_after_failures = 3", source)
         self.assertIn("offline_after_seconds = 45.0", source)
         self.assertIn("def apply_connecting_state", source)
 
-        # Anchored inside refresh_state: the same except clause spelling
-        # appears in the scan handler further up.
-        refresh = source[source.index("def refresh_state()"):][:1600]
-        failure_branch = refresh[refresh.index("except (OSError, urllib.error.URLError"):]
+        refresh = source[source.index("def refresh_state()"):][:3000]
+        failure_branch = refresh[refresh.index("def settle()"):]
         self.assertIn("apply_connecting_state()", failure_branch)
         self.assertIn("float(probe[\"failures\"]) >= offline_after_failures", failure_branch)
         self.assertIn("time.monotonic() - unreachable_since >= offline_after_seconds", failure_branch)
@@ -928,6 +971,16 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertNotIn("connecting", primary_states)
         show_window = source[source.index("def should_show_window()"):][:600]
         self.assertNotIn("connecting", show_window)
+
+        # The request stays off the Tk main thread. Blocking it froze the bar
+        # for the whole timeout on every tick, worst exactly when the dashboard
+        # was slow and every probe spent its full budget. The worker may only
+        # touch the dict -- Tk calls from another thread are not safe.
+        self.assertIn("threading.Thread(target=fetch, daemon=True).start()", refresh)
+        worker = refresh[refresh.index("def fetch()"):refresh.index("def settle()")]
+        self.assertIn("urllib.request.urlopen(request_url, timeout=2.5)", worker)
+        self.assertNotIn("root.", worker)
+        self.assertNotIn("_var.set(", worker)
 
         # The macOS bar is the same contract, so the two cannot disagree.
         mac = native_overlay.MACOS_SWIFT_PRESENCE
