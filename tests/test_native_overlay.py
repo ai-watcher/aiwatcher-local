@@ -406,7 +406,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("max_waiting_rows = 5", tk_source)
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
-        self.assertIn("create_text(\n                27, 10, text=badge_text", tk_source)
+        self.assertIn("badge_x, badge_y, text=badge_text", tk_source)
         self.assertIn('"badge" in payload', tk_source)
         self.assertIn('visible_waiting_rows() == 0 or state_var.get() in {"control_review", "context_review"}', tk_source)
         self.assertIn("def row_display_text", tk_source)
@@ -785,7 +785,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('hard_gate = state_var.get() in {"prompt_gate", "command_gate"}', tk_source)
-        self.assertIn("collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)", tk_source)
+        # The rim is the layout's, not a typed box; brand_mark derives it as
+        # the largest centred circle inside the canvas.
+        self.assertIn("collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=4)", tk_source)
         self.assertIn('rim_colour = "#f8cdb5"', tk_source)
         self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)
         self.assertIn("and not was_hard_gate and collapsed.get():\n            set_collapsed(False)", tk_source)

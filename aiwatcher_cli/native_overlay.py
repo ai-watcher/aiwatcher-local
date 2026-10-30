@@ -3225,13 +3225,10 @@ def _draw_brand_mark(canvas: object, height: float, blue: str, ink: str) -> None
     the ink ring (300x232 at offset 129,117) drawn in front. The rings' heights
     differ on purpose -- equalising them breaks the fit to the original artwork.
     """
-    s = height / 349.0
+    s = height / brand_mark.VIEW_H
     stroke = max(2.0, 40.0 * s)
 
-    def ring(x: float, y: float, w: float, h: float, colour: str) -> None:
-        r = 85.0 * s - stroke / 2.0
-        x0, y0 = x + stroke / 2.0, y + stroke / 2.0
-        x1, y1 = x + w - stroke / 2.0, y + h - stroke / 2.0
+    def ring(x0: float, y0: float, x1: float, y1: float, r: float, colour: str) -> None:
         for ax, ay, bx, by in (
             (x0 + r, y0, x1 - r, y0),
             (x0 + r, y1, x1 - r, y1),
@@ -3250,8 +3247,9 @@ def _draw_brand_mark(canvas: object, height: float, blue: str, ink: str) -> None
                 start=start, extent=90.0, style="arc", outline=colour, width=stroke,
             )
 
-    ring(0.0, 0.0, 300.0 * s, 260.0 * s, blue)
-    ring(129.0 * s, 117.0 * s, 300.0 * s, 232.0 * s, ink)
+    # brand_mark.RINGS states the centerline, which is what `ring` draws on.
+    for (x, y, w, h, radius, _stroke), colour in zip(brand_mark.RINGS, (blue, ink)):
+        ring(x * s, y * s, (x + w) * s, (y + h) * s, radius * s, colour)
 
 
 # PhotoImage pixels are owned by Tk, and a canvas only holds a reference by
@@ -3341,6 +3339,13 @@ def run_native_presence(
         root.call("::tk::unsupported::MacWindowStyle", "style", root._w, "utility", "closeBox")
     except tk.TclError:
         pass
+
+    # The collapsed bubble's canvas, and every region drawn into it. Derived
+    # once from the artwork rather than typed per layer -- see brand_mark's
+    # layout section for what that was costing.
+    collapsed_canvas_width = 36
+    collapsed_canvas_height = 40
+    bubble = brand_mark.bubble_layout(collapsed_canvas_width, collapsed_canvas_height)
 
     expanded_width = 640
     expanded_height = 58
@@ -4472,8 +4477,8 @@ def run_native_presence(
         collapsed_canvas.configure(bg="#ffffff")
         collapsed_canvas.delete("all")
         orbit_item["id"] = None
-        _paint_brand_mark(tk, collapsed_canvas, 18.0, ring_colour, "#141314")
-        collapsed_canvas.move("all", 7.0, 13.0)
+        _paint_brand_mark(tk, collapsed_canvas, bubble.mark_height, ring_colour, "#141314")
+        collapsed_canvas.move("all", bubble.mark.x0, bubble.mark.y0)
         # Companion-only expression inside the front ring. The dashboard and
         # expanded bar keep the official mark untouched; this small viewport
         # makes the persistent bubble feel watchful without introducing an
@@ -4488,20 +4493,25 @@ def run_native_presence(
             phase=int(expression_phase_var.get()),
             reduce_motion=reduce_motion or motion_mode_var.get() != "expressive",
         )
-        collapsed_canvas.create_oval(16, 16, 23, 23, fill="#141314", outline="")
-        collapsed_canvas.create_rectangle(19, 16, 25, 23, fill="#141314", outline="")
-        collapsed_canvas.create_oval(21, 16, 28, 23, fill="#141314", outline="")
+        face = bubble.face
+        face_radius = face.height / 2.0
+        collapsed_canvas.create_oval(face.x0, face.y0, face.x0 + face.height, face.y1, fill="#141314", outline="")
+        collapsed_canvas.create_oval(face.x1 - face.height, face.y0, face.x1, face.y1, fill="#141314", outline="")
+        collapsed_canvas.create_rectangle(
+            face.x0 + face_radius, face.y0, face.x1 - face_radius, face.y1, fill="#141314", outline="",
+        )
         eye_width = 3 if int(focus_lock_ticks_var.get() or 0) > 0 else 2
-        collapsed_canvas.create_line(
-            18 + gaze_x, 19 + gaze_y, 20 + gaze_x, 19 + gaze_y,
-            fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
-        )
-        collapsed_canvas.create_line(
-            24 + gaze_x, 19 + gaze_y, 26 + gaze_x, 19 + gaze_y,
-            fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
-        )
+        # Gaze is a nudge in units of the face, not a fixed pixel, so it stays
+        # proportionate if the bubble is ever drawn larger.
+        gaze_step = max(1.0, face.height * 0.12)
+        for eye in bubble.eyes:
+            collapsed_canvas.create_line(
+                eye.x0 + gaze_x * gaze_step, eye.y0 + gaze_y * gaze_step,
+                eye.x1 + gaze_x * gaze_step, eye.y1 + gaze_y * gaze_step,
+                fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
+            )
         if int(focus_lock_ticks_var.get() or 0) > 0 and not needs_attention:
-            collapsed_canvas.create_oval(5, 7, 33, 35, outline=ring_colour, width=2)
+            collapsed_canvas.create_oval(*bubble.focus_rim, outline=ring_colour, width=2)
         # The running indicator: a mint arc travelling around the bubble's rim
         # while any session is working. Attention outranks it. A third of the
         # circle at 4 wide, the Swift bar's 5 x 33% scaled to this canvas.
@@ -4509,7 +4519,7 @@ def run_native_presence(
         # clock has already put it.
         if int(working_count_var.get() or 0) > 0 and not needs_attention:
             orbit_item["id"] = collapsed_canvas.create_arc(
-                2, 4, 34, 36, start=orbit_angle_var.get(), extent=120,
+                *bubble.rim, start=orbit_angle_var.get(), extent=120,
                 style="arc", outline="#43d9a3", width=4,
             )
             # The frame timer only exists while there is an arc to move, so
@@ -4529,7 +4539,7 @@ def run_native_presence(
             rim_colour = "#ed6a24"
             if hard_gate and not reduce_motion and motion_mode_var.get() != "quiet" and not pulse_var.get():
                 rim_colour = "#f8cdb5"
-            collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)
+            collapsed_canvas.create_oval(*bubble.rim, outline=rim_colour, width=4)
         # The collapsed bubble reserves numbers for things needing attention.
         # Completed work is reward/status text after expansion, not a mystery
         # count sitting on screen all day.
@@ -4542,14 +4552,13 @@ def run_native_presence(
         # state from being the quietest one.
         badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")
         if badge_text:
-            # Fully inside the 36-wide canvas -- the old (26..42) oval ran
-            # past the canvas edge and rendered cropped.
             collapsed_canvas.create_oval(
-                19, 2, 35, 18,
+                *bubble.badge,
                 fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5", outline="",
             )
+            badge_x, badge_y = bubble.badge.centre
             collapsed_canvas.create_text(
-                27, 10, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
+                badge_x, badge_y, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
         for button in (plan_button, ask_button, scan_button, console_button):
             button.state(["disabled"] if offline else ["!disabled"])
@@ -4938,8 +4947,8 @@ def run_native_presence(
     # repaints it, turning the mark's blue ring orange when attention is due.
     collapsed_canvas = tk.Canvas(
         collapsed_frame,
-        width=36,
-        height=40,
+        width=collapsed_canvas_width,
+        height=collapsed_canvas_height,
         bg="#ffffff",
         highlightthickness=1,
         highlightcolor="#0052F5",

@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import struct
 import zlib
+from typing import NamedTuple, Optional
 
 # The SVG's own viewBox, unpadded: the Companion positions the mark itself.
 VIEW_W = 429.0
@@ -120,4 +121,176 @@ def _png(width: int, height: int, raw: bytes) -> bytes:
         + chunk(b"IHDR", header)
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
+    )
+
+
+# --- layout -----------------------------------------------------------------
+#
+# Everything the Companion's bubble draws is derived from the ring geometry
+# above, because the alternative is what this module replaced: the mark was
+# placed in artwork units and then nudged by a hand-picked pixel offset, while
+# the face, the eyes and the three rim circles were typed as canvas pixels
+# that happened to line up once, at one mark size, in one person's eye. They
+# did not line up -- the face panel sat 5.5px high, covering the front ring's
+# whole top stroke -- and nothing could catch it, because the rule "the face
+# belongs inside the front ring" lived in a comment rather than in the code.
+#
+# So positions are computed here, from one source, and the relationships are
+# assertable. Changing the mark's size moves everything with it.
+
+
+class Rect(NamedTuple):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    @property
+    def width(self) -> float:
+        return self.x1 - self.x0
+
+    @property
+    def height(self) -> float:
+        return self.y1 - self.y0
+
+    @property
+    def centre(self) -> tuple[float, float]:
+        return (self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0
+
+    def inset(self, dx: float, dy: Optional[float] = None) -> "Rect":
+        dy = dx if dy is None else dy
+        return Rect(self.x0 + dx, self.y0 + dy, self.x1 - dx, self.y1 - dy)
+
+    def scaled(self, factor: float) -> "Rect":
+        return Rect(self.x0 * factor, self.y0 * factor, self.x1 * factor, self.y1 * factor)
+
+    def moved(self, dx: float, dy: float) -> "Rect":
+        return Rect(self.x0 + dx, self.y0 + dy, self.x1 + dx, self.y1 + dy)
+
+    def contains(self, other: "Rect", tolerance: float = 1e-9) -> bool:
+        return (
+            other.x0 >= self.x0 - tolerance
+            and other.y0 >= self.y0 - tolerance
+            and other.x1 <= self.x1 + tolerance
+            and other.y1 <= self.y1 + tolerance
+        )
+
+
+# Fractions, not pixels: the face is a proportion of the opening it sits in, so
+# it stays inside that opening at every mark size. The inset leaves the front
+# ring's stroke visible all the way round -- without it the panel and the ring
+# are the same colour and merge into one solid shape.
+FACE_INSET_FRACTION = 0.16
+EYE_WIDTH_FRACTION = 0.26
+EYE_CENTRE_FRACTIONS = (0.30, 0.70)
+EYE_Y_FRACTION = 0.44
+
+# The rim circles (orbit, attention, focus) ride just inside the canvas.
+RIM_MARGIN = 2.0
+FOCUS_RIM_INSET = 3.0
+
+# The badge sits in the canvas's top-right corner. It is here for the same
+# reason as everything else: it was typed as (26, 2, 42, 18) once, which ran
+# past the 36-wide canvas and rendered cropped, and was then re-typed as
+# (19, 2, 35, 18). Anchoring it to the corner makes that unrepresentable.
+BADGE_DIAMETER_FRACTION = 0.44
+BADGE_MARGIN = (1.0, 2.0)
+
+
+class BubbleLayout(NamedTuple):
+    canvas: Rect
+    rim: Rect
+    focus_rim: Rect
+    mark_height: float
+    mark: Rect
+    back_ring: Rect
+    front_ring: Rect
+    front_interior: Rect
+    face: Rect
+    eyes: tuple[Rect, Rect]
+    badge: Rect
+
+
+def _ring_rects(index: int, scale: float) -> tuple[Rect, Rect]:
+    """The outer edge and the inner opening of one ring, in scaled units."""
+    x, y, w, h, _radius, stroke = RINGS[index]
+    outer = Rect(x - stroke / 2, y - stroke / 2, x + w + stroke / 2, y + h + stroke / 2)
+    interior = Rect(x + stroke / 2, y + stroke / 2, x + w - stroke / 2, y + h - stroke / 2)
+    return outer.scaled(scale), interior.scaled(scale)
+
+
+def fitted_mark_height(width: float) -> float:
+    """The mark height whose width is `width`, keeping the artwork's ratio."""
+    return width * VIEW_H / VIEW_W
+
+
+def bubble_layout(
+    canvas_w: float,
+    canvas_h: float,
+    *,
+    mark_height: Optional[float] = None,
+) -> BubbleLayout:
+    """Every region the collapsed bubble draws into, derived from the artwork.
+
+    `mark_height` defaults to the largest mark that spans the rim circle, which
+    is what makes the strokes thick enough to read: at the old hand-placed 18px
+    the stroke was 2.06px, which no amount of anti-aliasing turns into a
+    rounded corner.
+    """
+    canvas = Rect(0.0, 0.0, float(canvas_w), float(canvas_h))
+    side = min(canvas.width, canvas.height) - 2 * RIM_MARGIN
+    rim = Rect(
+        (canvas.width - side) / 2.0,
+        (canvas.height - side) / 2.0,
+        (canvas.width + side) / 2.0,
+        (canvas.height + side) / 2.0,
+    )
+    if mark_height is None:
+        mark_height = fitted_mark_height(rim.width)
+    scale = mark_height / VIEW_H
+
+    width, height = mark_size(mark_height)
+    origin_x = (canvas.width - width) / 2.0
+    origin_y = (canvas.height - height) / 2.0
+    mark = Rect(origin_x, origin_y, origin_x + width, origin_y + height)
+
+    back_outer, _back_interior = _ring_rects(0, scale)
+    front_outer, front_interior = _ring_rects(1, scale)
+    back_ring = back_outer.moved(origin_x, origin_y)
+    front_ring = front_outer.moved(origin_x, origin_y)
+    front_interior = front_interior.moved(origin_x, origin_y)
+
+    face = front_interior.inset(
+        front_interior.width * FACE_INSET_FRACTION,
+        front_interior.height * FACE_INSET_FRACTION,
+    )
+    eye_half = face.width * EYE_WIDTH_FRACTION / 2.0
+    eye_y = face.y0 + face.height * EYE_Y_FRACTION
+    eyes = tuple(
+        Rect(face.x0 + face.width * centre - eye_half, eye_y,
+             face.x0 + face.width * centre + eye_half, eye_y)
+        for centre in EYE_CENTRE_FRACTIONS
+    )
+
+    diameter = min(canvas.width, canvas.height) * BADGE_DIAMETER_FRACTION
+    margin_x, margin_y = BADGE_MARGIN
+    badge = Rect(
+        canvas.x1 - margin_x - diameter,
+        canvas.y0 + margin_y,
+        canvas.x1 - margin_x,
+        canvas.y0 + margin_y + diameter,
+    )
+
+    return BubbleLayout(
+        canvas=canvas,
+        rim=rim,
+        focus_rim=rim.inset(FOCUS_RIM_INSET),
+        mark_height=mark_height,
+        mark=mark,
+        back_ring=back_ring,
+        front_ring=front_ring,
+        front_interior=front_interior,
+        face=face,
+        eyes=(eyes[0], eyes[1]),
+        badge=badge,
     )
