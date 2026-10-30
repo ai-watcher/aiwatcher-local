@@ -69,6 +69,18 @@ class CompanionExpressionTests(unittest.TestCase):
             (0, -1, "#7fdbff"),
         )
 
+    def test_connecting_is_not_drawn_as_a_live_companion(self) -> None:
+        # A probe that has not answered yet is not evidence the dashboard is
+        # down, but it is not evidence it is up either. "connecting" wears the
+        # same claim-free grey as offline rather than the resting face, whose
+        # cyan quietly asserts a watch that is not confirmed to be running.
+        self.assertEqual(
+            native_overlay._companion_expression(
+                "connecting", working=False, needs_attention=False, phase=0, reduce_motion=False,
+            ),
+            (0, 1, "#808f9f"),
+        )
+
     def test_reduced_motion_keeps_working_identity_but_centres_gaze(self) -> None:
         self.assertEqual(
             native_overlay._companion_expression(
@@ -883,6 +895,49 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("--tray", source)
         self.assertIn("run_native_tray", source)
         self.assertIn("run_native_presence", source)
+
+    def test_an_unanswered_probe_is_not_yet_a_claim_that_the_ui_is_down(self) -> None:
+        # The 0.8s probe timeout is a main-thread stall cap, not a verdict: the
+        # dashboard's first scan over a large local history takes tens of
+        # seconds and every probe during it times out. Painting "UI offline"
+        # there offered Restart, which starts that scan again, so the false
+        # alarm renewed itself. Offline must therefore outlive both a failure
+        # count and the scan window before it is claimed.
+        source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("offline_after_failures = 3", source)
+        self.assertIn("offline_after_seconds = 45.0", source)
+        self.assertIn("def apply_connecting_state", source)
+
+        # Anchored inside refresh_state: the same except clause spelling
+        # appears in the scan handler further up.
+        refresh = source[source.index("def refresh_state()"):][:1600]
+        failure_branch = refresh[refresh.index("except (OSError, urllib.error.URLError"):]
+        self.assertIn("apply_connecting_state()", failure_branch)
+        self.assertIn("float(probe[\"failures\"]) >= offline_after_failures", failure_branch)
+        self.assertIn("time.monotonic() - unreachable_since >= offline_after_seconds", failure_branch)
+        # A good read has to clear the budget, or one slow response early on
+        # would leave the count armed for the rest of the session.
+        self.assertIn("probe[\"failures\"] = 0.0", source)
+        self.assertIn("probe[\"last_ok\"] = time.monotonic()", source)
+
+        # Waiting offers no button and claims nothing: "connecting" is absent
+        # from both the primary-action set and the force-show set, so a
+        # dashboard that is merely starting cannot pop the bubble open or
+        # present Restart.
+        primary_states = source[source.index("def has_primary_action()"):][:600]
+        self.assertNotIn("connecting", primary_states)
+        show_window = source[source.index("def should_show_window()"):][:600]
+        self.assertNotIn("connecting", show_window)
+
+        # The macOS bar is the same contract, so the two cannot disagree.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("static let offlineAfterFailures = 3", mac)
+        self.assertIn("static let offlineAfterSeconds: Double = 45.0", mac)
+        self.assertIn("func applyConnectingState()", mac)
+        self.assertIn("self.probeFailures >= Self.offlineAfterFailures", mac)
+        self.assertIn("Date().timeIntervalSince(unreachableSince) >= Self.offlineAfterSeconds", mac)
+        self.assertIn("self.probeFailures = 0", mac)
+        self.assertIn("self.lastProbeOK = Date()", mac)
 
 
 if __name__ == "__main__":
