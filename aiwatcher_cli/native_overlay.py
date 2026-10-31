@@ -976,7 +976,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if lastProbeOK == nil {
             self.stateName = "connecting"
             self.titleLabel.stringValue = "Connecting\u{2026}"
-            self.subtitleLabel.stringValue = "Dashboard is starting. Its first scan can take a moment."
+            self.subtitleLabel.stringValue = "Dashboard starting. First scan can be slow."
         }
         self.updateAppearance()
     }
@@ -4605,7 +4605,7 @@ def run_native_presence(
         if float(probe["last_ok"]) <= 0.0:
             state_var.set("connecting")
             title_var.set("Connecting\u2026")
-            subtitle_var.set("Dashboard is starting. Its first scan can take a moment.")
+            subtitle_var.set("Dashboard starting. First scan can be slow.")
         update_attention_style()
 
     def refresh_state() -> None:
