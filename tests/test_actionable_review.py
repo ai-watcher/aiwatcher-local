@@ -101,15 +101,30 @@ class ActionableReviewTests(TestCase):
 
     def test_cleared_review_quiets_cached_warning_until_the_source_changes(self):
         self.review()
-        candidate = {'session_id': 'selected', 'intervention': {'eligible': True, 'observed_at': self.now.isoformat()}}
+        candidate = {
+            'session_id': 'selected', 'tool': 'codex-cli', 'source_path': '/fixture/rollout.jsonl',
+            'intervention': {'eligible': True, 'observed_at': self.now.isoformat()},
+        }
         with patch.object(ui.os.path, 'getmtime', return_value=self.now.timestamp()):
             self.assertFalse(ui._context_intervention_current(candidate))
         with patch.object(ui.os.path, 'getmtime', return_value=self.now.timestamp()+1):
             self.assertTrue(ui._context_intervention_current(candidate))
 
+    def test_cleared_review_does_not_quiet_another_tool_with_the_same_session_id(self):
+        self.review()
+        candidate = {
+            'session_id': 'selected', 'tool': 'claude-code', 'source_path': '/fixture/claude.jsonl',
+            'intervention': {'eligible': True, 'observed_at': self.now.isoformat()},
+        }
+        with patch.object(ui.os.path, 'getmtime', return_value=self.now.timestamp()):
+            self.assertTrue(ui._context_intervention_current(candidate))
+
     def test_unreadable_source_does_not_revive_a_cleared_warning(self):
         self.review()
-        candidate = {'session_id': 'selected', 'intervention': {'eligible': True, 'observed_at': self.now.isoformat()}}
+        candidate = {
+            'session_id': 'selected', 'tool': 'codex-cli', 'source_path': '/fixture/rollout.jsonl',
+            'intervention': {'eligible': True, 'observed_at': self.now.isoformat()},
+        }
         with patch.object(ui.os.path, 'getmtime', side_effect=OSError('unavailable')):
             self.assertFalse(ui._context_intervention_current(candidate))
 
@@ -119,7 +134,10 @@ class ActionableReviewTests(TestCase):
             self.row.session_id = f's{index}'
             self.review()
         self.assertEqual(len(ui._CONTEXT_REVIEW_CHECKS), 64)
-        self.assertTrue(ui._context_intervention_current({'session_id': 's79', 'intervention': {'eligible': True, 'observed_at': self.now.isoformat()}}))
+        self.assertTrue(ui._context_intervention_current({
+            'session_id': 's79', 'tool': 'codex-cli', 'source_path': '/fixture/rollout.jsonl',
+            'intervention': {'eligible': True, 'observed_at': self.now.isoformat()},
+        }))
 
     def test_confirmed_handoff_resolves_only_the_unchanged_source(self):
         self.pressure['latest_turn_tokens'] = 400000

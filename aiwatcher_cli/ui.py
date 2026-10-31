@@ -527,7 +527,17 @@ def _foreground_matches_fresh_start_bubble(bubble: dict[str, object]) -> bool:
 
 # Bounded, process-local rechecks. A cleared warning stays cleared for this
 # transcript state, not for the project forever. No prompt/source bodies stored.
-_CONTEXT_REVIEW_CHECKS: dict[str, tuple[datetime, str | None, bool]] = {}
+_ContextReviewKey = tuple[str, str, str]
+_CONTEXT_REVIEW_CHECKS: dict[_ContextReviewKey, tuple[datetime, str | None, bool]] = {}
+
+
+def _context_review_key(session_id: object, tool: object, source_path: object) -> _ContextReviewKey:
+    """Keep recheck state scoped to one tool transcript, not a bare session id."""
+    return (
+        str(tool or "").strip().lower(),
+        str(session_id or "").strip(),
+        str(source_path or "").strip(),
+    )
 
 
 def _context_intervention_current(row: dict[str, object]) -> bool:
@@ -538,7 +548,9 @@ def _context_intervention_current(row: dict[str, object]) -> bool:
     if not (intervention.get("eligible") is True and observed and
             0 <= (datetime.now(timezone.utc) - observed).total_seconds() <= ACTIVE_SESSION_MINUTES * 60):
         return False
-    checked = _CONTEXT_REVIEW_CHECKS.get(str(row.get("session_id") or ""))
+    key = _context_review_key(row.get("session_id"), row.get("tool"), row.get("source_path"))
+    with _SUMMARY_CACHE_LOCK:
+        checked = _CONTEXT_REVIEW_CHECKS.get(key)
     if checked and not checked[2] and observed <= checked[0]:
         try:
             unchanged = not checked[1] or os.path.getmtime(checked[1]) <= checked[0].timestamp()
@@ -3346,10 +3358,11 @@ def build_session_review(
         stamp = fresh.updated_at
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
+        key = _context_review_key(row.session_id, row.tool, row.source_path)
         with _SUMMARY_CACHE_LOCK:
-            if row.session_id not in _CONTEXT_REVIEW_CHECKS and len(_CONTEXT_REVIEW_CHECKS) >= 64:
+            if key not in _CONTEXT_REVIEW_CHECKS and len(_CONTEXT_REVIEW_CHECKS) >= 64:
                 _CONTEXT_REVIEW_CHECKS.pop(next(iter(_CONTEXT_REVIEW_CHECKS)), None)
-            _CONTEXT_REVIEW_CHECKS[row.session_id] = (stamp, row.source_path, bool(status != "resolved" and active and (at_limit or next_does_not_fit)))
+            _CONTEXT_REVIEW_CHECKS[key] = (stamp, row.source_path, bool(status != "resolved" and active and (at_limit or next_does_not_fit)))
     return {
         "status": status, "title": title, "reason": reason, "benefit": benefit,
         "observation": observation, "checked_at": datetime.now(timezone.utc).isoformat(),
