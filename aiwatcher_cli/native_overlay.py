@@ -3332,9 +3332,40 @@ def run_native_presence(
     style.configure("PresenceTitle.TLabel", background="#090d14", foreground="#f7fbff", font=("Helvetica", 11, "bold"))
     style.configure("PresenceMuted.TLabel", background="#090d14", foreground="#a8b6ca", font=("Helvetica", 9))
     style.configure("PresenceDrag.TLabel", background="#090d14", foreground="#8ea3bd", font=("Helvetica", 10, "bold"))
-    style.configure("Presence.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
-    style.configure("PresenceAttention.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
-    style.configure("PresenceMini.TButton", font=("Helvetica", 9, "bold"), padding=(4, 2))
+    # clam's stock button is a light grey chip with a bevel, which on this
+    # dark bar read as a dialog from another decade. These are flat, dark and
+    # borderless, and they carry hover and press in the fill rather than in a
+    # raised edge. Padding stays close to the old (6, 3): the bar is a fixed
+    # 640 wide and the busy layouts fill most of it, so there is no room to
+    # spend on breathing space.
+    #
+    # Only the buttons change typeface. Segoe UI is the native Windows face,
+    # but the title and subtitle widths are tuned to the current label metrics
+    # -- the subtitle's 46-character cap is measured against them -- so the
+    # labels keep theirs.
+    button_face = "Segoe UI" if sys.platform == "win32" else "Helvetica"
+    button_base: dict[str, object] = {
+        "font": (button_face, 9, "bold"),
+        "background": "#1b2636",
+        "foreground": "#dce7f7",
+        "borderwidth": 0,
+        "relief": "flat",
+        "focuscolor": "",
+    }
+    button_states: dict[str, object] = {
+        "background": [("disabled", "#141c28"), ("pressed", "#2c3c57"), ("active", "#22304a")],
+        "foreground": [("disabled", "#4a586c")],
+    }
+    style.configure("Presence.TButton", padding=(8, 4), **button_base)
+    style.map("Presence.TButton", **button_states)
+    style.configure("PresenceAttention.TButton", padding=(8, 4), **button_base)
+    style.map(
+        "PresenceAttention.TButton",
+        background=[("disabled", "#141c28"), ("pressed", "#b84816"), ("active", "#f07a3a")],
+        foreground=[("disabled", "#f3d8c8")],
+    )
+    style.configure("PresenceMini.TButton", padding=(5, 3), **button_base)
+    style.map("PresenceMini.TButton", **button_states)
 
     frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
     frame.pack(fill="both", expand=True)
@@ -3389,6 +3420,12 @@ def run_native_presence(
     delivery_confirmed_var = tk.BooleanVar(value=False)
     delivery_receipt_id_var = tk.StringVar(value="")
     orbit_angle_var = tk.IntVar(value=0)
+    # The running arc's canvas id, so its angle can be nudged on its own frame
+    # clock without re-running update_attention_style's full redraw. Cleared
+    # whenever the canvas is torn down, and None whenever no arc is drawn.
+    # "running" says whether a frame timer is already in flight, so the redraw
+    # can start one without ever stacking two.
+    orbit_item: dict[str, object] = {"id": None, "running": False}
     expression_phase_var = tk.IntVar(value=0)
     focus_lock_ticks_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
@@ -4367,11 +4404,10 @@ def run_native_presence(
         style.configure("PresenceTitle.TLabel", background=shell_bg)
         style.configure("PresenceMuted.TLabel", background=shell_bg)
         style.configure("PresenceDrag.TLabel", background=shell_bg)
-        style.configure(
-            "PresenceAttention.TButton",
-            background=attention_bg if needs_attention else "#f2f6fb",
-            foreground="#ffffff" if needs_attention else "#111827",
-        )
+        # The button swaps back to Presence.TButton when nothing needs the
+        # user, so this style is only ever on screen while it does: it is
+        # always the orange chip, pulsing between the two oranges.
+        style.configure("PresenceAttention.TButton", background=attention_bg, foreground="#ffffff")
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
         # The blue ring is the mark's state channel, speaking the dashboard
         # favicon's vocabulary: orange when something needs you, mint while a
@@ -4385,6 +4421,7 @@ def run_native_presence(
         _draw_brand_mark(mark_canvas, height=26.0, blue=ring_colour, ink="#DCE6F6")
         collapsed_canvas.configure(bg="#ffffff")
         collapsed_canvas.delete("all")
+        orbit_item["id"] = None
         _draw_brand_mark(
             collapsed_canvas, height=18.0,
             blue=ring_colour,
@@ -4419,18 +4456,24 @@ def run_native_presence(
         )
         if int(focus_lock_ticks_var.get() or 0) > 0 and not needs_attention:
             collapsed_canvas.create_oval(5, 7, 33, 35, outline=ring_colour, width=2)
-        # The running indicator: a mint arc stepping around the bubble's rim
-        # while any session is working, advanced on the existing pulse tick.
-        # Coarser than the Swift bar's continuous orbit, which is the Tk
-        # fallback's usual fidelity. Attention outranks it. A third of the
+        # The running indicator: a mint arc travelling around the bubble's rim
+        # while any session is working. Attention outranks it. A third of the
         # circle at 4 wide, the Swift bar's 5 x 33% scaled to this canvas.
+        # spin_orbit owns the angle -- drawing only places the arc where that
+        # clock has already put it.
         if int(working_count_var.get() or 0) > 0 and not needs_attention:
-            if not reduce_motion and motion_mode_var.get() != "quiet":
-                orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
-            collapsed_canvas.create_arc(
+            orbit_item["id"] = collapsed_canvas.create_arc(
                 2, 4, 34, 36, start=orbit_angle_var.get(), extent=120,
                 style="arc", outline="#43d9a3", width=4,
             )
+            # The frame timer only exists while there is an arc to move, so
+            # drawing one is what starts it.
+            if not orbit_item["running"]:
+                orbit_item["running"] = True
+                try:
+                    root.after(orbit_frame_ms, spin_orbit)
+                except tk.TclError:
+                    orbit_item["running"] = False
         # The attention rim: the whole circle in orange while something needs
         # the user. Tk has no layer opacity, so a hard gate pulses between
         # orange and a pale tint of it rather than between two oranges --
@@ -4555,6 +4598,47 @@ def run_native_presence(
         apply_waiting_rows()
         apply_window_visibility()
 
+    # The arc used to advance 103 degrees on each 800ms pulse tick: three
+    # frames to a revolution, which reads as a stutter rather than a spin. It
+    # now has its own frame clock, and moves only its own canvas item --
+    # update_attention_style tears down and rebuilds both canvases, which is
+    # far too heavy to run at frame rate.
+    #
+    # 9 degrees per 50ms is the same two-second revolution at 20fps. 30fps
+    # measured 2.2% of a core against 0.4% for the old stutter, which is too
+    # much to ask of a bar that is meant to sit open all day; 20fps is a third
+    # cheaper and a two-second rotation does not read as choppy at it.
+    orbit_frame_ms = 50
+    orbit_step_degrees = 9
+
+    def spin_orbit() -> None:
+        item = orbit_item["id"]
+        spinning = (
+            item is not None
+            and collapsed.get()
+            # winfo_viewable is a cheap mapped-state check: a withdrawn bubble
+            # (nudges-only, or an ai-apps window with no AI app in front) has
+            # nothing on screen to animate.
+            and bool(root.winfo_viewable())
+            and not reduce_motion_active()
+            and motion_mode_var.get() != "quiet"
+        )
+        if not spinning:
+            # Stop rather than idle at a slower tick. A bar that sits open all
+            # day should cost nothing while nothing is running, and the next
+            # redraw that draws an arc starts the timer again.
+            orbit_item["running"] = False
+            return
+        orbit_angle_var.set((int(orbit_angle_var.get()) - orbit_step_degrees) % 360)
+        try:
+            collapsed_canvas.itemconfigure(item, start=orbit_angle_var.get())
+        except tk.TclError:
+            orbit_item["id"] = None
+        try:
+            root.after(orbit_frame_ms, spin_orbit)
+        except tk.TclError:
+            orbit_item["running"] = False
+
     def pulse_attention() -> None:
         reduce_motion = reduce_motion_active()
         visible_surface = should_show_window()
@@ -4579,13 +4663,12 @@ def run_native_presence(
             pass
 
     # Reaching the dashboard is a measurement, and a failed probe only says
-    # "no answer inside the budget". The 0.8s timeout below runs on the Tk main
-    # thread, so it is a stall cap rather than a verdict: the dashboard's first
-    # scan over a large local history takes tens of seconds, and every probe
-    # during it times out. Painting "UI offline" there pointed the user at
-    # Restart, which starts that scan again, so the false alarm renewed itself.
-    # Unreachable therefore carries its own state until it has outlived that
-    # scan window, and only then becomes a claim about the dashboard.
+    # "no answer inside the budget": the dashboard's first scan over a large
+    # local history takes tens of seconds, and every probe during it times out.
+    # Painting "UI offline" there pointed the user at Restart, which starts
+    # that scan again, so the false alarm renewed itself. Unreachable therefore
+    # carries its own state until it has outlived that scan window, and only
+    # then becomes a claim about the dashboard.
     #
     # Both numbers are stopgaps: nothing local reports how long a startup scan
     # will take, so there is nothing to derive them from. 45s covers the "tens
@@ -4609,30 +4692,63 @@ def run_native_presence(
         update_attention_style()
 
     def refresh_state() -> None:
-        try:
-            request_url = f"{url.rstrip('/')}/api/companion-state"
-            with urllib.request.urlopen(request_url, timeout=0.8) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            probe["failures"] = 0.0
-            probe["last_ok"] = time.monotonic()
-            apply_state(payload)
-        except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
-            probe["failures"] = float(probe["failures"]) + 1.0
-            unreachable_since = float(probe["last_ok"]) or float(probe["since"])
-            if (
-                float(probe["failures"]) >= offline_after_failures
-                and time.monotonic() - unreachable_since >= offline_after_seconds
-            ):
-                apply_offline_state()
-            else:
-                apply_connecting_state()
-        finally:
-            update_attention_style()
-            schedule_auto_collapse(10000 if has_primary_action() else 4000)
+        # The request runs off the Tk main thread. Blocking it here froze the
+        # whole bar for the length of the timeout on every tick -- dragging,
+        # hover and the running arc all stopped -- and it was worst exactly
+        # when the dashboard was slow or down and every probe spent its full
+        # budget, which is when the bar most needs to look alive. Off the main
+        # thread the budget can also be generous enough to ride out a slow
+        # answer instead of counting it as a failure.
+        #
+        # The worker only writes to a dict and the main thread picks the result
+        # up, because Tk calls are not safe from another thread. Same shape as
+        # the usage panel's fetch below.
+        request_url = f"{url.rstrip('/')}/api/companion-state"
+        box: dict[str, object] = {}
+
+        def fetch() -> None:
+            try:
+                with urllib.request.urlopen(request_url, timeout=2.5) as response:
+                    box["payload"] = json.loads(response.read().decode("utf-8"))
+            except (OSError, ValueError):
+                box["error"] = True
+            finally:
+                box["done"] = True
+
+        def settle() -> None:
+            if not box.get("done"):
+                try:
+                    root.after(60, settle)
+                except tk.TclError:
+                    pass
+                return
+            payload = box.get("payload")
+            try:
+                if isinstance(payload, dict):
+                    probe["failures"] = 0.0
+                    probe["last_ok"] = time.monotonic()
+                    apply_state(payload)
+                else:
+                    probe["failures"] = float(probe["failures"]) + 1.0
+                    unreachable_since = float(probe["last_ok"]) or float(probe["since"])
+                    if (
+                        float(probe["failures"]) >= offline_after_failures
+                        and time.monotonic() - unreachable_since >= offline_after_seconds
+                    ):
+                        apply_offline_state()
+                    else:
+                        apply_connecting_state()
+                update_attention_style()
+                schedule_auto_collapse(10000 if has_primary_action() else 4000)
+            except tk.TclError:
+                pass
             try:
                 root.after(3000, refresh_state)
             except tk.TclError:
                 pass
+
+        threading.Thread(target=fetch, daemon=True).start()
+        settle()
 
     usage_state: dict[str, object] = {"window": None, "session_id": "", "request": 0}
 
@@ -4817,6 +4933,7 @@ def run_native_presence(
     set_collapsed(True)
     refresh_state()
     pulse_attention()
+    spin_orbit()
     root.mainloop()
     if restart_requested:
         return 0 if _launch_aiwatcher_restart(url, position, visibility, interval) else 2
