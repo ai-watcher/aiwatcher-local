@@ -2771,35 +2771,6 @@ def _anchored_origin(
     return int(new_x), int(new_y)
 
 
-def _elide_to_width(text: str, measure, limit: int) -> str:
-    """Trim `text` to `limit` pixels, ending in an ellipsis when it had to cut.
-
-    The row label is packed after the row's button and so can only use the
-    width the button left behind. Without this the text ran on under the
-    window edge and the reader silently lost whichever field happened to sit
-    last -- on a context-health row the replay figure, the one field that says
-    whether the row is worth opening at all. `measure` is the label font's own
-    measure(), so the cut lands on the pixel rather than on a guessed character
-    count; the macOS bar gets the same effect free from .byTruncatingTail.
-    """
-    if limit <= 0 or not text:
-        return ""
-    if measure(text) <= limit:
-        return text
-    ellipsis = "…"
-    budget = limit - measure(ellipsis)
-    if budget <= 0:
-        return ellipsis
-    low, high = 0, len(text)
-    while low < high:
-        mid = (low + high + 1) // 2
-        if measure(text[:mid]) <= budget:
-            low = mid
-        else:
-            high = mid - 1
-    return text[:low].rstrip(" ·") + ellipsis
-
-
 def _set_window_position(root: object, width: int, height: int) -> None:
     screen_width = int(root.winfo_screenwidth())  # type: ignore[attr-defined]
     screen_height = int(root.winfo_screenheight())  # type: ignore[attr-defined]
@@ -3439,7 +3410,6 @@ def run_native_presence(
     offline_expanded = False
     try:
         import tkinter as tk
-        from tkinter import font as tkfont
         from tkinter import ttk
     except Exception as exc:  # pragma: no cover - depends on host Python build
         print(f"AIWatcher companion presence unavailable: {exc}", file=sys.stderr)
@@ -3686,17 +3656,13 @@ def run_native_presence(
         review = str(row.get("review_label") or waited)
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
+        scope = str(row.get("scope_label") or "")
         if kind in {"finished", "recently_observed"}:
             parts = ["Ready to check", project, tool, waited]
         elif kind == "session_waiting":
             parts = ["Waiting", project, tool, waited]
         elif kind == "context_review":
-            # No "Context health" prefix and no "Review when ready" scope. The
-            # bar's own header and the FOR REVIEW section label already say
-            # both, and at this row's width the pair costs ~200px -- enough to
-            # push the replay figure off the end, which is the one field a
-            # reader decides on. The macOS bar keeps them; it is 706px wide.
-            parts = [project, tool, severity, activity, review]
+            parts = ["Context health", scope, project, tool, severity, activity, review]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -4430,10 +4396,6 @@ def run_native_presence(
     def open_waiting_row(index: int) -> None:
         if not 0 <= index < len(waiting_row_urls):
             return
-        # Rows with no action hide their button; clicking the row itself must
-        # agree with that rather than opening something the row never offered.
-        if index < len(waiting_row_actions) and waiting_row_actions[index] == "none":
-            return
         if (
             index < len(waiting_row_actions)
             and waiting_row_actions[index] == "copy_compact"
@@ -4469,35 +4431,17 @@ def run_native_presence(
             webbrowser.open(target)
             schedule_auto_collapse(1500)
 
-    row_font = tkfont.Font(font=style.lookup("PresenceMuted.TLabel", "font") or ("Helvetica", 9))
-
-    def row_text_limit(index: int) -> int:
-        """Pixels the row label may use once the row's fixed parts are placed.
-
-        Read off the widgets rather than hard-coded, so restyling the button
-        or the dot moves the budget with it instead of silently clipping.
-        """
-        _frame, _label, button, wants, dot = row_widgets[index]
-        used = 28 + dot.winfo_reqwidth() + 6 + button.winfo_reqwidth() + wants.winfo_reqwidth() + 8
-        return max(0, expanded_width - used)
-
     def apply_waiting_rows() -> None:
         rows = 0 if collapsed.get() else visible_waiting_rows()
         for index in range(min(rows, len(waiting_row_texts))):
             section = waiting_row_sections[index] if index < len(waiting_row_sections) else ""
             label = waiting_row_texts[index]
-            full_text = f"{section.upper()}   {label}" if section else label
-            row_widgets[index][1].configure(
-                text=_elide_to_width(full_text, row_font.measure, row_text_limit(index)),
-            )
+            row_widgets[index][1].configure(text=f"{section.upper()}   {label}" if section else label)
             row_widgets[index][2].configure(
                 text=row_action_label(index),
             )
             kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
             action = waiting_row_actions[index] if index < len(waiting_row_actions) else ""
-            # Only rows that lead somewhere claim the pointer.
-            for target in (row_widgets[index][0], row_widgets[index][1], row_widgets[index][3], row_widgets[index][4]):
-                target.configure(cursor="" if action == "none" else "hand2")
             if action == "none":
                 row_widgets[index][2].pack_forget()
                 row_widgets[index][3].configure(text="")
@@ -4507,21 +4451,21 @@ def run_native_presence(
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
                 if action:
-                    row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
+                    row_widgets[index][2].pack(side="right")
                 else:
                     row_widgets[index][2].pack_forget()
             elif kind.startswith("prompt_"):
                 # "working 3 min" or "done" where a waiting row says what it wants.
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
-                row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
+                row_widgets[index][2].pack(side="right")
             else:
-                row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
+                row_widgets[index][2].pack(side="right")
                 wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
                 row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
         if rows == rows_shown.get():
             return
-        for row_frame, *_row_parts in row_widgets:
+        for row_frame, _row_label, _row_button, _row_wants in row_widgets:
             row_frame.pack_forget()
         if rows_packed.get():
             rows_frame.pack_forget()
@@ -5076,17 +5020,12 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
-    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label, ttk.Label]] = []
+    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label]] = []
     for row_index in range(max_waiting_rows):
         row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
-        row_dot = ttk.Label(row_frame, text="●", style="PresenceDot.TLabel")
-        row_dot.pack(side="left", padx=(0, 6))
-        # The button and the chip are packed before the label on purpose. Tk
-        # hands out the row's width in packing order, so an expanding label
-        # that goes first claims the whole cavity and leaves the button none:
-        # it stayed in the widget tree and drew at zero width, which read as a
-        # row that simply could not be clicked. Reserve the fixed parts first
-        # and the label takes what is left.
+        ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
+        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_label.pack(side="left", fill="x", expand=True)
         row_button = ttk.Button(
             row_frame, text="Open", width=7, style="Presence.TButton",
             command=lambda index=row_index: open_waiting_row(index),
@@ -5094,13 +5033,7 @@ def run_native_presence(
         row_button.pack(side="right")
         row_wants = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
         row_wants.pack(side="right", padx=(0, 8))
-        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
-        row_label.pack(side="left", fill="x", expand=True)
-        # The whole row opens it, not just the button: the text is the part a
-        # reader aims at, and on a narrow bar it is most of the row.
-        for target in (row_frame, row_dot, row_label, row_wants):
-            target.bind("<Button-1>", lambda _event, index=row_index: open_waiting_row(index))
-        row_widgets.append((row_frame, row_label, row_button, row_wants, row_dot))
+        row_widgets.append((row_frame, row_label, row_button, row_wants))
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.
