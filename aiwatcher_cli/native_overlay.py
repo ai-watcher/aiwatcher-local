@@ -2730,6 +2730,35 @@ def _anchored_origin(
     return int(new_x), int(new_y)
 
 
+def _elide_to_width(text: str, measure, limit: int) -> str:
+    """Trim `text` to `limit` pixels, ending in an ellipsis when it had to cut.
+
+    The row label is packed after the row's button and so can only use the
+    width the button left behind. Without this the text ran on under the
+    window edge and the reader silently lost whichever field happened to sit
+    last -- on a context-health row the replay figure, the one field that says
+    whether the row is worth opening at all. `measure` is the label font's own
+    measure(), so the cut lands on the pixel rather than on a guessed character
+    count; the macOS bar gets the same effect free from .byTruncatingTail.
+    """
+    if limit <= 0 or not text:
+        return ""
+    if measure(text) <= limit:
+        return text
+    ellipsis = "…"
+    budget = limit - measure(ellipsis)
+    if budget <= 0:
+        return ellipsis
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if measure(text[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low].rstrip(" ·") + ellipsis
+
+
 def _set_window_position(root: object, width: int, height: int) -> None:
     screen_width = int(root.winfo_screenwidth())  # type: ignore[attr-defined]
     screen_height = int(root.winfo_screenheight())  # type: ignore[attr-defined]
@@ -3230,6 +3259,7 @@ def run_native_presence(
     offline_expanded = False
     try:
         import tkinter as tk
+        from tkinter import font as tkfont
         from tkinter import ttk
     except Exception as exc:  # pragma: no cover - depends on host Python build
         print(f"AIWatcher companion presence unavailable: {exc}", file=sys.stderr)
@@ -3376,7 +3406,23 @@ def run_native_presence(
     ttk.Label(title_stack, textvariable=pressure_stats_var, style="PresenceMuted.TLabel").pack(side="left", padx=(10, 0))
     subtitle_row = ttk.Frame(left, style="Presence.TFrame")
     subtitle_row.pack(anchor="w", fill="x")
-    ttk.Label(subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(side="left")
+    # One line, by contract: expanded_height is sized for a single subtitle
+    # line, so a wrapped subtitle pushes the rows beneath it off the bottom of
+    # the window -- the Optimize state did exactly that and clipped the row
+    # below out of reach. A character cap cannot hold that contract on a
+    # proportional font: 46 characters of "5 review groups; top group: 2 older
+    # session re" measure 251px against this 250px wrap, one pixel over. So the
+    # cap is in pixels, measured in the label's own font, and set_subtitle is
+    # the only way the text is written.
+    SUBTITLE_WRAP_PX = 250
+    subtitle_font = tkfont.Font(font=style.lookup("PresenceMuted.TLabel", "font") or ("Helvetica", 9))
+
+    def set_subtitle(text: object) -> None:
+        subtitle_var.set(_elide_to_width(str(text), subtitle_font.measure, SUBTITLE_WRAP_PX))
+
+    ttk.Label(
+        subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=SUBTITLE_WRAP_PX,
+    ).pack(side="left")
     # Context-pressure meter for the resting state: the one graphic the bar
     # carries. Packed only while the payload says the number is measurable.
     meter_canvas = tk.Canvas(subtitle_row, width=70, height=9, bg="#090d14", highlightthickness=0, bd=0)
@@ -3428,13 +3474,17 @@ def run_native_presence(
         review = str(row.get("review_label") or waited)
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
-        scope = str(row.get("scope_label") or "")
         if kind in {"finished", "recently_observed"}:
             parts = ["Ready to check", project, tool, waited]
         elif kind == "session_waiting":
             parts = ["Waiting", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context health", scope, project, tool, severity, activity, review]
+            # No "Context health" prefix and no "Review when ready" scope. The
+            # bar's own header and the FOR REVIEW section label already say
+            # both, and at this row's width the pair costs ~200px -- enough to
+            # push the replay figure off the end, which is the one field a
+            # reader decides on. The macOS bar keeps them; it is 706px wide.
+            parts = [project, tool, severity, activity, review]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -3472,7 +3522,7 @@ def run_native_presence(
                 f"{hidden} more in UI. Pick a row or open UI."
                 if hidden > 0 else "Pick a row or open UI."
             )
-        return subtitle_var.get()[:46]
+        return subtitle_var.get()
 
     def row_action_label(index: int) -> str:
         if index < len(waiting_row_action_labels) and waiting_row_action_labels[index]:
@@ -3524,7 +3574,7 @@ def run_native_presence(
         skip_session_ids_var.set("")
         state_var.set("offline")
         title_var.set("UI offline")
-        subtitle_var.set("Start dashboard + Companion")
+        set_subtitle("Start dashboard + Companion")
         primary_label_var.set("Restart")
         primary_action_var.set("restart_aiwatcher")
         primary_url_var.set(url)
@@ -3708,17 +3758,17 @@ def run_native_presence(
         # frame: 34 holds the planner's longest label (32) on the 560-wide
         # bar, where 18 cut it to "Continue only afte".
         title_var.set(str(payload.get("label") or "AIWatcher")[:34])
-        subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
+        subtitle_text = str(payload.get("subtitle") or "Watching quietly")
         if isinstance(activity_sections, list) and len(activity_sections) > 1:
-            subtitle_text = str(payload.get("activity_line") or subtitle_text)[:46]
+            subtitle_text = str(payload.get("activity_line") or subtitle_text)
         remaining = payload.get("expires_in_seconds")
         if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
-        subtitle_var.set(subtitle_text)
+        set_subtitle(subtitle_text)
         root.title(f"AIWatcher Companion: {str(payload.get('activity_line') or subtitle_text)[:120]}")
         if incoming_state in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
             title_var.set(review_title())
-            subtitle_var.set(review_subtitle())
+            set_subtitle(review_subtitle())
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
@@ -3756,7 +3806,7 @@ def run_native_presence(
 
     def scan_now() -> None:
         title_var.set("Scanning")
-        subtitle_var.set("Checking local AI work...")
+        set_subtitle("Checking local AI work...")
         try:
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/companion-scan", timeout=12.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -3765,10 +3815,10 @@ def run_native_presence(
                 apply_state(state_payload)
             else:
                 title_var.set("Scan done")
-                subtitle_var.set("Open UI for details")
+                set_subtitle("Open UI for details")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
             title_var.set("Scan failed")
-            subtitle_var.set("Open UI for details")
+            set_subtitle("Open UI for details")
         update_attention_style()
 
     def open_primary() -> None:
@@ -3776,7 +3826,7 @@ def run_native_presence(
         if primary_action_var.get() == "restart_aiwatcher":
             restart_requested = True
             title_var.set("Restarting AIWatcher")
-            subtitle_var.set("Dashboard and Companion will reopen")
+            set_subtitle("Dashboard and Companion will reopen")
             primary_button.state(["disabled"])
             root.after(80, root.destroy)
             return
@@ -3790,12 +3840,12 @@ def run_native_presence(
                 pass
             if not saved:
                 title_var.set("Still pending")
-                subtitle_var.set("Could not save receipt view")
+                set_subtitle("Could not save receipt view")
                 update_attention_style()
                 return
             state_var.set("watching")
             title_var.set("Watching quietly")
-            subtitle_var.set("Fresh Start receipt opened")
+            set_subtitle("Fresh Start receipt opened")
             skip_state_var.set("")
             update_attention_style()
             schedule_auto_collapse(1200)
@@ -3829,7 +3879,7 @@ def run_native_presence(
     def copy_fresh_start_from_companion() -> None:
         session_id = primary_session_id_var.get().strip()
         title_var.set("Copying brief")
-        subtitle_var.set("Preparing Fresh Start...")
+        set_subtitle("Preparing Fresh Start...")
         try:
             encoded = urllib.parse.quote(session_id)
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/handoff?id={encoded}&target=generic", timeout=8.0) as response:
@@ -3851,7 +3901,7 @@ def run_native_presence(
                 state_var.set("clipboard_confirm")
                 suppress_passive_refresh_until.set(time.time() + 30.0)
                 title_var.set("Clipboard has text")
-                subtitle_var.set("Click Replace to copy Fresh Start")
+                set_subtitle("Click Replace to copy Fresh Start")
                 primary_label_var.set("Replace")
                 update_attention_style()
                 schedule_auto_collapse(30000)
@@ -3859,7 +3909,7 @@ def run_native_presence(
             pending_clipboard_override_session_var.set("")
             if not set_clipboard_text(brief):
                 title_var.set("Copy failed")
-                subtitle_var.set("Open UI to copy the brief")
+                set_subtitle("Open UI to copy the brief")
                 update_attention_style()
                 webbrowser.open(primary_url_var.get() or url)
                 return
@@ -3899,13 +3949,13 @@ def run_native_presence(
             state_var.set("fresh_start_copied")
             suppress_passive_refresh_until.set(time.time() + 12.0)
             title_var.set("Fresh Start copied")
-            subtitle_var.set("Paste it into a fresh chat")
+            set_subtitle("Paste it into a fresh chat")
             primary_url_var.set(url)
             update_attention_style()
             schedule_auto_collapse(12000)
         except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError, tk.TclError):
             title_var.set("Fresh Start")
-            subtitle_var.set("Open UI to copy the brief")
+            set_subtitle("Open UI to copy the brief")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
 
@@ -3936,7 +3986,7 @@ def run_native_presence(
         session_id = primary_session_id_var.get().strip()
         if not set_clipboard_text(command):
             title_var.set("Copy failed")
-            subtitle_var.set("Open UI to copy /compact")
+            set_subtitle("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
             return
@@ -3945,7 +3995,7 @@ def run_native_presence(
         state_var.set("compact_copied")
         suppress_passive_refresh_until.set(time.time() + 3.0)
         title_var.set("Copied")
-        subtitle_var.set("Paste /compact into that session")
+        set_subtitle("Paste /compact into that session")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(12000)
@@ -3956,7 +4006,7 @@ def run_native_presence(
         command = waiting_row_commands[index] if index < len(waiting_row_commands) else ""
         if not set_clipboard_text(command):
             title_var.set("Copy failed")
-            subtitle_var.set("Open UI to copy /compact")
+            set_subtitle("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(waiting_row_urls[index] if index < len(waiting_row_urls) else url)
             return
@@ -3990,12 +4040,12 @@ def run_native_presence(
                 pass
             if not released:
                 title_var.set("Still paused")
-                subtitle_var.set("Open Review Gate to continue")
+                set_subtitle("Open Review Gate to continue")
                 update_attention_style()
                 return
             state_var.set("watching")
             title_var.set("Continuing")
-            subtitle_var.set("Original prompt released")
+            set_subtitle("Original prompt released")
             continue_action_var.set("")
             continue_url_var.set("")
             primary_url_var.set(url)
@@ -4028,13 +4078,13 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set("Could not save Continue")
+            set_subtitle("Could not save Continue")
             update_attention_style()
             return
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
-        subtitle_var.set("Fresh Start decision saved")
+        set_subtitle("Fresh Start decision saved")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(1200)
@@ -4064,7 +4114,7 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set(short_skip_failure_message())
+            set_subtitle(short_skip_failure_message())
             update_attention_style()
             return
         skip_state_var.set("")
@@ -4075,7 +4125,7 @@ def run_native_presence(
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
-        subtitle_var.set("Companion nudge skipped")
+        set_subtitle("Companion nudge skipped")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(1200)
@@ -4141,7 +4191,7 @@ def run_native_presence(
         # The honesty rule from the transient overlay applies here too: wait
         # for the result, and on failure say why and open the session in
         # AIWatcher -- never report a return that did not happen.
-        subtitle_var.set("Returning...")
+        set_subtitle("Returning...")
         request = urllib.request.Request(
             f"{url.rstrip('/')}/api/runtime-return",
             data=json.dumps({"session_id": session_id}).encode("utf-8"),
@@ -4159,14 +4209,18 @@ def run_native_presence(
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             pass
         if ok:
-            subtitle_var.set((message or "Opened your AI tool. Answer it there.")[:46])
+            set_subtitle(message or "Opened your AI tool. Answer it there.")
         else:
             webbrowser.open(fallback_url)
-            subtitle_var.set("No live return. Opened in AIWatcher.")
+            set_subtitle("No live return. Opened in AIWatcher.")
         schedule_auto_collapse(2500)
 
     def open_waiting_row(index: int) -> None:
         if not 0 <= index < len(waiting_row_urls):
+            return
+        # Rows with no action hide their button; clicking the row itself must
+        # agree with that rather than opening something the row never offered.
+        if index < len(waiting_row_actions) and waiting_row_actions[index] == "none":
             return
         if (
             index < len(waiting_row_actions)
@@ -4203,17 +4257,35 @@ def run_native_presence(
             webbrowser.open(target)
             schedule_auto_collapse(1500)
 
+    row_font = tkfont.Font(font=style.lookup("PresenceMuted.TLabel", "font") or ("Helvetica", 9))
+
+    def row_text_limit(index: int) -> int:
+        """Pixels the row label may use once the row's fixed parts are placed.
+
+        Read off the widgets rather than hard-coded, so restyling the button
+        or the dot moves the budget with it instead of silently clipping.
+        """
+        _frame, _label, button, wants, dot = row_widgets[index]
+        used = 28 + dot.winfo_reqwidth() + 6 + button.winfo_reqwidth() + wants.winfo_reqwidth() + 8
+        return max(0, expanded_width - used)
+
     def apply_waiting_rows() -> None:
         rows = 0 if collapsed.get() else visible_waiting_rows()
         for index in range(min(rows, len(waiting_row_texts))):
             section = waiting_row_sections[index] if index < len(waiting_row_sections) else ""
             label = waiting_row_texts[index]
-            row_widgets[index][1].configure(text=f"{section.upper()}   {label}" if section else label)
+            full_text = f"{section.upper()}   {label}" if section else label
+            row_widgets[index][1].configure(
+                text=_elide_to_width(full_text, row_font.measure, row_text_limit(index)),
+            )
             row_widgets[index][2].configure(
                 text=row_action_label(index),
             )
             kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
             action = waiting_row_actions[index] if index < len(waiting_row_actions) else ""
+            # Only rows that lead somewhere claim the pointer.
+            for target in (row_widgets[index][0], row_widgets[index][1], row_widgets[index][3], row_widgets[index][4]):
+                target.configure(cursor="" if action == "none" else "hand2")
             if action == "none":
                 row_widgets[index][2].pack_forget()
                 row_widgets[index][3].configure(text="")
@@ -4223,21 +4295,21 @@ def run_native_presence(
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
                 if action:
-                    row_widgets[index][2].pack(side="right")
+                    row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
                 else:
                     row_widgets[index][2].pack_forget()
             elif kind.startswith("prompt_"):
                 # "working 3 min" or "done" where a waiting row says what it wants.
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
-                row_widgets[index][2].pack(side="right")
+                row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
             else:
-                row_widgets[index][2].pack(side="right")
+                row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
                 wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
                 row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
         if rows == rows_shown.get():
             return
-        for row_frame, _row_label, _row_button, _row_wants in row_widgets:
+        for row_frame, *_row_parts in row_widgets:
             row_frame.pack_forget()
         if rows_packed.get():
             rows_frame.pack_forget()
@@ -4679,12 +4751,17 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
-    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label]] = []
+    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label, ttk.Label]] = []
     for row_index in range(max_waiting_rows):
         row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
-        ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
-        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
-        row_label.pack(side="left", fill="x", expand=True)
+        row_dot = ttk.Label(row_frame, text="●", style="PresenceDot.TLabel")
+        row_dot.pack(side="left", padx=(0, 6))
+        # The button and the chip are packed before the label on purpose. Tk
+        # hands out the row's width in packing order, so an expanding label
+        # that goes first claims the whole cavity and leaves the button none:
+        # it stayed in the widget tree and drew at zero width, which read as a
+        # row that simply could not be clicked. Reserve the fixed parts first
+        # and the label takes what is left.
         row_button = ttk.Button(
             row_frame, text="Open", width=7, style="Presence.TButton",
             command=lambda index=row_index: open_waiting_row(index),
@@ -4692,7 +4769,13 @@ def run_native_presence(
         row_button.pack(side="right")
         row_wants = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
         row_wants.pack(side="right", padx=(0, 8))
-        row_widgets.append((row_frame, row_label, row_button, row_wants))
+        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_label.pack(side="left", fill="x", expand=True)
+        # The whole row opens it, not just the button: the text is the part a
+        # reader aims at, and on a narrow bar it is most of the row.
+        for target in (row_frame, row_dot, row_label, row_wants):
+            target.bind("<Button-1>", lambda _event, index=row_index: open_waiting_row(index))
+        row_widgets.append((row_frame, row_label, row_button, row_wants, row_dot))
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.

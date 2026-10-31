@@ -404,7 +404,11 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('return f"{shown} of {count} projects need review"', tk_source)
         self.assertIn('f"{hidden} more saved in Watch. Review all or pick a project."', tk_source)
         self.assertIn('row.get("review_label")', tk_source)
-        self.assertIn('row.get("scope_label")', tk_source)
+        # No scope_label on the Tk row: "Review when ready" repeats the bar's
+        # own header, and at 640px it cost the replay figure at the tail. The
+        # macOS bar still carries it -- it is 706px wide, asserted above.
+        self.assertNotIn('row.get("scope_label")', tk_source)
+        self.assertIn("parts = [project, tool, severity, activity, review]", tk_source)
         self.assertIn("def apply_offline_state", tk_source)
         self.assertIn("skip_projects_var", tk_source)
 
@@ -936,6 +940,126 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
                 finally:
                     os.unlink(path)
                 self.assertEqual(completed.returncode, 0, f"Swift {name} source does not typecheck:\n{completed.stderr}")
+
+
+class ElideToWidthTests(unittest.TestCase):
+    """A row label may only use the width the row's button left behind."""
+
+    @staticmethod
+    def _measure(text: str) -> int:
+        # A fixed-width stand-in for a font's measure(); the real one is
+        # proportional, but the helper only asks that it grow with the prefix.
+        return 10 * len(text)
+
+    def test_text_that_fits_is_returned_untouched(self) -> None:
+        self.assertEqual(native_overlay._elide_to_width("abcde", self._measure, 50), "abcde")
+
+    def test_a_long_line_is_cut_and_marked(self) -> None:
+        # 8 characters of budget once the ellipsis has taken its own 10px.
+        self.assertEqual(
+            native_overlay._elide_to_width("abcdefghijklmno", self._measure, 90),
+            "abcdefgh…",
+        )
+
+    def test_the_cut_does_not_leave_a_dangling_separator(self) -> None:
+        # Cutting mid-separator would render a row promising a field that is
+        # not there; the trailing separator goes with it.
+        self.assertEqual(
+            native_overlay._elide_to_width("project · tool", self._measure, 100),
+            "project…",
+        )
+
+    def test_no_room_at_all_degrades_instead_of_raising(self) -> None:
+        self.assertEqual(native_overlay._elide_to_width("abc", self._measure, 5), "…")
+        self.assertEqual(native_overlay._elide_to_width("abc", self._measure, 0), "")
+        self.assertEqual(native_overlay._elide_to_width("", self._measure, 99), "")
+
+
+class WaitingRowLayoutTests(unittest.TestCase):
+    """The row's button must survive a long label, and the row must be clickable.
+
+    Tk hands out a row's width in packing order, so an expanding label packed
+    before the button leaves it nothing: the button stayed in the widget tree
+    and drew at zero width, which read as a row that could not be clicked.
+    The widget tree needs a display to build, so this reads the source.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = inspect.getsource(native_overlay.run_native_presence)
+
+    def test_the_button_is_packed_before_the_expanding_label(self) -> None:
+        block = self.source[self.source.index("row_widgets: list[tuple["):]
+        block = block[:block.index("row_widgets.append(")]
+        self.assertLess(
+            block.index('row_button.pack(side="right")'),
+            block.index('row_label.pack(side="left", fill="x", expand=True)'),
+        )
+
+    def test_repacking_the_button_keeps_it_ahead_of_the_label(self) -> None:
+        # pack_forget()/pack() would otherwise append it to the end of the
+        # packing order again and bring the bug straight back.
+        repacks = re.findall(r'row_widgets\[index\]\[2\]\.pack\([^)]*\)', self.source)
+        self.assertTrue(repacks)
+        for call in repacks:
+            self.assertIn("before=row_widgets[index][1]", call)
+
+    def test_the_whole_row_opens_it_not_only_the_button(self) -> None:
+        self.assertIn('target.bind("<Button-1>"', self.source)
+
+    def test_a_row_with_no_action_stays_inert(self) -> None:
+        block = self.source[self.source.index("def open_waiting_row"):]
+        self.assertIn('waiting_row_actions[index] == "none"', block[:600])
+
+    def test_the_label_is_elided_to_the_space_the_button_left(self) -> None:
+        self.assertIn("_elide_to_width(full_text, row_font.measure, row_text_limit(index))", self.source)
+
+
+class SubtitleFitTests(unittest.TestCase):
+    """The bar's subtitle must stay on one line.
+
+    expanded_height is sized for a single subtitle line, so a wrapped subtitle
+    pushes the rows beneath it off the bottom of the window. The Optimize
+    state did exactly that: its subtitle, cut to 46 characters, measured 251px
+    against a 250px wraplength -- one pixel over -- and the row below lost its
+    button off the bottom edge. The widget tree needs a display, so this reads
+    the source.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = inspect.getsource(native_overlay.run_native_presence)
+
+    def test_the_subtitle_has_exactly_one_entry_point(self) -> None:
+        # Any other writer could put an unfitted string in the label.
+        self.assertEqual(self.source.count("subtitle_var.set("), 1)
+        block = self.source[self.source.index("def set_subtitle("):]
+        self.assertIn("subtitle_var.set(", block[:300])
+
+    def test_the_entry_point_fits_the_text_in_pixels(self) -> None:
+        block = self.source[self.source.index("def set_subtitle("):]
+        self.assertIn("_elide_to_width(", block[:300])
+        self.assertIn("subtitle_font.measure", block[:300])
+
+    def test_the_label_and_the_cap_share_one_number(self) -> None:
+        # Stated twice, they drift, and the drift is invisible until a
+        # subtitle wraps and eats the row below.
+        self.assertIn("wraplength=SUBTITLE_WRAP_PX", self.source)
+        self.assertNotIn("wraplength=250", self.source)
+
+    def test_no_character_cap_survives_on_the_subtitle_path(self) -> None:
+        # A character count cannot hold a pixel contract on a proportional
+        # font; that mismatch is the whole bug.
+        self.assertNotIn("subtitle_var.get()[:46]", self.source)
+        self.assertNotIn('or "Watching quietly")[:46]', self.source)
+
+    def test_the_optimize_subtitle_is_the_regression_case(self) -> None:
+        # Fixed-width stand-in: 6px per character puts the real Optimize
+        # subtitle well past the 250px wrap, so it must come back elided.
+        text = "5 review groups; top group: 2 older session records. Organization only."
+        fitted = native_overlay._elide_to_width(text, lambda value: 6 * len(value), 250)
+        self.assertTrue(fitted.endswith("…"))
+        self.assertLessEqual(6 * len(fitted), 250)
 
 
 if __name__ == "__main__":
