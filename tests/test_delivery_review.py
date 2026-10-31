@@ -10,10 +10,13 @@ from unittest.mock import patch
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.delivery_review import (
     DeliveryReviewUnavailable,
+    _workflow_stats,
     build_work_receipt,
     format_work_receipt,
     hydrate_persisted_receipt,
+    work_receipt_evidence_hash,
 )
+from aiwatcher_cli.delivery import ContributionEdge
 from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.outcome_evidence import verification_git_fingerprint
 
@@ -48,6 +51,17 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(self.state)})
         self.env.start()
         self.addCleanup(self.env.stop)
+
+    def test_approval_evidence_changes_when_linked_intent_changes(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="explicit_review", event_status="candidate",
+            event_source="test", persist=False,
+        ).to_json()
+        receipt["intent_source_hash"] = "a" * 64
+        first = work_receipt_evidence_hash(receipt)
+        receipt["intent_source_hash"] = "b" * 64
+
+        self.assertNotEqual(first, work_receipt_evidence_hash(receipt))
 
     def _record_exact_verification(self) -> None:
         identity = resolve_git_identity(str(self.repo))
@@ -106,6 +120,8 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         stored = local_state.recent_work_receipts()[0]
         self.assertIsNone(stored["objective"]["text"])
         self.assertEqual(stored["snapshot"]["changed_files"], [])
+        self.assertNotIn("work_understanding", stored)
+        self.assertNotIn("Add a deterministic delivery review.", str(stored))
         event = local_state.recent_delivery_events()[0]
         hydrated = hydrate_persisted_receipt(stored, event)
         self.assertEqual(hydrated["snapshot"]["changed_files"], ["feature.py"])
@@ -165,6 +181,25 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         self.assertIn("AIWatcher Delivery Review", text)
         self.assertIn("No exact-state verification", text)
         self.assertNotIn("developer productivity", text.lower())
+
+    def test_workflow_turn_count_excludes_compaction_summaries(self) -> None:
+        contribution = ContributionEdge(
+            session_id="session-1", commit_shas=(self.head,), strength="exact", provenance="observed",
+        )
+        session = type("Session", (), {
+            "session_id": "session-1", "source_path": str(self.root / "session.jsonl"),
+            "agent_calls": 2, "tool_calls": 3,
+        })()
+        segments = [
+            {"prompt": "Implement the feature.", "took_seconds": 5},
+            {"prompt": "This session is being continued", "compact_summary": True, "took_seconds": 10},
+        ]
+
+        with patch("aiwatcher_cli.delivery_review.segment_session_by_prompt", return_value=segments):
+            stats = _workflow_stats((contribution,), [session])
+
+        self.assertEqual(stats.user_turns, 1)
+        self.assertEqual(stats.observed_request_seconds, 5)
 
     def test_push_wrapper_creates_review_only_after_confirmed_current_head_push(self) -> None:
         remote = self.root / "remote.git"
