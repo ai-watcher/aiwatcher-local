@@ -250,6 +250,15 @@ class LocalSession:
     # (e.g. Fable then Sonnet) is fully represented here, not just by its last model.
     model_breakdown: dict[str, dict[str, float]] = field(default_factory=dict)
 
+    # Host-provided role/relationship metadata, never inferred from chat text.
+    session_role: str | None = None
+    role_source: str | None = None
+    parent_session_id: str | None = None
+
+    @property
+    def internal_review(self) -> bool:
+        return self.tool == "codex-cli" and self.session_role == "approval_review" and self.role_source == "codex_session_meta"
+
     @property
     def analyst_run(self) -> bool:
         """A Second Opinion analyst spawn, not work the user did.
@@ -295,6 +304,9 @@ class LocalSession:
             "checkout_path": self.checkout_path,
             "identity_source": self.identity_source,
             "analyst_run": self.analyst_run,
+            "session_role": self.session_role,
+            "role_source": self.role_source,
+            "parent_session_id": self.parent_session_id,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "model": self.model,
@@ -2976,6 +2988,34 @@ def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _codex_role_metadata(path: Path, session_id: str) -> tuple[str | None, str | None, str | None]:
+    """Read only a bounded metadata header, including for tail-window scans.
+
+    Guardian is an explicitly recorded host approval reviewer. Ordinary review,
+    explorer and worker subagents remain developer work. Titles/models/prompts
+    never establish this role or parent relationship.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.readline(64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            return None, None, None
+        row = json.loads(raw)
+    except (OSError, ValueError, UnicodeError):
+        return None, None, None
+    if not isinstance(row, dict) or row.get("type") != "session_meta":
+        return None, None, None
+    payload = row.get("payload")
+    if not isinstance(payload, dict) or str(payload.get("id") or payload.get("session_id") or "") != session_id:
+        return None, None, None
+    source = payload.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    guardian = isinstance(subagent, dict) and subagent.get("other") == "guardian"
+    parent = payload.get("parent_thread_id")
+    parent = parent if isinstance(parent, str) and 0 < len(parent) <= 128 and parent != session_id else None
+    return "approval_review" if guardian else None, "codex_session_meta", parent
+
+
 def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSession], list[LocalEvent]]:
     global CODEX_ROLLOUT_CACHE, CODEX_ROLLOUT_CACHE_SINCE
     sessions: list[LocalSession] = []
@@ -3045,6 +3085,10 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         # A bounded tail may not contain session_meta. Retain the stable thread
         # ID from its rollout filename so SQLite and JSONL don't count twice.
         session_id = prior.session_id if prior else filename_id.group(1) if filename_id else path.stem
+        role, role_source, parent_session_id = (
+            (prior.session_role, prior.role_source, prior.parent_session_id)
+            if prior and prior.role_source else _codex_role_metadata(path, session_id)
+        )
         project_path: str | None = prior.project_path if prior else None
         # The cwd exactly as Codex wrote it. project_path below is the same
         # value already folded to a git root, which erases the one thing that
@@ -3235,6 +3279,9 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             tool_calls=tool_calls,
             source_path=str(path),
             surface=surface,
+            session_role=role,
+            role_source=role_source,
+            parent_session_id=parent_session_id,
             model_breakdown={key: dict(value) for key, value in model_totals.items()},
             notes=[
                 "Measured from Codex rollout token_count events",

@@ -83,7 +83,7 @@ class PromptStatusBlockTests(unittest.TestCase):
         (item,) = block["items"]
         self.assertFalse(item["working"])
         self.assertEqual(item["rest"], f"{ui.money(8.66)} · +{ui.compact_int(88_300)} · 14 min")
-        self.assertEqual(item["tag"], "ready to check")
+        self.assertEqual(item["tag"], "recently quiet")
 
     def test_a_receipt_after_a_break_names_the_break(self) -> None:
         block = self.block([presence("s1", "quiet")], [session("s1")], {"/tmp/s1.jsonl": (
@@ -130,7 +130,7 @@ class PromptStatusBlockTests(unittest.TestCase):
 def item(name: str, *, working: bool, cost: float = 1.0, rest: str = "$1.00 so far · +2.0k · 1 min") -> dict:
     return {
         "session_id": name, "name": name, "working": working, "rest": rest,
-        "tag": "working 1 min" if working else "ready to check", "cost_usd": cost, "at": NOW.isoformat(),
+        "tag": "working 1 min" if working else "recently quiet", "cost_usd": cost, "at": NOW.isoformat(),
         "url": f"/?session={name}",
     }
 
@@ -153,7 +153,7 @@ class PromptStatusStateTests(unittest.TestCase):
             {"items": [item("Quiet", working=False)], "working": 0, "done": 1},
         )
 
-        self.assertEqual(state["label"], "Ready to check")
+        self.assertEqual(state["label"], "Recently quiet")
 
     def test_several_chats_get_a_row_each(self) -> None:
         state = ui._prompt_status_state({"badge": None}, {"items": [

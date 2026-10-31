@@ -110,6 +110,7 @@ class SessionPresence:
     # own features cost instead of hiding them. Callers can label it; what they
     # must not do is let it pass as one of the user's own live sessions.
     analyst_run: bool = False
+    internal_review: bool = False
 
     @property
     def live(self) -> bool:
@@ -126,6 +127,7 @@ class SessionPresence:
             "idle_seconds": round(self.idle_seconds, 1) if self.idle_seconds is not None else None,
             "project_path": self.project_path,
             "analyst_run": self.analyst_run,
+            "internal_review": self.internal_review,
             "live": self.live,
         }
 
@@ -149,6 +151,7 @@ def _unmeasurable(session: LocalSession, reason: str) -> SessionPresence:
         reason=reason,
         project_path=session.project_path,
         analyst_run=session.analyst_run,
+        internal_review=session.internal_review,
     )
 
 
@@ -238,6 +241,7 @@ def presence_for_session(
         idle_seconds=idle,
         project_path=session.project_path,
         analyst_run=session.analyst_run,
+        internal_review=session.internal_review,
     )
 
 

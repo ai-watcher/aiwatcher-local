@@ -15,3 +15,9 @@ Browser checks exercised optional outcome/evidence expansion, checked the
 primary action in the cleared state, and verified the drawer did not overflow
 at a 390px viewport. Handoff generation and copying retain the existing drawer
 lifecycle tests; these captures do not claim that a new AI chat was started.
+
+`internal-1100.png` and `internal-390.png` add synthetic host-review examples.
+The browser test uses the actual action component and stylesheet, checks its
+optional evidence expansion, and verifies no horizontal overflow at 1100,
+390 and 320px. Reproduce captures with
+`AIWATCHER_CAPTURE_REVIEWS=1 node --test tests/test-actionable-review.cjs`.

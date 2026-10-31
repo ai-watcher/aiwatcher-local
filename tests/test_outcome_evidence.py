@@ -973,7 +973,7 @@ class OutcomeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.commits[0]["subject"], "fix login bug")
         self.assertEqual(evidence.commits[0]["body"], "Session tokens were not being refreshed.")
 
-    def test_detects_changed_files_as_needs_review(self) -> None:
+    def test_workspace_changes_do_not_establish_session_outcome(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir)
@@ -991,7 +991,7 @@ class OutcomeEvidenceTests(unittest.TestCase):
             )
             evidence = build_outcome_evidence(session)
 
-        self.assertEqual(evidence.inferred_outcome, "needs_review")
+        self.assertIsNone(evidence.inferred_outcome)
         self.assertEqual(evidence.changed_files, ["app.py"])
 
     def test_captures_files_touched_by_the_session_own_commits(self) -> None:
@@ -1156,7 +1156,7 @@ class ChurnDowngradesInferredOutcomeTests(unittest.TestCase):
             )
             evidence = build_outcome_evidence(session, survival={"7": "churned"})
 
-        self.assertEqual(evidence.inferred_outcome, "needs_review")
+        self.assertIsNone(evidence.inferred_outcome)
 
 
 class SameFileRepromptTests(unittest.TestCase):

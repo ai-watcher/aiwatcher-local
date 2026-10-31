@@ -69,3 +69,50 @@ test('nearby commits remain distinct from session-linked receipts and delivery',
   ctx.s.outcome_evidence.commit_attribution='session_bound';
   assert.match(vm.runInContext('verdictLines(s)',ctx).find(x=>x.key==='worth').body,/2 session-linked commits.*delivery is checked separately/);
 });
+
+
+test('internal approval reviews offer optional diagnostics without developer coaching',()=>{
+  const html=render('internal',{parent_session_id:'parent',parent_note:'Recorded parent'});
+  assert.match(html,/Review available evidence/);
+  assert.match(html,/No action needed/);
+  assert.match(html,/data-parent="parent"/);
+  assert.doesNotMatch(html,/openHandoff|Review outcome|Review my next prompt/);
+  assert.doesNotMatch(render('internal'),/Inspect recorded parent/);
+});
+
+test('workspace snapshots are explicitly unattributed and unavailable prices stay visible',()=>{
+  assert.match(extract('renderEvidence'),/Workspace changes \(unattributed\)/);
+  assert.match(extract('renderEvidence'),/not session attribution/);
+  const ctx=vm.createContext({esc:x=>String(x??'')});
+  vm.runInContext(extract('renderSessionUsageTotals'),ctx);
+  ctx.s={tokens_label:'82.4k',api_value:'Unavailable (no list price)'};
+  const html=vm.runInContext('renderSessionUsageTotals(s)',ctx);
+  assert.match(html,/Unavailable \(no list price\)/);
+  assert.doesNotMatch(html,/\$0\.00/);
+});
+
+test('internal review decision and optional evidence fit desktop and narrow screens', async()=>{
+  const {chromium}=require('playwright-core');
+  const browser=await chromium.launch({headless:true,...(fs.existsSync(chromium.executablePath())?{}:{executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'})});
+  try {
+    const page=await browser.newPage();
+    const html=render('internal',{
+      title:'Internal approval review — no developer action established',
+      reason:'Codex session metadata identifies a Guardian approval reviewer.',
+      benefit:'Check the parent conversation for an actual approval request. Otherwise no action is needed; diagnostics remain available.',
+      parent_session_id:'parent',parent_note:'Parent relationship recorded by Codex; the indexed parent is available.',
+    });
+    for (const width of [1100,390,320]) {
+      await page.setViewportSize({width,height:900});
+      await page.setContent(`<style>${fs.readFileSync('aiwatcher_cli/web/index.css','utf8')}body{padding:16px}.session-review-shell{max-width:780px;margin:auto}</style><div class="session-review-shell"><section class="detail-section"><h2>Session review</h2><p>Internal approval review · host metadata</p></section>${html}<section class="detail-section"><details id="usageEvidence"><summary>Usage and context evidence</summary><p>Unavailable (no list price). Workspace changes are not session attribution.</p></details></section></div>`);
+      await page.addScriptTag({content:extract('openUsageEvidence')});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+      await page.getByRole('button',{name:'Review available evidence'}).click();
+      assert.equal(await page.locator('#usageEvidence').getAttribute('open'),'');
+      assert.equal(await page.getByRole('button',{name:'Preview continuation brief'}).count(),0);
+      if (process.env.AIWATCHER_CAPTURE_REVIEWS && width!==320) {
+        await page.screenshot({path:`docs/pr-screenshots/actionable-session-review/internal-${width}.png`,fullPage:true});
+      }
+    }
+  } finally {await browser.close();}
+});

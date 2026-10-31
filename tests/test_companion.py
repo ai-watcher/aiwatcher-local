@@ -472,7 +472,7 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         self.assertEqual(set(sections), {"needs_you", "working", "recently_observed"})
         self.assertIn("1 needs you", state["activity_line"])
         self.assertIn("1 working", state["activity_line"])
-        self.assertIn("1 ready to check", state["activity_line"])
+        self.assertIn("1 recently quiet", state["activity_line"])
         self.assertNotIn("/Users/example/private", str(sections))
         for section in sections.values():
             for row in section["rows"]:
@@ -958,8 +958,8 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         )
 
         self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "2 ready to check")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["label"], "2 recently quiet")
+        self.assertEqual(state["primary_label"], "Inspect")
         self.assertEqual(state["primary_url"], "/?view=sessions")
         self.assertEqual(len(state["waiting_sessions"]), 2)
         self.assertEqual([row["kind"] for row in state["waiting_sessions"]], ["recently_observed", "recently_observed"])
@@ -976,7 +976,7 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         )
 
         self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "Ready to check")
+        self.assertEqual(state["label"], "Recently quiet")
         self.assertIn("done-1", state["primary_url"])
         self.assertEqual(state["skip_state"], "session_finished")
 

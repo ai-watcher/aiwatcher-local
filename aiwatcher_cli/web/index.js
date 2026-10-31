@@ -1286,14 +1286,14 @@ function renderEvidence(evidence) {
       <div class="mini"><span class="label">Inferred outcome</span><strong>${esc(evidence.inferred_outcome || 'not enough evidence')}</strong></div>
       <div class="mini"><span class="label">Confidence</span><strong>${esc(evidence.confidence || 'low')}</strong></div>
       <div class="mini"><span class="label">Nearby commits</span><strong>${esc(commits.length)}</strong></div>
-      <div class="mini"><span class="label">Changed files</span><strong>${esc(files.length)}</strong></div>
+      <div class="mini"><span class="label">Workspace changes (unattributed)</span><strong>${esc(files.length)}</strong></div>
     </div>
     ${survival ? `<div class="pill-row"><span class="pill">${esc(survival === 'survived' ? 'Still there' : survival === 'churned' ? 'Gone' : 'Not measured')}</span></div>` : ''}
     ${evidence.same_file_reprompt ? '<div class="pill-row"><span class="pill rework">A later session touched the same file(s) again soon after</span></div>' : ''}
     ${tests.length ? `<div class="pill-row"><span class="pill">${esc(tests.length)} recent test artifact${tests.length === 1 ? '' : 's'}</span></div>` : ''}
     ${reasons.length ? `<ul class="insight-list">${reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}
     ${commits.length ? `<div class="pill-row">${commits.slice(0, 4).map(commit => `<span class="pill">commit ${esc(commit.sha)}</span>`).join('')}</div>` : ''}
-    ${files.length ? `<details class="aiw-details"><summary>${esc(files.length)} changed file${files.length === 1 ? '' : 's'}</summary><div class="details-body"><div class="pill-row">${files.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
+    ${files.length ? `<details class="aiw-details"><summary>${esc(files.length)} workspace file${files.length === 1 ? '' : 's'} (not session attribution)</summary><div class="details-body"><div class="pill-row">${files.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </div></details></section>`;
 }
 function eventTypeLabel(type) {
@@ -1410,7 +1410,7 @@ function renderEvidenceRail(s, costliest, meaningfulEvents) {
   if (costliest) {
     nodes.push({
       tone: 'observed',
-      title: 'Costliest step',
+      title: costliest.price_available === false ? 'Largest usage event (cost unavailable)' : 'Highest known event estimate',
       body: `${eventTypeLabel(costliest.event_type)} · ${costliest.tokens_label || 'unknown'} tokens · ${costliest.api_value || 'unknown value'}`,
     });
   }
@@ -4242,7 +4242,7 @@ function renderSessionHero(s) {
   const actions = s.actions || [];
   const action = actions.find(item => item.primary) || actions[0] || null;
   const runtime = s.runtime_attachment || {};
-  const outcomeLabel = s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
+  const outcomeLabel = s.internal_review ? 'Developer outcome not applicable' : s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
   const evidence = confidenceLabel(s);
   // The hero used to be a four-fact grid restating the next step, the return
   // target and more, each of which has its own section below it -- three
@@ -4253,7 +4253,7 @@ function renderSessionHero(s) {
     <h2 class="session-title">${esc(s.title || s.project_short || s.project || 'Session')}</h2>
     <p class="session-meta">${s.title ? `${esc(s.project_short || s.project || 'unknown project')} · ` : ''}${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
-    <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
+    <div class="session-hero-status">${s.internal_review ? '<span class="pill">Internal approval review · host metadata</span>' : ''}${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
   </section>`;
 }
 function renderSessionUsageTotals(s) {
@@ -4330,17 +4330,19 @@ function renderSessionActions(s) {
       ${status === 'clear' ? '<button class="btn-primary" onclick="closeDrawer()">Keep working</button>'
         : status === 'waiting' && returnButton ? returnButton
         : status === 'advisory' ? `<button class="btn-primary" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus()">Review my next prompt</button>`
-        : ['unknown', 'waiting'].includes(status) ? '<button class="btn-primary" onclick="openUsageEvidence()">Review available evidence</button>'
+        : ['unknown', 'waiting', 'internal'].includes(status) ? '<button class="btn-primary" onclick="openUsageEvidence()">Review available evidence</button>'
         : `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Preview continuation brief</button>`}
       ${status === 'historical' ? `<button class="btn-quiet" onclick="openOutcomeReview()">Review outcome</button>` : ''}
-      ${status !== 'clear' ? '<button class="btn-quiet" onclick="closeDrawer()">Not now</button>' : ''}
-      <details class="action-more"><summary>More options</summary><div class="action-more-body">
+      ${status !== 'clear' ? `<button class="btn-quiet" onclick="closeDrawer()">${status === 'internal' ? 'No action needed' : 'Not now'}</button>` : ''}
+      ${status === 'internal' && review.parent_session_id ? `<button class="btn-quiet" data-parent="${esc(review.parent_session_id)}" onclick="selectSession(this.dataset.parent)">Inspect recorded parent</button>` : ''}
+      ${status !== 'internal' ? `<details class="action-more"><summary>More options</summary><div class="action-more-body">
         ${['clear', 'unknown', 'advisory', 'waiting'].includes(status) ? `<button class="btn-quiet" onclick="openHandoff('${esc(s.session_id)}')">Preview continuation brief</button>` : ''}
         ${status !== 'waiting' ? returnButton : ''}
         <button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus()">Review my next prompt</button>
-      </div></details>
+      </div></details>` : ''}
     </div>` : '<p class="loading" role="status">Checking local evidence…</p>'}
     ${review.objective && ['historical', 'actionable'].includes(status) ? `<details class="aiw-details"><summary>What the brief preserves and how completion is checked</summary><div class="details-body"><p>${esc(review.objective)}</p><p>${esc(review.completion)}</p></div></details>` : ''}
+    ${review.parent_note ? `<p class="tool-link-note">${esc(review.parent_note)}</p>` : ''}
     ${review.checked_at ? `<p class="tool-link-note">Checked ${esc(dateLabel(review.checked_at))}. ${esc(runtime.reason || 'Exact live return is not confirmed.')}</p>` : ''}
   </section>`;
 }
@@ -4407,7 +4409,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   const costliest = summary.costliest;
   const costliestCallout = costliest
     ? `<div class="costliest-step">
-        <div class="costliest-head">Costliest step<span class="costliest-share">${costliestShare(costliest, s)}</span></div>
+        <div class="costliest-head">${costliest.price_available === false ? 'Largest usage event (cost unavailable)' : 'Highest known event estimate'}<span class="costliest-share">${costliestShare(costliest, s)}</span></div>
         <div class="costliest-body">${esc(eventTypeLabel(costliest.event_type))} · ${esc(costliest.model)} · ${esc(costliest.tokens_label)} tokens · ${esc(costliest.api_value)}</div>
       </div>`
     : '';
@@ -4504,7 +4506,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     ${renderFreshStartCompletion(s)}
     ${renderWorkUnderstanding(s.work_understanding)}
     <section class="detail-section"><details id="usageEvidence" class="aiw-details"><summary>Usage and context evidence</summary><div class="details-body">${renderSessionUsageTotals(s)}${renderSessionContextHealth(s.session_id)}${renderVerdict(s)}</div></details></section>
-    ${outcomeActions}
+    ${s.internal_review ? '' : outcomeActions}
     <section class="detail-section"><details class="aiw-details"><summary>Prompt analysis and usage breakdown</summary><div class="details-body">${promptReview}</div></details></section>
     <div id="evidencePanel">${renderEvidence(s.outcome_evidence)}</div>
     ${renderEvidenceRail(s, costliest, meaningfulEvents)}

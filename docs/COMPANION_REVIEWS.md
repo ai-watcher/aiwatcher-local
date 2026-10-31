@@ -60,3 +60,27 @@ Nearby commits are correlation, not session attribution or confirmed delivery.
 Prompt-segment subtotals are distinct from indexed session totals. Coaching
 requires a specific finding; generic fallback advice is omitted. Historical
 prompt analysis does not run savings-estimation scans.
+
+## Internal host reviews and quiet activity
+
+Only Codex's recorded `session_meta.source.subagent.other = guardian` identifies
+an internal approval reviewer. Model names, titles and prompt wording do not.
+A bounded metadata-header read preserves this role during tail/incremental scans;
+session snapshot caches are versioned so old snapshots cannot omit the role.
+Ordinary review/worker/explorer children remain developer work.
+
+Internal reviewers stay accessible as diagnostics, but do not generate ordinary
+context, quiet-activity, prompt-status, or developer-outcome nudges. An explicit
+waiting request or command gate still surfaces. A parent link requires a recorded
+parent ID and one indexed same-tool match; otherwise the relationship is unknown.
+The review explains why no developer outcome vote or Fresh Start is needed.
+
+Quiet developer sessions say **Recently quiet** and offer **Inspect**. Silence
+is not evidence of completion or a finding. Verified delivery retains its own
+Review action. Current workspace changes remain visible as an unattributed
+snapshot and do not alone establish the selected session's outcome.
+
+Unknown model pricing is **Unavailable (no list price)**, not $0. A mixture of
+priced and unpriced usage shows only a known-price subtotal. A genuinely zero
+estimate for a priced model remains zero. These are API list-price comparisons,
+not claims about a subscription bill or remaining provider limits.

@@ -226,7 +226,7 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # 11: Codex chat labels use the concise name field and reject prompt-mirroring caches.
 # 12: evidence-accurate activity, Fresh Start, and historical-token semantics.
 # 13: session payloads carry separate repository and checkout identities.
-SUMMARY_CACHE_SCHEMA_VERSION = 16
+SUMMARY_CACHE_SCHEMA_VERSION = 17
 OPTIMIZE_REVIEW_CONTRACT_VERSION = 3
 
 
@@ -308,7 +308,7 @@ _POST_WITHOUT_BODY = frozenset({
 # 2: sessions carry their chat title; a version-1 index would restore every chat nameless.
 # 3: Codex titles are concise names; version 2 may contain full first-user-message payloads.
 # 4: sessions carry raw CWD and stable repository/checkout identity.
-SESSION_SNAPSHOT_SCHEMA_VERSION = 4
+SESSION_SNAPSHOT_SCHEMA_VERSION = 5
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 60
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
@@ -726,6 +726,9 @@ def _session_from_json(raw: object) -> LocalSession | None:
         source_path=raw.get("source_path") if isinstance(raw.get("source_path"), str) else None,
         notes=[str(item) for item in notes] if isinstance(notes, list) else [],
         surface=raw.get("surface") if isinstance(raw.get("surface"), str) else None,
+        session_role=raw.get("session_role") if isinstance(raw.get("session_role"), str) else None,
+        role_source=raw.get("role_source") if isinstance(raw.get("role_source"), str) else None,
+        parent_session_id=raw.get("parent_session_id") if isinstance(raw.get("parent_session_id"), str) else None,
         model_breakdown=model_breakdown if isinstance(model_breakdown, dict) else {},
         title=raw.get("title") if isinstance(raw.get("title"), str) and raw.get("title") else None,
     )
@@ -2490,6 +2493,9 @@ def session_actions(
 ) -> list[dict[str, object]]:
     actions: list[dict[str, object]] = []
     runtime = attachment or runtime_attachment_for_session(row, state=session_state(row), processes=[])
+    if row.internal_review:
+        return [{"id": "open_tool", "label": runtime.action_label, "available": runtime.available,
+                 "primary": False, "reason": runtime.reason}]
     tokens = row.tokens_in + row.tokens_out
     needs_fresh_start = tokens >= 500_000 or row.agent_calls >= 250 or row.tool_calls >= 250
     identity_level = runtime.identity_level
@@ -2764,6 +2770,42 @@ def survival_by_session(sessions: list[LocalSession]) -> dict[str, dict[str, str
     return result
 
 
+def _price_presentation(model: str | None, value: float, breakdown: dict[str, dict[str, float]] | None = None) -> dict[str, object]:
+    from .pricing import lookup
+    models = list(breakdown) if breakdown else [model]
+    unpriced = [name for name in models if not lookup(name) or lookup(name).get("subscription")]
+    available = not unpriced
+    return {
+        "price_status": "available" if available else "partial" if value > 0 else "unavailable",
+        "price_available": available,
+        "api_value": money(value) if available else f"{money(value)} known-price subtotal" if value > 0 else "Unavailable (no list price)",
+        "api_value_usd": round(value, 6) if available or value > 0 else None,
+    }
+
+
+def _internal_review_descriptor(row: LocalSession) -> dict[str, object]:
+    parent_id = row.parent_session_id
+    matches = [item for item in _cached_session_rows() if item.session_id == parent_id] if parent_id else []
+    known_parent = bool(len(matches) == 1 and matches[0].tool == row.tool and parent_id != row.session_id)
+    return {
+        "status": "internal",
+        "title": "Internal approval review — no developer action established",
+        "reason": "Codex session metadata identifies a Guardian approval reviewer, not an ordinary developer task.",
+        "benefit": "Check the parent conversation for an actual approval request. Otherwise no action is needed; diagnostics remain available. Do not mark a developer outcome or restart this internal reviewer.",
+        "parent_session_id": parent_id if known_parent else None,
+        "parent_note": "Parent relationship recorded by Codex; the indexed parent is available." if known_parent else "Parent relationship is not available in the current session index; no grouping is inferred.",
+    }
+
+
+def _session_role_json(row: LocalSession) -> dict[str, object]:
+    return {
+        "internal_review": row.internal_review,
+        "session_role": row.session_role,
+        "role_source": row.role_source,
+        "parent_session_id": row.parent_session_id,
+    }
+
+
 def session_json(row: LocalSession) -> dict[str, object]:
     started = row.started_at.isoformat() if row.started_at else None
     updated = row.updated_at.isoformat() if row.updated_at else None
@@ -2802,6 +2844,8 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "state": state,
         "runtime_attachment": attachment.to_json(),
         "actions": session_actions(row, outcome=outcome, attachment=attachment),
+        **_price_presentation(row.model, row.cost_usd, row.model_breakdown),
+        **_session_role_json(row),
     }
 
 
@@ -2839,6 +2883,8 @@ def recent_session_json(
         "state": state,
         "runtime_attachment": attachment.to_json(),
         "actions": session_actions(row, outcome=window_outcomes.get(row.session_id), attachment=attachment),
+        **_price_presentation(row.model, row.cost_usd, row.model_breakdown),
+        **_session_role_json(row),
     }
 
 
@@ -2871,7 +2917,10 @@ def session_summary_json(row: LocalSession) -> dict[str, object]:
         "actions": session_actions(row, outcome=outcome, attachment=attachment),
         "fresh_start_completion": _fresh_start_completion(row.session_id),
         "summary_only": True,
+        **({"review": _internal_review_descriptor(row)} if row.internal_review and not session_waiting_signals().get(row.session_id) else {}),
         "detail_status": "loading",
+        **_price_presentation(row.model, row.cost_usd, row.model_breakdown),
+        **_session_role_json(row),
     }
 
 
@@ -2927,6 +2976,7 @@ def event_json(row: LocalEvent) -> dict[str, object]:
         "api_value_usd": round(row.cost_usd, 6),
         "content_hash": row.content_hash,
         "turn": row.turn,
+        **_price_presentation(row.model, row.cost_usd),
     }
 
 
@@ -3255,7 +3305,9 @@ def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict
     replay: dict[str, object] = {
         "measurable": bool(health and health.bloat_measurable),
         "reason": None if (health and health.bloat_measurable)
-        else "This tool is plan-based, so there is no per-session bill to apportion.",
+        else ("No API list price is available for this model. Cost is unavailable; local usage does not establish provider billing or plan limits."
+              if not _price_presentation(row.model, row.cost_usd, row.model_breakdown)["price_available"]
+              else "A replay-cost breakdown is unavailable from the recorded usage. API-equivalent estimates do not establish provider billing or plan limits."),
     }
     if health and health.bloat_measurable:
         share_pct = health.bloat_ratio * 100
@@ -3311,7 +3363,11 @@ def build_session_review(
         f"Latest recorded input: {compact_int(latest)} / {compact_int(window)} model window ({100 * latest / window:.1f}%)."
         if pressure.get("available") else str(pressure.get("reason") or "Current context unavailable.")
     )
-    if state.get("status") != "active":
+    if row.internal_review and not waiting:
+        status, title = "internal", "Internal approval review — no developer action established"
+        reason = "Codex session metadata identifies this as a Guardian approval reviewer, not an ordinary developer task."
+        benefit = "Inspect diagnostics only if needed. Check the parent conversation for an actual approval request; no outcome vote or Fresh Start is needed for this internal run."
+    elif state.get("status") != "active":
         status, title = "historical", "Review before resuming"
         reason = "This is historical or unverified activity. No live intervention is established."
         benefit = "If you resume this work, preview a continuation brief to preserve the objective, completed work, unresolved tasks, and next checkpoint."
@@ -3363,8 +3419,10 @@ def build_session_review(
             if key not in _CONTEXT_REVIEW_CHECKS and len(_CONTEXT_REVIEW_CHECKS) >= 64:
                 _CONTEXT_REVIEW_CHECKS.pop(next(iter(_CONTEXT_REVIEW_CHECKS)), None)
             _CONTEXT_REVIEW_CHECKS[key] = (stamp, row.source_path, bool(status != "resolved" and active and (at_limit or next_does_not_fit)))
+    descriptor = _internal_review_descriptor(row) if status == "internal" else {}
     return {
-        "status": status, "title": title, "reason": reason, "benefit": benefit,
+        **descriptor,
+        "status": status, "title": title, "reason": reason, "benefit": descriptor.get("benefit", benefit),
         "observation": observation, "checked_at": datetime.now(timezone.utc).isoformat(),
         "last_activity": fresh.updated_at.isoformat() if fresh.updated_at else None,
         "context_available": bool(pressure.get("available")),
@@ -3402,7 +3460,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
     turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
     evidence = build_outcome_evidence(row, survival=_survival_for_session(session_id))
     evidence_json = evidence.to_json()
-    understanding = build_work_understanding(
+    understanding = None if row.internal_review else build_work_understanding(
         segments,
         commits=evidence_json.get("commits") or [],
         files=evidence_json.get("files_touched") or evidence_json.get("changed_files") or [],
@@ -3422,7 +3480,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
         "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
         "verdict": verdict,
         "insights": session_insights(row),
-        "prompt_analysis": build_prompt_analysis(row, segments),
+        "prompt_analysis": None if row.internal_review else build_prompt_analysis(row, segments),
         "prompt_receipts": build_prompt_receipts(segments),
         "work_understanding": understanding,
         "outcome_evidence": evidence_json,
@@ -3431,7 +3489,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
             "events": len(events),
             "shown": min(len(events), EVENT_DISPLAY_LIMIT),
             "tokens": compact_int(sum(event.tokens_in + event.tokens_out for event in events)),
-            "api_value": money(sum(event.cost_usd for event in events)),
+            "api_value": _price_presentation(None, sum(event.cost_usd for event in events), {event.model or "unknown": {} for event in events})["api_value"],
             "costliest": event_json(costliest) if costliest else None,
             **timeline_analysis(events),
         },
@@ -4696,7 +4754,7 @@ def _context_health_card(
         "recommendation_summary": intent_summary,
         "context_summary": context_summary,
         "intervention": {
-            "eligible": bool(status and status.get("status") == "active" and (
+            "eligible": bool(session and not session.internal_review and status and status.get("status") == "active" and (
                 health.is_context_critical or health.next_prompt_may_not_fit
             )),
             "observed_at": session.updated_at.isoformat() if session and session.updated_at else None,
@@ -8159,15 +8217,17 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
     "cannot see" (measurable false, with the reason), while a snapshot whose
     sessions have all ended is a true, measured "no live sessions".
     """
-    own = [row for row in rows if not row.analyst_run]
+    own = [row for row in rows if not row.analyst_run and not row.internal_review]
+    internal_count = sum(1 for row in rows if row.internal_review)
     measured = [row for row in own if row.measurable]
     counts = {"working": 0, "waiting": 0, "quiet": 0}
     if not own:
         return {
             **counts,
             "measurable": False,
-            "reason": "no local session snapshot yet",
-            "line": "Waiting for the first run scan",
+            "reason": "only internal review activity observed" if internal_count else "no local session snapshot yet",
+            "internal_reviews": internal_count,
+            "line": "Internal review activity only" if internal_count else "Waiting for the first run scan",
         }
     if not measured:
         reason = next((row.reason for row in own if row.reason), None)
@@ -8237,7 +8297,7 @@ def _pressure_block(
     """
     working = [
         row for row in rows
-        if row.measurable and not row.analyst_run
+        if row.measurable and not row.analyst_run and (session_id or not row.internal_review)
         and (row.session_id == session_id if session_id else row.state == "working")
     ]
     if not working:
@@ -8358,7 +8418,7 @@ def build_companion_usage(session_id: str = "") -> dict[str, object]:
         name = Path(project).name if project else "Unknown project"
         choices.append({
             "session_id": row.session_id,
-            "label": f"{name} · {session.tool} · {row.session_id[:8]} · {row.state}",
+            "label": f"{name} · {session.tool} · {row.session_id[:8]} · {'internal approval review' if session.internal_review else row.state}",
         })
     payload: dict[str, object] = {
         "sessions": choices,
@@ -8426,7 +8486,7 @@ def _update_finished_notices(rows: list[SessionPresence]) -> None:
     now = time.time()
     current: dict[str, str] = {}
     for row in rows:
-        if row.analyst_run or not row.measurable:
+        if row.analyst_run or row.internal_review or not row.measurable:
             continue
         current[row.session_id] = row.state
         previous = _PRESENCE_LAST_STATES.get(row.session_id)
@@ -8448,7 +8508,7 @@ def _finished_rows(rows: list[SessionPresence]) -> list[tuple[float, SessionPres
     notices = []
     for row in rows:
         finished_at = _FINISHED_NOTICES.get(row.session_id)
-        if finished_at is None or row.state != "quiet":
+        if finished_at is None or row.state != "quiet" or row.internal_review:
             continue
         if companion_skip_active(f"session_finished:{row.session_id}"):
             continue
@@ -8553,7 +8613,7 @@ def _update_away_digest(
     rows: list[dict[str, object]] = []
     finished_count = 0
     for session in session_rows:
-        if session.analyst_run:
+        if session.analyst_run or session.internal_review:
             continue
         stamp = session.updated_at
         if stamp is None:
@@ -8860,7 +8920,7 @@ def _compact_block(rows: list[SessionPresence], sessions: list[LocalSession]) ->
     by_id = {row.session_id: row for row in sessions}
     items: list[dict[str, object]] = []
     for row in rows:
-        if not row.measurable or row.analyst_run or not row.live:
+        if not row.measurable or row.analyst_run or row.internal_review or not row.live:
             continue
         session = by_id.get(row.session_id)
         if session is None or not session.source_path or has_cumulative_totals(session):
@@ -8913,7 +8973,7 @@ def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSessio
     and scope: list-price dollars for that one prompt's requests, the same
     figures as the session review (build_prompt_receipts), so the bar and the
     drawer never disagree. "Working" is the presence rule (a write within
-    WORKING_SECONDS); "ready to check" is quiet and holds until the next prompt,
+    WORKING_SECONDS); "recently quiet" is quiet and holds until the next prompt,
     because the next prompt replaces the segment. Chats are named, prompts are never
     quoted: no prompt text on the Companion.
     """
@@ -8921,7 +8981,7 @@ def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSessio
     items: list[dict[str, object]] = []
     now = datetime.now(timezone.utc)
     for row in rows:
-        if not row.live or row.analyst_run or not row.measurable:
+        if not row.live or row.analyst_run or row.internal_review or not row.measurable:
             continue
         session = by_id.get(row.session_id)
         path = session.source_path if session is not None else None
@@ -8956,10 +9016,10 @@ def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSessio
             tag = f"working {_duration_label(elapsed)}" if elapsed is not None and elapsed <= PROMPT_RECEIPT_RESUMED_SECONDS else "working"
         elif detail["after_break"]:
             parts = [cost_label, str(detail["note"])]
-            tag = "ready to check"
+            tag = "recently quiet"
         else:
             parts = [cost_label, str(detail["added_label"] or ""), str(detail["took_label"] or "")]
-            tag = "ready to check"
+            tag = "recently quiet"
         items.append({
             "session_id": row.session_id,
             "name": name,
@@ -8987,7 +9047,7 @@ def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> d
     detail_text = "List-price cost of each chat's current prompt, the same figures as the session review. No prompt text is shown in the Companion."
     if len(items) == 1:
         item = items[0]
-        label = "Working" if item["working"] else "Ready to check"
+        label = "Working" if item["working"] else "Recently quiet"
         return {
             **base,
             "state": "prompt_status",
@@ -9285,7 +9345,7 @@ def _base_companion_activity(
 
     working: list[dict[str, object]] = []
     for row in presence_rows:
-        if row.analyst_run or not row.measurable or row.state != "working":
+        if row.analyst_run or row.internal_review or not row.measurable or row.state != "working":
             continue
         session_id = str(row.session_id or "")
         item = rich_by_session.get(session_id) or {
@@ -9327,9 +9387,9 @@ def _base_companion_activity(
         item = {
             **raw,
             "kind": "recently_observed",
-            "tag": "ready to check",
+            "tag": "recently quiet",
         }
-        item["normalized_action"] = _activity_action(item, fallback_label="Review")
+        item["normalized_action"] = _activity_action(item, fallback_label="Inspect")
         recent.append(item)
 
     if isinstance(delivery_receipt, dict):
@@ -9444,7 +9504,7 @@ def _companion_activity_contract(payload: dict[str, object]) -> dict[str, object
     if delivery_confirmed:
         parts.append("delivery confirmed")
     elif counts.get("recently_observed"):
-        parts.append(f"{counts['recently_observed']} ready to check")
+        parts.append(f"{counts['recently_observed']} recently quiet")
 
     return {
         **payload,
@@ -9796,10 +9856,10 @@ def _build_companion_state() -> dict[str, object]:
         return {
             **base,
             "state": "session_finished",
-            "label": f"{finished_count} ready to check" if many_finished else "Ready to check",
-            "title": f"{finished_count} ready to check" if many_finished else "Ready to check",
+            "label": f"{finished_count} recently quiet" if many_finished else "Recently quiet",
+            "title": f"{finished_count} recently quiet" if many_finished else "Recently quiet",
             "subtitle": (
-                "Nice progress. Pick one to review or clear the notice."
+                "Activity went quiet; inspect only if useful. Quiet does not establish completion."
                 if many_finished
                 else (
                     _fit_name(str(receipt_item["name"]), str(receipt_item["rest"]))
@@ -9807,7 +9867,7 @@ def _build_companion_state() -> dict[str, object]:
                     else f"{finished_tool} · {finished_project} · {ago}"
                 )
             ),
-            "primary_label": "Review",
+            "primary_label": "Inspect",
             "primary_action": "open_url",
             "primary_session_id": finished_id,
             "primary_url": "/?view=sessions" if many_finished else f"/?session={quote(finished_id, safe='')}",
@@ -9819,12 +9879,12 @@ def _build_companion_state() -> dict[str, object]:
             "badge": {
                 "count": finished_count,
                 "tone": "info",
-                "label": f"{finished_count} run{'s' if finished_count != 1 else ''} ready to check",
+                "label": f"{finished_count} run{'s' if finished_count != 1 else ''} recently quiet",
             },
             "detail": (
                 "Recently quiet runs are visible in Sessions. Clear all only dismisses Companion notices."
                 if many_finished
-                else "This run was active a moment ago and has gone quiet. Open it to verify what finished."
+                else "This run was recently active and is now quiet. No finding, completion, or user decision is established by silence."
             ),
         }
 
@@ -10083,7 +10143,7 @@ def _build_companion_state() -> dict[str, object]:
         base["badge"] = {
             "count": len(finished_notices),
             "tone": "info",
-            "label": f"{len(finished_notices)} run{'s' if len(finished_notices) != 1 else ''} ready to check",
+            "label": f"{len(finished_notices)} run{'s' if len(finished_notices) != 1 else ''} recently quiet",
         }
         appended = f"{quiet_subtitle} · {len(finished_notices)} to check"
         if len(appended) <= 46:
