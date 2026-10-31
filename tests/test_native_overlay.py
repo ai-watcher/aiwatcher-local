@@ -406,7 +406,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("max_waiting_rows = 5", tk_source)
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
-        self.assertIn("create_text(\n                27, 10, text=badge_text", tk_source)
+        self.assertIn("badge_x, badge_y, text=badge_text", tk_source)
         self.assertIn('"badge" in payload', tk_source)
         self.assertIn('visible_waiting_rows() == 0 or state_var.get() in {"control_review", "context_review"}', tk_source)
         self.assertIn("def row_display_text", tk_source)
@@ -625,7 +625,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         )
         self.assertIn('activity_tone_var.get() == "attention"', tk_source)
         self.assertIn("badge_count = waiting_count or review_count", tk_source)
-        self.assertIn('fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
+        # The badge disc is rasterised now, so the colour is an argument to
+        # _paint_disc rather than a fill= on a Tk oval.
+        self.assertIn('attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
 
     def test_the_away_digest_rides_the_queue_rows(self) -> None:
         # History entries reuse the waiting-row machinery: mint/amber dots by
@@ -703,7 +705,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def reduce_motion_active()", tk_source)
         self.assertIn("root.after(800 if animate_surface else (30000 if not visible_surface else 8000)", tk_source)
         self.assertIn("entered_attention or activity_changed or delivered or recovered", tk_source)
-        self.assertIn("capstyle=tk.ROUND", tk_source)
+        # The eyes moved into _paint_face, which draws them into the face
+        # image; the round cap survives as the Tk fallback's stroke.
+        self.assertIn("capstyle=tk_module.ROUND", inspect.getsource(native_overlay._paint_face))
         self.assertIn("working_count_var.set(0)", tk_source.split("def apply_offline_state")[1][:900])
         self.assertIn('activity_tone_var.set("")', tk_source.split("def apply_offline_state")[1][:900])
 
@@ -756,7 +760,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("extent=120", tk_source)
-        self.assertIn('style="arc", outline="#43d9a3", width=4', tk_source)
+        # The width is brand_mark.ORBIT_STROKE now, because the mark's size is
+        # derived from it -- the arc's inner edge is what the mark must clear.
+        self.assertIn('style="arc", outline="#43d9a3", width=bubble.orbit_stroke', tk_source)
+        self.assertEqual(native_overlay.brand_mark.ORBIT_STROKE, 4.0)
 
     def test_a_hard_gate_is_never_the_quietest_state(self) -> None:
         # A prompt or command gate holds the user's own prompt until they act,
@@ -785,7 +792,17 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('hard_gate = state_var.get() in {"prompt_gate", "command_gate"}', tk_source)
-        self.assertIn("collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)", tk_source)
+        # The rim is the layout's, not a typed box; brand_mark derives it as
+        # the largest centred circle inside the canvas. It is rasterised now,
+        # with _paint_ring keeping the Tk oval as its fallback.
+        self.assertIn(
+            "_paint_ring(tk, collapsed_canvas, bubble.rim, bubble.orbit_stroke, rim_colour)",
+            tk_source,
+        )
+        self.assertIn(
+            "canvas.create_oval(*rect, outline=colour, width=stroke)",
+            inspect.getsource(native_overlay._paint_ring),
+        )
         self.assertIn('rim_colour = "#f8cdb5"', tk_source)
         self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)
         self.assertIn("and not was_hard_gate and collapsed.get():\n            set_collapsed(False)", tk_source)

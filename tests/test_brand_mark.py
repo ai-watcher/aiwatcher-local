@@ -1,4 +1,5 @@
 import inspect
+import math
 import struct
 import unittest
 import zlib
@@ -45,10 +46,11 @@ class BrandMarkGeometryTests(unittest.TestCase):
     def test_a_degenerate_height_still_yields_a_drawable_image(self) -> None:
         self.assertEqual(brand_mark.mark_size(0.0), (1, 1))
 
-    def test_the_geometry_matches_the_svg_the_vector_fallback_draws(self) -> None:
-        # Both paths draw the same artwork, and nothing generates one from the
-        # other, so the numbers have to be checked against each other by hand.
-        # The SVG states centerlines; _draw_brand_mark states outer boxes.
+    def test_the_geometry_is_stated_once_and_the_fallback_reads_it(self) -> None:
+        # It used to be stated four times -- the SVG, render_icons, this module
+        # and _draw_brand_mark's outer boxes -- in two different
+        # parameterisations, "kept in step by hand". The vector fallback now
+        # reads these numbers rather than restating them.
         back, front = brand_mark.RINGS
         self.assertEqual(back[:4], (20.0, 20.0, 260.0, 220.0))
         self.assertEqual(front[:4], (149.0, 137.0, 260.0, 192.0))
@@ -57,8 +59,23 @@ class BrandMarkGeometryTests(unittest.TestCase):
             self.assertEqual(stroke, 40.0)
             self.assertEqual(radius + stroke / 2, 85.0)  # the outer corner radius
         source = inspect.getsource(native_overlay._draw_brand_mark)
-        self.assertIn("ring(0.0, 0.0, 300.0 * s, 260.0 * s, blue)", source)
-        self.assertIn("ring(129.0 * s, 117.0 * s, 300.0 * s, 232.0 * s, ink)", source)
+        self.assertIn("zip(brand_mark.RINGS, (blue, ink))", source)
+        self.assertNotIn("300.0 * s", source)
+        self.assertNotIn("129.0 * s", source)
+
+    def test_the_fallback_draws_the_same_ring_the_rasteriser_does(self) -> None:
+        # The fallback insets from the outer box; the shared geometry states
+        # the centerline. They must land on the same line at the sizes the
+        # Companion actually draws.
+        for height in (18.0, 26.0, 30.0):
+            with self.subTest(height=height):
+                s = height / brand_mark.VIEW_H
+                stroke = max(2.0, 40.0 * s)
+                legacy = (stroke / 2, stroke / 2, 300 * s - stroke / 2, 260 * s - stroke / 2, 85 * s - stroke / 2)
+                x, y, w, h, radius, _ = brand_mark.RINGS[0]
+                shared = (x * s, y * s, (x + w) * s, (y + h) * s, radius * s)
+                for a, b in zip(legacy, shared):
+                    self.assertAlmostEqual(a, b, places=9)
 
 
 class BrandMarkRenderTests(unittest.TestCase):
@@ -114,6 +131,176 @@ class BrandMarkRenderTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class ShapeRenderTests(unittest.TestCase):
+    """The layers that are not the mark. Tk drew these as canvas primitives,
+    which is to say with hard pixel edges, and they were the last stair-stepped
+    things in the bubble once the mark became an image."""
+
+    def test_the_badge_disc_is_anti_aliased(self) -> None:
+        png = brand_mark.render_disc_png(25.0, "#0052F5")
+        width, height, rows = decode_rgba(png)
+        self.assertEqual((width, height), (25, 25))
+        alphas = {pixel[3] for row in rows for pixel in row}
+        partial = [a for a in alphas if 0 < a < 255]
+        self.assertGreater(len(partial), 4, "a circle with hard edges is the defect")
+        self.assertEqual(rows[0][0][3], 0, "the box corner sits outside the circle")
+        self.assertEqual(rows[12][12], (0x00, 0x52, 0xF5, 255), "the centre is solid")
+
+    def test_the_face_draws_its_panel_and_both_eyes_anti_aliased(self) -> None:
+        layout = brand_mark.bubble_layout(56, 60)
+        eyes = tuple(
+            (eye.x0 - layout.face.x0, eye.y0 - layout.face.y0,
+             eye.x1 - layout.face.x0, eye.y1 - layout.face.y0)
+            for eye in layout.eyes
+        )
+        png = brand_mark.render_face_png(
+            layout.face.width, layout.face.height, eyes, layout.eye_thickness,
+            "#141314", "#7fdbff",
+        )
+        _width, _height, rows = decode_rgba(png)
+        opaque = {pixel[:3] for row in rows for pixel in row if pixel[3] == 255}
+        self.assertIn((0x14, 0x13, 0x14), opaque, "the panel is missing")
+        self.assertIn((0x7F, 0xDB, 0xFF), opaque, "the eyes are missing")
+        alphas = {pixel[3] for row in rows for pixel in row}
+        # Only a handful of levels: the shipped face is 13x9, so there are few
+        # edge pixels to carry them. More than two is the whole claim -- the
+        # Tk primitives this replaced could only ever be on or off.
+        self.assertGreaterEqual(len([a for a in alphas if 0 < a < 255]), 3)
+        # A stadium, not a rectangle: the corners carry no ink.
+        self.assertEqual(rows[0][0][3], 0)
+
+    def test_a_capsule_covers_its_segment_and_its_round_caps(self) -> None:
+        # The eyes are round-capped strokes, so the cap is part of the shape
+        # and part of why two of them run into each other.
+        on = lambda x, y: brand_mark._in_capsule(x, y, 0.0, 0.0, 10.0, 0.0, 1.0)
+        self.assertTrue(on(5.0, 0.0))
+        self.assertTrue(on(5.0, 0.9))
+        self.assertFalse(on(5.0, 1.5))
+        self.assertTrue(on(-0.9, 0.0), "the round cap extends past the segment")
+        self.assertFalse(on(-1.5, 0.0))
+        self.assertTrue(on(10.9, 0.0))
+
+    def test_a_zero_length_capsule_is_a_dot(self) -> None:
+        self.assertTrue(brand_mark._in_capsule(0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        self.assertFalse(brand_mark._in_capsule(1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+
+
+class BubbleLayoutTests(unittest.TestCase):
+    """The invariants that used to live in a comment and a person's eye.
+
+    Every one of these held only by coincidence before the layout existed, and
+    two of them did not hold at all.
+    """
+
+    # The Companion's own canvas is 56x60 (a 72px window less its padding).
+    # Nothing below 28 is swept: the face is then narrower than
+    # MIN_FACE_WIDTH_FOR_EYES and cannot hold two separate eyes at all, which
+    # is asserted directly below rather than hidden by omission.
+    SIZES = ((56, 60), (36, 40), (28, 28), (52, 52), (64, 48))
+
+    def test_the_face_stays_inside_the_front_ring_at_every_mark_size(self) -> None:
+        # This is the bug that shipped: the face panel covered the front
+        # ring's entire top stroke, so the mark read as a blob rather than a
+        # ring. Sweeping sizes is what makes it impossible to reintroduce.
+        for height in range(10, 49):
+            with self.subTest(mark_height=height):
+                layout = brand_mark.bubble_layout(36, 40, mark_height=float(height))
+                self.assertTrue(
+                    layout.front_interior.contains(layout.face),
+                    "face %s escaped the ring opening %s" % (layout.face, layout.front_interior),
+                )
+
+    def test_the_eyes_do_not_merge_once_round_caps_are_added(self) -> None:
+        # The eyes are drawn with round caps, so each dash grows by half its
+        # thickness at both ends. They merged into one bar twice before this
+        # was asserted -- once from a typed 2px thickness, once from scaling
+        # the bubble up with the fractions chosen at the smaller size.
+        for width, height in self.SIZES:
+            with self.subTest(canvas=(width, height)):
+                layout = brand_mark.bubble_layout(width, height)
+                self.assertGreater(
+                    layout.eyes_gap, 0.5,
+                    "eyes merge: gap %.2f at canvas %dx%d" % (layout.eyes_gap, width, height),
+                )
+
+    def test_a_face_too_small_for_two_eyes_is_a_known_floor(self) -> None:
+        # Not every canvas can carry this design, and the limit is derived
+        # rather than discovered on screen: below a 5px face the thickness
+        # floor wins and the dashes touch. The shipped bubble is well clear.
+        self.assertAlmostEqual(brand_mark.MIN_FACE_WIDTH_FOR_EYES, 5.0, places=6)
+        cramped = brand_mark.bubble_layout(24, 24)
+        self.assertLess(cramped.face.width, brand_mark.MIN_FACE_WIDTH_FOR_EYES)
+        self.assertLessEqual(cramped.eyes_gap, 0.5)
+        shipped = brand_mark.bubble_layout(56, 60)
+        self.assertGreater(shipped.face.width, brand_mark.MIN_FACE_WIDTH_FOR_EYES * 2)
+
+    def test_the_eyes_stay_inside_the_face(self) -> None:
+        for height in range(10, 49):
+            layout = brand_mark.bubble_layout(36, 40, mark_height=float(height))
+            for index, eye in enumerate(layout.eyes):
+                with self.subTest(mark_height=height, eye=index):
+                    self.assertTrue(layout.face.contains(eye), "eye %s escaped face %s" % (eye, layout.face))
+
+    def test_the_coordinates_that_shipped_are_witnessed_as_wrong(self) -> None:
+        # The sweep above is only worth having if it would have caught the
+        # real defect, so this pins what the hand-placed numbers actually did:
+        # mark at height 18 moved to (7, 13), face panel typed as x 16..28,
+        # y 16..23.
+        scale = 18.0 / brand_mark.VIEW_H
+        x, y, w, h, _radius, stroke = brand_mark.RINGS[1]
+        interior = brand_mark.Rect(
+            (x + stroke / 2) * scale, (y + stroke / 2) * scale,
+            (x + w - stroke / 2) * scale, (y + h - stroke / 2) * scale,
+        ).moved(7.0, 13.0)
+        shipped_face = brand_mark.Rect(16.0, 16.0, 28.0, 23.0)
+        self.assertFalse(
+            interior.contains(shipped_face),
+            "the shipped face was inside the ring after all; this witness is stale",
+        )
+        # It sat high: the panel's top edge was above the opening's.
+        self.assertLess(shipped_face.y0, interior.y0)
+
+    def test_every_region_stays_within_the_canvas(self) -> None:
+        for width, height in self.SIZES:
+            with self.subTest(canvas=(width, height)):
+                layout = brand_mark.bubble_layout(width, height)
+                self.assertTrue(layout.canvas.contains(layout.mark))
+                self.assertTrue(layout.canvas.contains(layout.badge))
+                self.assertTrue(layout.canvas.contains(layout.rim))
+                self.assertTrue(layout.rim.contains(layout.focus_rim))
+                self.assertTrue(layout.mark.contains(layout.front_interior))
+
+    def test_the_mark_clears_the_running_arc(self) -> None:
+        # The mark is a rectangle inside a circle, so the diagonal binds. An
+        # earlier draft of this layout fitted the mark's WIDTH to the rim and
+        # drove its corners straight through the arc -- half-diagonal 20.6
+        # against 14.0 of clearance.
+        for width, height in self.SIZES:
+            with self.subTest(canvas=(width, height)):
+                layout = brand_mark.bubble_layout(width, height)
+                half_diagonal = math.hypot(layout.mark.width, layout.mark.height) / 2.0
+                clearance = layout.rim.width / 2.0 - layout.orbit_stroke / 2.0
+                self.assertLessEqual(half_diagonal, clearance + 0.75)
+
+    def test_the_default_reproduces_the_size_that_shipped(self) -> None:
+        # The hand-placed 18px was right, and encoded exactly this rule; it
+        # was the face's position that was wrong. Deriving it must not quietly
+        # resize the mark.
+        layout = brand_mark.bubble_layout(36, 40)
+        self.assertEqual(brand_mark.mark_size(layout.mark_height), (22, 18))
+        self.assertAlmostEqual(layout.mark_height, 17.67, places=2)
+
+    def test_rect_helpers_behave(self) -> None:
+        rect = brand_mark.Rect(0.0, 0.0, 10.0, 4.0)
+        self.assertEqual(rect.width, 10.0)
+        self.assertEqual(rect.height, 4.0)
+        self.assertEqual(rect.centre, (5.0, 2.0))
+        self.assertEqual(rect.inset(1.0), brand_mark.Rect(1.0, 1.0, 9.0, 3.0))
+        self.assertEqual(rect.moved(2.0, 3.0), brand_mark.Rect(2.0, 3.0, 12.0, 7.0))
+        self.assertTrue(rect.contains(brand_mark.Rect(1.0, 1.0, 2.0, 2.0)))
+        self.assertFalse(rect.contains(brand_mark.Rect(-1.0, 1.0, 2.0, 2.0)))
+
+
 class BrandMarkOverlayWiringTests(unittest.TestCase):
     def test_the_overlay_prefers_the_image_and_keeps_the_vector_fallback(self) -> None:
         source = inspect.getsource(native_overlay._paint_brand_mark)
@@ -125,10 +312,34 @@ class BrandMarkOverlayWiringTests(unittest.TestCase):
     def test_photos_are_cached_so_tk_does_not_collect_the_pixels(self) -> None:
         # A PhotoImage that falls out of scope blanks the canvas item that
         # references it, which is the classic Tk image bug.
-        source = inspect.getsource(native_overlay._brand_mark_photo)
+        source = inspect.getsource(native_overlay._cached_photo)
         self.assertIn("_MARK_PHOTOS[key] = photo", source)
         self.assertIn("_MARK_PHOTOS.get(key)", source)
         self.assertIsInstance(native_overlay._MARK_PHOTOS, dict)
+
+    def test_the_bubble_positions_everything_from_the_layout(self) -> None:
+        # No pixel literals: that is the whole point of the layout. Each of
+        # these used to be a typed box that happened to line up at one size.
+        source = inspect.getsource(native_overlay.run_native_presence)
+        for expression in (
+            'collapsed_canvas.move("all", bubble.mark.x0, bubble.mark.y0)',
+            "*bubble.rim,",
+            "bubble.focus_rim,",
+            "bubble.badge,",
+            "face = bubble.face",
+            "bubble.eyes,",
+        ):
+            with self.subTest(expression=expression):
+                self.assertIn(expression, source)
+        for gone in (
+            "create_oval(16, 16, 23, 23",
+            "create_oval(5, 7, 33, 35",
+            "19, 2, 35, 18",
+            'move("all", 7.0, 13.0)',
+            "2, 4, 34, 36",
+        ):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, source)
 
     def test_every_tk_mark_goes_through_the_painting_helper(self) -> None:
         # Any call site left on the vector path would render differently from
