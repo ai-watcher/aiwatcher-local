@@ -1015,5 +1015,52 @@ class WaitingRowLayoutTests(unittest.TestCase):
         self.assertIn("_elide_to_width(full_text, row_font.measure, row_text_limit(index))", self.source)
 
 
+class SubtitleFitTests(unittest.TestCase):
+    """The bar's subtitle must stay on one line.
+
+    expanded_height is sized for a single subtitle line, so a wrapped subtitle
+    pushes the rows beneath it off the bottom of the window. The Optimize
+    state did exactly that: its subtitle, cut to 46 characters, measured 251px
+    against a 250px wraplength -- one pixel over -- and the row below lost its
+    button off the bottom edge. The widget tree needs a display, so this reads
+    the source.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = inspect.getsource(native_overlay.run_native_presence)
+
+    def test_the_subtitle_has_exactly_one_entry_point(self) -> None:
+        # Any other writer could put an unfitted string in the label.
+        self.assertEqual(self.source.count("subtitle_var.set("), 1)
+        block = self.source[self.source.index("def set_subtitle("):]
+        self.assertIn("subtitle_var.set(", block[:300])
+
+    def test_the_entry_point_fits_the_text_in_pixels(self) -> None:
+        block = self.source[self.source.index("def set_subtitle("):]
+        self.assertIn("_elide_to_width(", block[:300])
+        self.assertIn("subtitle_font.measure", block[:300])
+
+    def test_the_label_and_the_cap_share_one_number(self) -> None:
+        # Stated twice, they drift, and the drift is invisible until a
+        # subtitle wraps and eats the row below.
+        self.assertIn("wraplength=SUBTITLE_WRAP_PX", self.source)
+        self.assertNotIn("wraplength=250", self.source)
+
+    def test_no_character_cap_survives_on_the_subtitle_path(self) -> None:
+        # A character count cannot hold a pixel contract on a proportional
+        # font; that mismatch is the whole bug.
+        self.assertNotIn("subtitle_var.get()[:46]", self.source)
+        self.assertNotIn('or "Watching quietly")[:46]', self.source)
+
+    def test_the_optimize_subtitle_is_the_regression_case(self) -> None:
+        # Fixed-width stand-in: 6px per character puts the real Optimize
+        # subtitle well past the 250px wrap, so it must come back elided.
+        text = "5 review groups; top group: 2 older session records. Organization only."
+        fitted = native_overlay._elide_to_width(text, lambda value: 6 * len(value), 250)
+        self.assertTrue(fitted.endswith("…"))
+        self.assertLessEqual(6 * len(fitted), 250)
+
+
 if __name__ == "__main__":
     unittest.main()

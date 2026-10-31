@@ -3406,7 +3406,23 @@ def run_native_presence(
     ttk.Label(title_stack, textvariable=pressure_stats_var, style="PresenceMuted.TLabel").pack(side="left", padx=(10, 0))
     subtitle_row = ttk.Frame(left, style="Presence.TFrame")
     subtitle_row.pack(anchor="w", fill="x")
-    ttk.Label(subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(side="left")
+    # One line, by contract: expanded_height is sized for a single subtitle
+    # line, so a wrapped subtitle pushes the rows beneath it off the bottom of
+    # the window -- the Optimize state did exactly that and clipped the row
+    # below out of reach. A character cap cannot hold that contract on a
+    # proportional font: 46 characters of "5 review groups; top group: 2 older
+    # session re" measure 251px against this 250px wrap, one pixel over. So the
+    # cap is in pixels, measured in the label's own font, and set_subtitle is
+    # the only way the text is written.
+    SUBTITLE_WRAP_PX = 250
+    subtitle_font = tkfont.Font(font=style.lookup("PresenceMuted.TLabel", "font") or ("Helvetica", 9))
+
+    def set_subtitle(text: object) -> None:
+        subtitle_var.set(_elide_to_width(str(text), subtitle_font.measure, SUBTITLE_WRAP_PX))
+
+    ttk.Label(
+        subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=SUBTITLE_WRAP_PX,
+    ).pack(side="left")
     # Context-pressure meter for the resting state: the one graphic the bar
     # carries. Packed only while the payload says the number is measurable.
     meter_canvas = tk.Canvas(subtitle_row, width=70, height=9, bg="#090d14", highlightthickness=0, bd=0)
@@ -3506,7 +3522,7 @@ def run_native_presence(
                 f"{hidden} more in UI. Pick a row or open UI."
                 if hidden > 0 else "Pick a row or open UI."
             )
-        return subtitle_var.get()[:46]
+        return subtitle_var.get()
 
     def row_action_label(index: int) -> str:
         if index < len(waiting_row_action_labels) and waiting_row_action_labels[index]:
@@ -3558,7 +3574,7 @@ def run_native_presence(
         skip_session_ids_var.set("")
         state_var.set("offline")
         title_var.set("UI offline")
-        subtitle_var.set("Start dashboard + Companion")
+        set_subtitle("Start dashboard + Companion")
         primary_label_var.set("Restart")
         primary_action_var.set("restart_aiwatcher")
         primary_url_var.set(url)
@@ -3742,17 +3758,17 @@ def run_native_presence(
         # frame: 34 holds the planner's longest label (32) on the 560-wide
         # bar, where 18 cut it to "Continue only afte".
         title_var.set(str(payload.get("label") or "AIWatcher")[:34])
-        subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
+        subtitle_text = str(payload.get("subtitle") or "Watching quietly")
         if isinstance(activity_sections, list) and len(activity_sections) > 1:
-            subtitle_text = str(payload.get("activity_line") or subtitle_text)[:46]
+            subtitle_text = str(payload.get("activity_line") or subtitle_text)
         remaining = payload.get("expires_in_seconds")
         if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
-        subtitle_var.set(subtitle_text)
+        set_subtitle(subtitle_text)
         root.title(f"AIWatcher Companion: {str(payload.get('activity_line') or subtitle_text)[:120]}")
         if incoming_state in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
             title_var.set(review_title())
-            subtitle_var.set(review_subtitle())
+            set_subtitle(review_subtitle())
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
@@ -3790,7 +3806,7 @@ def run_native_presence(
 
     def scan_now() -> None:
         title_var.set("Scanning")
-        subtitle_var.set("Checking local AI work...")
+        set_subtitle("Checking local AI work...")
         try:
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/companion-scan", timeout=12.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -3799,10 +3815,10 @@ def run_native_presence(
                 apply_state(state_payload)
             else:
                 title_var.set("Scan done")
-                subtitle_var.set("Open UI for details")
+                set_subtitle("Open UI for details")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
             title_var.set("Scan failed")
-            subtitle_var.set("Open UI for details")
+            set_subtitle("Open UI for details")
         update_attention_style()
 
     def open_primary() -> None:
@@ -3810,7 +3826,7 @@ def run_native_presence(
         if primary_action_var.get() == "restart_aiwatcher":
             restart_requested = True
             title_var.set("Restarting AIWatcher")
-            subtitle_var.set("Dashboard and Companion will reopen")
+            set_subtitle("Dashboard and Companion will reopen")
             primary_button.state(["disabled"])
             root.after(80, root.destroy)
             return
@@ -3824,12 +3840,12 @@ def run_native_presence(
                 pass
             if not saved:
                 title_var.set("Still pending")
-                subtitle_var.set("Could not save receipt view")
+                set_subtitle("Could not save receipt view")
                 update_attention_style()
                 return
             state_var.set("watching")
             title_var.set("Watching quietly")
-            subtitle_var.set("Fresh Start receipt opened")
+            set_subtitle("Fresh Start receipt opened")
             skip_state_var.set("")
             update_attention_style()
             schedule_auto_collapse(1200)
@@ -3863,7 +3879,7 @@ def run_native_presence(
     def copy_fresh_start_from_companion() -> None:
         session_id = primary_session_id_var.get().strip()
         title_var.set("Copying brief")
-        subtitle_var.set("Preparing Fresh Start...")
+        set_subtitle("Preparing Fresh Start...")
         try:
             encoded = urllib.parse.quote(session_id)
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/handoff?id={encoded}&target=generic", timeout=8.0) as response:
@@ -3885,7 +3901,7 @@ def run_native_presence(
                 state_var.set("clipboard_confirm")
                 suppress_passive_refresh_until.set(time.time() + 30.0)
                 title_var.set("Clipboard has text")
-                subtitle_var.set("Click Replace to copy Fresh Start")
+                set_subtitle("Click Replace to copy Fresh Start")
                 primary_label_var.set("Replace")
                 update_attention_style()
                 schedule_auto_collapse(30000)
@@ -3893,7 +3909,7 @@ def run_native_presence(
             pending_clipboard_override_session_var.set("")
             if not set_clipboard_text(brief):
                 title_var.set("Copy failed")
-                subtitle_var.set("Open UI to copy the brief")
+                set_subtitle("Open UI to copy the brief")
                 update_attention_style()
                 webbrowser.open(primary_url_var.get() or url)
                 return
@@ -3933,13 +3949,13 @@ def run_native_presence(
             state_var.set("fresh_start_copied")
             suppress_passive_refresh_until.set(time.time() + 12.0)
             title_var.set("Fresh Start copied")
-            subtitle_var.set("Paste it into a fresh chat")
+            set_subtitle("Paste it into a fresh chat")
             primary_url_var.set(url)
             update_attention_style()
             schedule_auto_collapse(12000)
         except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError, tk.TclError):
             title_var.set("Fresh Start")
-            subtitle_var.set("Open UI to copy the brief")
+            set_subtitle("Open UI to copy the brief")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
 
@@ -3970,7 +3986,7 @@ def run_native_presence(
         session_id = primary_session_id_var.get().strip()
         if not set_clipboard_text(command):
             title_var.set("Copy failed")
-            subtitle_var.set("Open UI to copy /compact")
+            set_subtitle("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
             return
@@ -3979,7 +3995,7 @@ def run_native_presence(
         state_var.set("compact_copied")
         suppress_passive_refresh_until.set(time.time() + 3.0)
         title_var.set("Copied")
-        subtitle_var.set("Paste /compact into that session")
+        set_subtitle("Paste /compact into that session")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(12000)
@@ -3990,7 +4006,7 @@ def run_native_presence(
         command = waiting_row_commands[index] if index < len(waiting_row_commands) else ""
         if not set_clipboard_text(command):
             title_var.set("Copy failed")
-            subtitle_var.set("Open UI to copy /compact")
+            set_subtitle("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(waiting_row_urls[index] if index < len(waiting_row_urls) else url)
             return
@@ -4024,12 +4040,12 @@ def run_native_presence(
                 pass
             if not released:
                 title_var.set("Still paused")
-                subtitle_var.set("Open Review Gate to continue")
+                set_subtitle("Open Review Gate to continue")
                 update_attention_style()
                 return
             state_var.set("watching")
             title_var.set("Continuing")
-            subtitle_var.set("Original prompt released")
+            set_subtitle("Original prompt released")
             continue_action_var.set("")
             continue_url_var.set("")
             primary_url_var.set(url)
@@ -4062,13 +4078,13 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set("Could not save Continue")
+            set_subtitle("Could not save Continue")
             update_attention_style()
             return
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
-        subtitle_var.set("Fresh Start decision saved")
+        set_subtitle("Fresh Start decision saved")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(1200)
@@ -4098,7 +4114,7 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set(short_skip_failure_message())
+            set_subtitle(short_skip_failure_message())
             update_attention_style()
             return
         skip_state_var.set("")
@@ -4109,7 +4125,7 @@ def run_native_presence(
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
-        subtitle_var.set("Companion nudge skipped")
+        set_subtitle("Companion nudge skipped")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(1200)
@@ -4175,7 +4191,7 @@ def run_native_presence(
         # The honesty rule from the transient overlay applies here too: wait
         # for the result, and on failure say why and open the session in
         # AIWatcher -- never report a return that did not happen.
-        subtitle_var.set("Returning...")
+        set_subtitle("Returning...")
         request = urllib.request.Request(
             f"{url.rstrip('/')}/api/runtime-return",
             data=json.dumps({"session_id": session_id}).encode("utf-8"),
@@ -4193,10 +4209,10 @@ def run_native_presence(
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             pass
         if ok:
-            subtitle_var.set((message or "Opened your AI tool. Answer it there.")[:46])
+            set_subtitle(message or "Opened your AI tool. Answer it there.")
         else:
             webbrowser.open(fallback_url)
-            subtitle_var.set("No live return. Opened in AIWatcher.")
+            set_subtitle("No live return. Opened in AIWatcher.")
         schedule_auto_collapse(2500)
 
     def open_waiting_row(index: int) -> None:
