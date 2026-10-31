@@ -941,6 +941,18 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("run_native_tray", source)
         self.assertIn("run_native_presence", source)
 
+    def test_the_connecting_subtitle_fits_on_one_line(self) -> None:
+        # The bar's height is sized for a single subtitle line, so a subtitle
+        # wider than the label's 250px wraplength wraps and pushes the row
+        # beneath it off the bottom of the window. Measured in the label's
+        # font (Helvetica 9), the original wording -- "Dashboard is starting.
+        # Its first scan can take a moment." -- is 302px and did exactly that.
+        # This wording is 238px. Pinned because nothing on this branch
+        # measures it; the pixel-accurate guard arrives with set_subtitle.
+        source = inspect.getsource(native_overlay)
+        self.assertIn("Dashboard starting. First scan can be slow.", source)
+        self.assertNotIn("Dashboard is starting. Its first scan can take a moment.", source)
+
     def test_an_unanswered_probe_is_not_yet_a_claim_that_the_ui_is_down(self) -> None:
         # A probe that did not answer says "not known yet", not "it is down":
         # the dashboard's first scan over a large local history takes tens of
