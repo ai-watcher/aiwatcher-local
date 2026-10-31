@@ -8,6 +8,7 @@ without claiming to inject UI into those apps.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 import json
 import os
@@ -21,6 +22,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+
+from . import brand_mark
 
 
 @dataclass(frozen=True)
@@ -3251,6 +3254,53 @@ def _draw_brand_mark(canvas: object, height: float, blue: str, ink: str) -> None
     ring(129.0 * s, 117.0 * s, 300.0 * s, 232.0 * s, ink)
 
 
+# PhotoImage pixels are owned by Tk, and a canvas only holds a reference by
+# name: let the Python object fall out of scope and the image blanks. So the
+# cache keeps them for the life of the process, keyed by everything that
+# changes the pixels. There are four ring colours and three sizes in practice.
+_MARK_PHOTOS: dict[tuple[float, str, str], object] = {}
+_MARK_PHOTOS_UNAVAILABLE = False
+
+
+def _brand_mark_photo(tk_module: object, height: float, blue: str, ink: str) -> object | None:
+    """Return a cached anti-aliased PhotoImage of the mark, or None.
+
+    None means the caller should draw the vector fallback instead: Tk before
+    8.6 cannot read PNG at all, and a bar that renders its mark the old way is
+    better than one that fails to start.
+    """
+    global _MARK_PHOTOS_UNAVAILABLE
+    if _MARK_PHOTOS_UNAVAILABLE:
+        return None
+    key = (round(float(height), 2), blue, ink)
+    photo = _MARK_PHOTOS.get(key)
+    if photo is not None:
+        return photo
+    try:
+        png = brand_mark.render_mark_png(height, blue, ink)
+    except (ValueError, OverflowError):
+        return None  # a colour this build does not understand; not fatal
+    try:
+        photo = tk_module.PhotoImage(data=base64.b64encode(png).decode("ascii"))
+    except Exception:  # pragma: no cover - depends on the host Tk build
+        _MARK_PHOTOS_UNAVAILABLE = True
+        return None
+    _MARK_PHOTOS[key] = photo
+    return photo
+
+
+def _paint_brand_mark(tk_module: object, canvas: object, height: float, blue: str, ink: str) -> None:
+    """Draw the mark at the canvas origin, anti-aliased where Tk can manage it."""
+    photo = _brand_mark_photo(tk_module, height, blue, ink)
+    if photo is None:
+        _draw_brand_mark(canvas, height=height, blue=blue, ink=ink)
+        return
+    try:
+        canvas.create_image(0, 0, image=photo, anchor="nw")
+    except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+        _draw_brand_mark(canvas, height=height, blue=blue, ink=ink)
+
+
 def run_native_presence(
     url: str,
     *,
@@ -3440,7 +3490,7 @@ def run_native_presence(
     # expanded bar is always the dark ground, so the ink ring takes the
     # dark-theme ink.
     mark_canvas = tk.Canvas(frame, width=32, height=26, bg="#090d14", highlightthickness=0, bd=0)
-    _draw_brand_mark(mark_canvas, height=26.0, blue="#0052F5", ink="#DCE6F6")
+    _paint_brand_mark(tk, mark_canvas, 26.0, "#0052F5", "#DCE6F6")
     mark_canvas.pack(side="left", padx=(0, 8), before=left)
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
@@ -4418,15 +4468,11 @@ def run_native_presence(
             else ("#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5")
         )
         mark_canvas.delete("all")
-        _draw_brand_mark(mark_canvas, height=26.0, blue=ring_colour, ink="#DCE6F6")
+        _paint_brand_mark(tk, mark_canvas, 26.0, ring_colour, "#DCE6F6")
         collapsed_canvas.configure(bg="#ffffff")
         collapsed_canvas.delete("all")
         orbit_item["id"] = None
-        _draw_brand_mark(
-            collapsed_canvas, height=18.0,
-            blue=ring_colour,
-            ink="#141314",
-        )
+        _paint_brand_mark(tk, collapsed_canvas, 18.0, ring_colour, "#141314")
         collapsed_canvas.move("all", 7.0, 13.0)
         # Companion-only expression inside the front ring. The dashboard and
         # expanded bar keep the official mark untouched; this small viewport
@@ -5039,10 +5085,10 @@ def run_native_overlay(
     header = ttk.Frame(frame, style="AIW.TFrame")
     header.pack(fill="x")
     mark_canvas = tk.Canvas(header, width=38, height=30, bg=shell, highlightthickness=0, bd=0)
-    _draw_brand_mark(
-        mark_canvas, height=30.0,
-        blue="#ed6a24" if (severity or "").lower() == "critical" else "#0052F5",
-        ink=ink,
+    _paint_brand_mark(
+        tk, mark_canvas, 30.0,
+        "#ed6a24" if (severity or "").lower() == "critical" else "#0052F5",
+        ink,
     )
     mark_canvas.pack(side="left", padx=(0, 10))
     ttk.Label(header, text=title or "Start a fresh AI session", style="AIWTitle.TLabel", wraplength=560).pack(
