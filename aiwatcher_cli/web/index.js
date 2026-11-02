@@ -3758,14 +3758,66 @@ function renderCoverage(rows) {
   </p>`;
 }
 
-// The settings mount is rebuilt on every data refresh; a new <details> starts
-// closed, so carry the user's open/closed choice across the rebuild.
+// Panels are rebuilt wholesale on every data refresh. An open <details> is not
+// closed by that -- it is thrown away and replaced by fresh markup that starts
+// shut -- so a block opened for reading survives about REFRESH_VISIBLE_MS and
+// then shuts itself. Identify each block well enough to carry the user's
+// open/closed choice across the rebuild.
+const openDetailsByPanel = new Map();
+function detailsStateEntries(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return [];
+  const seen = new Map();
+  const entries = [];
+  for (const node of root.querySelectorAll('details')) {
+    const attr = name => (typeof node.getAttribute === 'function' ? node.getAttribute(name) : null);
+    let base = attr('data-details-key') || '';
+    if (!base) {
+      const summary = typeof node.querySelector === 'function' ? node.querySelector('summary') : null;
+      // Digits collapse so a count that ticks -- "Inspect 2 exact sessions" --
+      // still matches itself once the number moves.
+      const label = String((summary && summary.textContent) || '')
+        .replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 80);
+      // Five cards can each carry a "More evidence" block; what separates them
+      // is the card they sit in, not their own markup.
+      let scope = '';
+      for (let el = node.parentElement; el && el !== root; el = el.parentElement) {
+        const own = typeof el.getAttribute === 'function'
+          ? (el.getAttribute('data-optimize-id') || el.getAttribute('data-candidate') || el.getAttribute('data-session'))
+          : null;
+        const id = own || el.id;
+        if (id) { scope = String(id); break; }
+      }
+      base = `${scope}|${label}`;
+    }
+    // Blocks that still collide fall back to their order, which is the most
+    // that can honestly be known about them.
+    const seq = (seen.get(base) || 0) + 1;
+    seen.set(base, seq);
+    entries.push({ node, key: `${base}#${seq}` });
+  }
+  return entries;
+}
+function setPanelHtml(node, html) {
+  if (!node) return;
+  const panelKey = node.id || node;
+  const before = detailsStateEntries(node);
+  // A panel mid-rebuild renders a status line with no blocks in it at all.
+  // Reading "nothing is open" off that would throw the choice away a second
+  // before the evidence returns, so only a render that actually has blocks
+  // updates what is remembered.
+  if (before.length) {
+    const open = new Set();
+    for (const entry of before) if (entry.node.open) open.add(entry.key);
+    if (open.size) openDetailsByPanel.set(panelKey, open);
+    else openDetailsByPanel.delete(panelKey);
+  }
+  node.innerHTML = html;
+  const remembered = openDetailsByPanel.get(panelKey);
+  if (!remembered || !remembered.size) return;
+  for (const entry of detailsStateEntries(node)) if (remembered.has(entry.key)) entry.node.open = true;
+}
 function mountAiAssistSettings(node, status) {
-  const advanced = node.querySelector('details.ai-assist-advanced');
-  const wasOpen = !!(advanced && advanced.open);
-  node.innerHTML = renderAiAssistSettings(status);
-  const rebuilt = node.querySelector('details.ai-assist-advanced');
-  if (rebuilt && wasOpen) rebuilt.open = true;
+  setPanelHtml(node, renderAiAssistSettings(status));
 }
 function renderAiAssistSettings(status) {
   const s = status || {};
@@ -7191,7 +7243,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('sessionContextHealth').innerHTML =
     renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
-  document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null, data.cache || {});
+  setPanelHtml(document.getElementById('optimizeWorkspaceBody'), renderOptimizeWorkspace(data.optimize || null, data.cache || {}));
   // The summary has to carry the count, or a collapsed card hides the fact that
   // there is anything in it at all.
   const optimizeSummary = document.getElementById('optimizeWorkspaceSummary');
@@ -7225,7 +7277,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
-  document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
+  setPanelHtml(document.getElementById('coverageRowsSettings'), renderCoverage(coverage));
   const aiAssistNode = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
   if (aiAssistNode && !(aiAssistFormDirty && activeSettingsPanel === 'ai')) {
     mountAiAssistSettings(aiAssistNode, data.ai_assist || {});
@@ -7233,11 +7285,11 @@ async function loadOnce(resetDetail, forceRefresh) {
   }
   const companionNode = document.getElementById('companionSettingsMount');
   if (companionNode) {
-    companionNode.innerHTML = renderCompanionSettings(data.companion_preferences || {});
+    setPanelHtml(companionNode, renderCompanionSettings(data.companion_preferences || {}));
   }
   const deliveryTrackingNode = document.getElementById('deliveryTrackingMount');
   if (deliveryTrackingNode) {
-    deliveryTrackingNode.innerHTML = renderDeliveryTracking(data.delivery_tracking || {});
+    setPanelHtml(deliveryTrackingNode, renderDeliveryTracking(data.delivery_tracking || {}));
   }
   updateAskAiAssistControl(data.ai_assist || {});
   const settingsVisible = !document.getElementById('view-setup').hidden;
@@ -7288,8 +7340,8 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('analystOverhead').textContent = overhead
     ? `${overhead.label} — ${overhead.detail}`
     : '';
-  document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
-  document.getElementById('improveResults').innerHTML = renderImproveResults(data.improve_results);
+  setPanelHtml(document.getElementById('insightFeed'), renderInsightFeed(data.insights));
+  setPanelHtml(document.getElementById('improveResults'), renderImproveResults(data.improve_results));
   // Same two-step as the runway charts: markup first, SVG appended after, and
   // nodes collected by attribute rather than by a selector built from data.
   const feedChartNodes = {};

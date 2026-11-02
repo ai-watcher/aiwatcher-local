@@ -3145,12 +3145,33 @@ class AiAssistDrawerTest(unittest.TestCase):
 
     def test_advanced_ai_assist_options_stay_open_across_data_refreshes(self):
         # The refresh rebuilt the panel and every rebuilt <details> started closed.
+        # This was once fixed here alone; it now goes through the shared helper
+        # that carries the open choice across every rebuilt panel.
         self.assertNotIn("innerHTML = renderAiAssistSettings(data.ai_assist", self.js)
         self.assertIn("mountAiAssistSettings(aiAssistNode, data.ai_assist || {});", self.js)
         start = self.js.index("function mountAiAssistSettings(")
         helper = self.js[start:self.js.index("\nfunction ", start + 1)]
-        self.assertIn("wasOpen", helper)
-        self.assertIn("rebuilt.open = true", helper)
+        self.assertIn("setPanelHtml(node, renderAiAssistSettings(status))", helper)
+        start = self.js.index("function setPanelHtml(")
+        shared = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("entry.node.open = true", shared)
+
+    def test_panels_holding_details_are_rebuilt_through_the_state_helper(self):
+        # A refresh replaces these panels outright, so anything the reader had
+        # open had to be opened again every few seconds. Each mount that can
+        # contain a <details> goes through setPanelHtml, which carries the
+        # choice across the rebuild.
+        for mount in (
+            "optimizeWorkspaceBody",
+            "coverageRowsSettings",
+            "insightFeed",
+            "improveResults",
+        ):
+            with self.subTest(mount=mount):
+                self.assertIn(f"setPanelHtml(document.getElementById('{mount}')", self.js)
+                self.assertNotIn(f"document.getElementById('{mount}').innerHTML =", self.js)
+        self.assertIn("setPanelHtml(deliveryTrackingNode,", self.js)
+        self.assertIn("setPanelHtml(companionNode,", self.js)
 
     def test_drawer_copy_does_not_promise_confirmation_when_auto_compose_runs(self):
         start = self.js.index("function renderHandoff(")
