@@ -102,7 +102,10 @@ def _companion_expression(
     reduce_motion: bool,
 ) -> tuple[int, int, str]:
     """Return the Tk Companion's gaze and eye colour for observable state."""
-    if state == "offline":
+    # "connecting" shares the grey, downcast face. Before the first good read
+    # there is nothing to report, and grey is the absence of a claim -- the
+    # resting face quietly asserts that all is well, which is not yet known.
+    if state in {"offline", "connecting"}:
         return 0, 1, "#808f9f"
     if needs_attention:
         return 1, -1, "#ffd6ad"
@@ -700,6 +703,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var suppressPassiveRefreshUntil: Date? = nil
     var pendingClipboardOverrideSessionID = ""
     var didExpandOffline = false
+    // See refreshState: a failed probe says "no answer yet", not "the
+    // dashboard is down". Stopgap numbers, mirroring the Tk presence bar --
+    // nothing local reports how long the dashboard's first scan will take.
+    static let offlineAfterFailures = 3
+    static let offlineAfterSeconds: Double = 45.0
+    var probeFailures = 0
+    var lastProbeOK: Date? = nil
+    let probeSince = Date()
     var waitingRowTexts: [String] = []
     var waitingURLs: [String] = []
     var waitingSessionIDs: [String] = []
@@ -955,6 +966,23 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         } else {
             self.updateAppearance()
         }
+    }
+
+    func applyConnectingState() {
+        // Unreachable, but not for long enough to claim the dashboard is down.
+        // After a good read the last rows stay put and only the window title
+        // changes; a cold start has nothing to show and says so rather than
+        // offering Restart for a dashboard that is still starting.
+        if lastProbeOK == nil {
+            self.stateName = "connecting"
+            self.titleLabel.stringValue = "Connecting\u{2026}"
+            self.subtitleLabel.stringValue = "Dashboard starting. First scan can be slow."
+        }
+        self.updateAppearance()
+    }
+
+    var isUnreachableState: Bool {
+        return stateName == "offline" || stateName == "connecting"
     }
 
     var expandedHeight: CGFloat {
@@ -2181,7 +2209,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let needsAttention = needsAttentionState()
         var gaze = CGPoint.zero
-        if stateName == "offline" {
+        if isUnreachableState {
             gaze = CGPoint(x: 0, y: -0.9)
         } else if needsAttention {
             // The badge and action surface live above and to the right of the
@@ -2203,7 +2231,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
 
         let eyeColor: NSColor
-        if stateName == "offline" {
+        if isUnreachableState {
             eyeColor = NSColor(calibratedRed: 0.50, green: 0.56, blue: 0.64, alpha: 1)
         } else if needsAttention {
             eyeColor = NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.68, alpha: 1)
@@ -2217,14 +2245,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
         CATransaction.begin()
         CATransaction.setAnimationDuration((reduceMotion || motionMode == "quiet") ? 0 : 0.22)
-        collapsedFacePanel.opacity = stateName == "offline" ? 0.62 : 1.0
+        collapsedFacePanel.opacity = isUnreachableState ? 0.62 : 1.0
         collapsedLeftEye.backgroundColor = eyeColor.cgColor
         collapsedRightEye.backgroundColor = eyeColor.cgColor
         collapsedLeftEye.frame = CGRect(x: 2.5 + gaze.x, y: 4.0 + gaze.y, width: 2.8, height: 1.45)
         collapsedRightEye.frame = CGRect(x: 9.0 + gaze.x, y: 4.0 + gaze.y, width: 2.8, height: 1.45)
         CATransaction.commit()
 
-        if blink && !reduceMotion && motionMode != "quiet" && workingCount == 0 && !needsAttention && stateName != "offline" {
+        if blink && !reduceMotion && motionMode != "quiet" && workingCount == 0 && !needsAttention && !isUnreachableState {
             let close = CAKeyframeAnimation(keyPath: "transform.scale.y")
             close.values = [1.0, 0.12, 1.0]
             close.keyTimes = [0.0, 0.45, 1.0]
@@ -2364,12 +2392,22 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 DispatchQueue.main.async {
-                    self.applyOfflineState()
+                    self.probeFailures += 1
+                    let unreachableSince = self.lastProbeOK ?? self.probeSince
+                    let budgetSpent = self.probeFailures >= Self.offlineAfterFailures
+                    let outlivedScan = Date().timeIntervalSince(unreachableSince) >= Self.offlineAfterSeconds
+                    if budgetSpent && outlivedScan {
+                        self.applyOfflineState()
+                    } else {
+                        self.applyConnectingState()
+                    }
                     self.scheduleRefresh(after: 3.0)
                 }
                 return
             }
             DispatchQueue.main.async {
+                self.probeFailures = 0
+                self.lastProbeOK = Date()
                 self.applyState(json)
                 self.scheduleAutoCollapse(after: self.hasPrimaryAction() ? 10.0 : 4.0)
                 self.scheduleRefresh(after: self.hasPrimaryAction() ? 2.0 : 3.0)
@@ -4540,14 +4578,54 @@ def run_native_presence(
         except tk.TclError:
             pass
 
+    # Reaching the dashboard is a measurement, and a failed probe only says
+    # "no answer inside the budget". The 0.8s timeout below runs on the Tk main
+    # thread, so it is a stall cap rather than a verdict: the dashboard's first
+    # scan over a large local history takes tens of seconds, and every probe
+    # during it times out. Painting "UI offline" there pointed the user at
+    # Restart, which starts that scan again, so the false alarm renewed itself.
+    # Unreachable therefore carries its own state until it has outlived that
+    # scan window, and only then becomes a claim about the dashboard.
+    #
+    # Both numbers are stopgaps: nothing local reports how long a startup scan
+    # will take, so there is nothing to derive them from. 45s covers the "tens
+    # of seconds" a first scan is documented to take, and three failures keep a
+    # single slow response from changing the surface at all.
+    offline_after_failures = 3
+    offline_after_seconds = 45.0
+    probe = {"failures": 0.0, "last_ok": 0.0, "since": time.monotonic()}
+
+    def apply_connecting_state() -> None:
+        # Unreachable, but not for long enough to claim the dashboard is down,
+        # so this reports which of the two it cannot tell instead of offering
+        # Restart for a dashboard that is still starting. After a good read the
+        # last rows stay put and only the window title changes: a three-second
+        # gap should not rewrite the surface or pop the bubble open.
+        root.title("AIWatcher Companion: connecting")
+        if float(probe["last_ok"]) <= 0.0:
+            state_var.set("connecting")
+            title_var.set("Connecting\u2026")
+            subtitle_var.set("Dashboard starting. First scan can be slow.")
+        update_attention_style()
+
     def refresh_state() -> None:
         try:
             request_url = f"{url.rstrip('/')}/api/companion-state"
             with urllib.request.urlopen(request_url, timeout=0.8) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            probe["failures"] = 0.0
+            probe["last_ok"] = time.monotonic()
             apply_state(payload)
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
-            apply_offline_state()
+            probe["failures"] = float(probe["failures"]) + 1.0
+            unreachable_since = float(probe["last_ok"]) or float(probe["since"])
+            if (
+                float(probe["failures"]) >= offline_after_failures
+                and time.monotonic() - unreachable_since >= offline_after_seconds
+            ):
+                apply_offline_state()
+            else:
+                apply_connecting_state()
         finally:
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
