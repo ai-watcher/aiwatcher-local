@@ -9131,7 +9131,11 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
         **common,
         "label": "Compact now",
         "subtitle": _fit_name(name, figures) if name else f"{when} · {figures} before checkpoint",
-        "primary_label": "Review",
+        # Not "Review" either. This button does not compact anything -- the
+        # detail below says to compact in the owning app -- it opens what
+        # compaction would keep and drop. "Preview" says that, and leaves
+        # "Review" to mean one thing on this bar.
+        "primary_label": "Preview",
         "primary_action": "open_url",
         "compact_command": str(lead.get("command") or ""),
         "skip_state": "compact_recommended",
