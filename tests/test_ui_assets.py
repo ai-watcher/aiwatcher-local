@@ -1689,6 +1689,14 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("motion_mode:", self.js)
         self.assertIn(".companion-motion-options", self.css)
 
+    def test_intent_to_evidence_review_is_shared_by_sessions_and_deliveries(self):
+        self.assertIn("function renderWorkUnderstanding", self.js)
+        self.assertIn("Intent to delivery evidence", self.js)
+        self.assertIn("What this run appears to contain", self.js)
+        self.assertIn("renderWorkUnderstanding(review.work_understanding, true)", self.js)
+        self.assertIn("renderWorkUnderstanding(s.work_understanding)", self.js)
+        self.assertIn(".work-understanding-grid", self.css)
+
     def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
         do, and the half that admits limits -- Cursor is detected and not

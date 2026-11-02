@@ -5153,6 +5153,48 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["session_id"], "cached-fast")
         self.assertIn("runtime_attachment", capsule)
 
+    def test_session_detail_connects_latest_turn_to_observed_code_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="understanding-1", tool="claude-code", project_path="/repo/app",
+            started_at=now - timedelta(minutes=20), updated_at=now - timedelta(minutes=2),
+        )
+        evidence = SimpleNamespace(to_json=lambda: {
+            "commits": [{"sha": "abc1234", "subject": "Add the delivery card"}],
+            "files_touched": ["aiwatcher_cli/ui.py", "tests/test_ui.py"],
+            "changed_files": [],
+            "tests": [{"status": "passed", "authoritative": True}],
+            "commit_attribution": "session_bound",
+        })
+        segments = [
+            {"turn": 1, "prompt": "Add a delivery card.", "requests": 1, "tool_calls": 2},
+            {"turn": 2, "prompt": "Make the evidence explicit.", "requests": 2, "tool_calls": 3,
+             "tokens": 4000, "took_seconds": 75},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+                patch.object(ui, "_cached_events_for_session", return_value=[]),
+                patch.object(ui, "segment_session_by_prompt", return_value=segments),
+                patch.object(ui, "build_prompt_analysis", return_value=None),
+                patch.object(ui, "build_prompt_receipts", return_value=None),
+                patch.object(ui, "build_outcome_evidence", return_value=evidence),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+            ):
+                detail = ui.build_session_detail("understanding-1", days=7)
+
+        review = detail["work_understanding"]
+        self.assertEqual(review["opening_objective"], "Add a delivery card.")
+        self.assertEqual(review["latest_request"], "Make the evidence explicit.")
+        self.assertEqual(review["turn_count"], 2)
+        self.assertEqual(review["commit_count"], 1)
+        self.assertEqual(review["passed_check_count"], 1)
+        self.assertEqual(review["confidence"], "medium")
+
     def test_basic_handoff_detail_is_bounded_provisional_preview_without_event_scan(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
