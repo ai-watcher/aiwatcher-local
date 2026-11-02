@@ -615,7 +615,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('json["finished_sessions"]', mac)
         self.assertIn("waitingCount <= 0 && reviewCount <= 0", mac)
         self.assertNotIn("finishedCount > 0 ? String(finishedCount)", mac)
-        self.assertIn("ready to check", mac)
+        self.assertIn("recently quiet", mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("session_finished", tk_source.split("def has_primary_action()")[1][:600])

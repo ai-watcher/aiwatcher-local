@@ -126,6 +126,12 @@ explanation rather than a 0% meter. Detailed prompt/tool/system composition
 is not available from these local measurements. **Open session in UI** takes
 you to that exact session for the fuller review.
 
+Companion context warnings require a recent session and a specific context-limit
+condition. Historical usage stays available for review. When you open a session,
+the first card rechecks its relevance, explains what an action will produce, and
+lets you keep working when no immediate context action is established. Usage
+and prompt details stay expandable. See the [review contract](docs/COMPANION_REVIEWS.md).
+
 ## Already Installed
 
 If `pipx install` says AIWatcher is already installed, that is expected. Update

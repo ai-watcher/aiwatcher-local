@@ -103,6 +103,7 @@ class OutcomeEvidence:
             "commit_attribution": self.commit_attribution,
             "command_evidence_coverage": self.command_evidence_coverage,
             "changed_files": self.changed_files,
+            "changed_files_scope": "workspace_snapshot",
             "files_touched": self.files_touched,
             "tests": self.tests,
             "inferred_outcome": self.inferred_outcome,
@@ -1072,11 +1073,14 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
         evidence.confidence = "low"
         evidence.reasons.append("A nearby commit was detected; mark the outcome to confirm usefulness.")
     elif evidence.changed_files:
-        evidence.inferred_outcome = "needs_review"
         evidence.confidence = "low"
-        evidence.reasons.append("Uncommitted changed files were detected after this session.")
+        evidence.reasons.append("Uncommitted files exist in the current workspace; they are not attributed to this session.")
     else:
         evidence.reasons.append("No nearby commit, changed file, or test artifact was detected.")
+
+    if session.internal_review:
+        evidence.inferred_outcome = None
+        evidence.reasons.append("Host metadata identifies an internal approval review; no developer outcome is inferred.")
 
     if _earliest_survival_status(survival) == "churned" and evidence.inferred_outcome == "useful":
         evidence.inferred_outcome = "churned"

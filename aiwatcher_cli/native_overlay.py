@@ -831,9 +831,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         if stateName == "session_finished" && visibleWaitingRows > 0 {
             if finishedCount > visibleWaitingRows {
-                return "\(visibleWaitingRows) of \(finishedCount) ready to check"
+                return "\(visibleWaitingRows) of \(finishedCount) recently quiet"
             }
-            return "\(finishedCount) ready to check"
+            return "\(finishedCount) recently quiet"
         }
         return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(40))
     }
@@ -878,7 +878,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let scope = row["scope_label"] as? String ?? ""
         let prefix: String
         if ["finished", "recently_observed"].contains(kind) {
-            prefix = "Ready to check"
+            prefix = "Recently quiet"
         } else if kind == "session_waiting" {
             prefix = "Waiting"
         } else if kind == "context_review" {
@@ -904,6 +904,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
         if kind == "compact" { return "Review" }
+        if kind == "recently_observed" { return "Inspect" }
         if kind.hasPrefix("prompt_") { return "Open" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
@@ -3468,7 +3469,7 @@ def run_native_presence(
         activity = str(row.get("activity_label") or "")
         scope = str(row.get("scope_label") or "")
         if kind in {"finished", "recently_observed"}:
-            parts = ["Ready to check", project, tool, waited]
+            parts = ["Recently quiet", project, tool, waited]
         elif kind == "session_waiting":
             parts = ["Waiting", project, tool, waited]
         elif kind == "context_review":
@@ -3490,8 +3491,8 @@ def run_native_presence(
             count = int(finished_count_var.get() or 0)
             shown = visible_waiting_rows()
             if shown and count > shown:
-                return f"{shown} of {count} ready to check"
-            return f"{count} ready to check"
+                return f"{shown} of {count} recently quiet"
+            return f"{count} recently quiet"
         return title_var.get()[:34]
 
     def review_subtitle() -> str:
@@ -3518,6 +3519,8 @@ def run_native_presence(
         kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
         if kind == "compact":
             return "Review"
+        if kind == "recently_observed":
+            return "Inspect"
         if kind.startswith("prompt_"):
             return "Open"
         can_return = index < len(waiting_row_return) and waiting_row_return[index]

@@ -78,7 +78,7 @@ test('a mismatched deep-link hash cannot override the requested view', () => {
   assert.equal(shown, null);
 });
 
-test('session hero and project row visibly distinguish cumulative token scope', () => {
+test('session usage evidence and project row distinguish cumulative token scope', () => {
   const ctx = vm.createContext({
     esc: value => String(value),
     renderIdentityStrip: () => '',
@@ -86,13 +86,13 @@ test('session hero and project row visibly distinguish cumulative token scope', 
     sessionStatePill: () => '',
     outcomeEvidencePill: () => '',
   });
-  vm.runInContext(extract('renderSessionHero'), ctx);
+  vm.runInContext(extract('renderSessionUsageTotals'), ctx);
   vm.runInContext(extract('renderProjectSessionRow'), ctx);
   const session = {
     session_id: 'codex-thread', tool: 'codex-cli', model: 'codex',
     tokens_label: '403.8M', tokens_scope_label: 'Cumulative thread total',
   };
-  assert.match(ctx.renderSessionHero(session), /Cumulative thread total/);
+  assert.match(ctx.renderSessionUsageTotals(session), /Cumulative thread total/);
   assert.match(ctx.renderProjectSessionRow(session), /Cumulative thread total/);
 });
 

@@ -472,7 +472,7 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         self.assertEqual(set(sections), {"needs_you", "working", "recently_observed"})
         self.assertIn("1 needs you", state["activity_line"])
         self.assertIn("1 working", state["activity_line"])
-        self.assertIn("1 ready to check", state["activity_line"])
+        self.assertIn("1 recently quiet", state["activity_line"])
         self.assertNotIn("/Users/example/private", str(sections))
         for section in sections.values():
             for row in section["rows"]:
@@ -671,6 +671,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         health = []
         for index in range(5):
             health.append({
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": f"s{index}",
                 "project_full": f"/repo/project-{index}",
                 "project": f"project-{index}",
@@ -690,7 +691,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(state["badge"]["tone"], "info")
         self.assertEqual(len(state["waiting_sessions"]), 5)
         self.assertEqual(state["waiting_sessions"][0]["kind"], "context_review")
-        self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s0")
+        self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s0&review=context")
         self.assertEqual(state["waiting_sessions"][0]["project"], "project-0")
         self.assertEqual(state["waiting_sessions"][0]["severity_label"], "critical")
         self.assertEqual(state["waiting_sessions"][0]["impact_label"], "1.0k")
@@ -702,6 +703,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
 
     def test_one_background_context_candidate_is_a_saved_review_not_generic_watching(self):
         bubble = {
+            "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
             "session_id": "s-background",
             "project_full": "/repo/background-project",
             "project": "background-project",
@@ -722,11 +724,12 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(state["badge"]["tone"], "info")
         self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
         self.assertEqual(state["waiting_sessions"][0]["scope_label"], "Review when ready")
-        self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s-background")
+        self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s-background&review=context")
 
     def test_foreground_tool_never_proves_current_session_across_tools(self):
         health = [
             {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "s-current",
                 "project_full": "/repo/current-project",
                 "tool": "codex-cli",
@@ -735,6 +738,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
                 "estimated_replayed_context_tokens": 2400,
             },
             {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "s-later",
                 "project_full": "/repo/later-project",
                 "tool": "claude-code",
@@ -760,10 +764,11 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
                 self.assertLessEqual(len(state["skip_label"]), 10)
                 self.assertEqual(state["skip_projects"], ["/repo/current-project", "/repo/later-project"])
                 self.assertTrue(all(row["scope"] == "general" for row in state["waiting_sessions"]))
-                self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s-current")
+                self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s-current&review=context")
 
     def test_context_review_rows_hide_unknown_zero_impact(self):
         rows = ui._context_review_companion_rows([{
+            "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
             "session_id": "s0",
             "project_full": "/repo/project-0",
             "project": "project-0",
@@ -780,6 +785,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
 
     def test_context_review_rows_carry_activity_without_zero_noise(self):
         rows = ui._context_review_companion_rows([{
+            "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
             "session_id": "s0",
             "project_full": "/repo/project-0",
             "project": "project-0",
@@ -798,6 +804,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
     def test_context_review_can_be_disabled_for_companion(self):
         health = [
             {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "s0",
                 "project_full": "/repo/project-0",
                 "project": "project-0",
@@ -807,6 +814,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
                 "estimated_replayed_context_tokens": 1000,
             },
             {
+                "intervention": {"eligible": True, "observed_at": datetime.now(timezone.utc).isoformat()},
                 "session_id": "s1",
                 "project_full": "/repo/project-1",
                 "project": "project-1",
@@ -950,8 +958,8 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         )
 
         self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "2 ready to check")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["label"], "2 recently quiet")
+        self.assertEqual(state["primary_label"], "Inspect")
         self.assertEqual(state["primary_url"], "/?view=sessions")
         self.assertEqual(len(state["waiting_sessions"]), 2)
         self.assertEqual([row["kind"] for row in state["waiting_sessions"]], ["recently_observed", "recently_observed"])
@@ -968,7 +976,7 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         )
 
         self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "Ready to check")
+        self.assertEqual(state["label"], "Recently quiet")
         self.assertIn("done-1", state["primary_url"])
         self.assertEqual(state["skip_state"], "session_finished")
 
