@@ -819,7 +819,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("text=\"Plan\"", source)
         self.assertIn("text=\"Scan\"", source)
         self.assertIn("text=\"UI\"", source)
-        self.assertIn("_draw_brand_mark", source)
+        # The mark goes through the painting helper now, which prefers an
+        # anti-aliased image and keeps _draw_brand_mark as the fallback for a
+        # Tk that cannot read PNG. tests/test_brand_mark.py covers both paths.
+        self.assertIn("_paint_brand_mark", source)
         self.assertIn("#0052F5", source)
         self.assertIn("collapsed_button_motion", source)
         self.assertIn("collapsed_button_release", source)
