@@ -8,6 +8,7 @@ without claiming to inject UI into those apps.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 import json
 import os
@@ -21,6 +22,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+
+from . import brand_mark
 
 
 @dataclass(frozen=True)
@@ -2769,6 +2772,35 @@ def _anchored_origin(
     return int(new_x), int(new_y)
 
 
+def _elide_to_width(text: str, measure, limit: int) -> str:
+    """Trim `text` to `limit` pixels, ending in an ellipsis when it had to cut.
+
+    The row label is packed after the row's button and so can only use the
+    width the button left behind. Without this the text ran on under the
+    window edge and the reader silently lost whichever field happened to sit
+    last -- on a context-health row the replay figure, the one field that says
+    whether the row is worth opening at all. `measure` is the label font's own
+    measure(), so the cut lands on the pixel rather than on a guessed character
+    count; the macOS bar gets the same effect free from .byTruncatingTail.
+    """
+    if limit <= 0 or not text:
+        return ""
+    if measure(text) <= limit:
+        return text
+    ellipsis = "…"
+    budget = limit - measure(ellipsis)
+    if budget <= 0:
+        return ellipsis
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if measure(text[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low].rstrip(" ·") + ellipsis
+
+
 def _set_window_position(root: object, width: int, height: int) -> None:
     screen_width = int(root.winfo_screenwidth())  # type: ignore[attr-defined]
     screen_height = int(root.winfo_screenheight())  # type: ignore[attr-defined]
@@ -3223,13 +3255,10 @@ def _draw_brand_mark(canvas: object, height: float, blue: str, ink: str) -> None
     the ink ring (300x232 at offset 129,117) drawn in front. The rings' heights
     differ on purpose -- equalising them breaks the fit to the original artwork.
     """
-    s = height / 349.0
+    s = height / brand_mark.VIEW_H
     stroke = max(2.0, 40.0 * s)
 
-    def ring(x: float, y: float, w: float, h: float, colour: str) -> None:
-        r = 85.0 * s - stroke / 2.0
-        x0, y0 = x + stroke / 2.0, y + stroke / 2.0
-        x1, y1 = x + w - stroke / 2.0, y + h - stroke / 2.0
+    def ring(x0: float, y0: float, x1: float, y1: float, r: float, colour: str) -> None:
         for ax, ay, bx, by in (
             (x0 + r, y0, x1 - r, y0),
             (x0 + r, y1, x1 - r, y1),
@@ -3248,8 +3277,150 @@ def _draw_brand_mark(canvas: object, height: float, blue: str, ink: str) -> None
                 start=start, extent=90.0, style="arc", outline=colour, width=stroke,
             )
 
-    ring(0.0, 0.0, 300.0 * s, 260.0 * s, blue)
-    ring(129.0 * s, 117.0 * s, 300.0 * s, 232.0 * s, ink)
+    # brand_mark.RINGS states the centerline, which is what `ring` draws on.
+    for (x, y, w, h, radius, _stroke), colour in zip(brand_mark.RINGS, (blue, ink)):
+        ring(x * s, y * s, (x + w) * s, (y + h) * s, radius * s, colour)
+
+
+# PhotoImage pixels are owned by Tk, and a canvas only holds a reference by
+# name: let the Python object fall out of scope and the image blanks. So the
+# cache keeps them for the life of the process, keyed by everything that
+# changes the pixels. There are four ring colours and three sizes in practice.
+_MARK_PHOTOS: dict[tuple[float, str, str], object] = {}
+_MARK_PHOTOS_UNAVAILABLE = False
+
+
+def _cached_photo(tk_module: object, key: tuple, render) -> object | None:
+    """Return a cached anti-aliased PhotoImage for `key`, or None.
+
+    None means the caller should draw its Tk fallback instead: Tk before 8.6
+    cannot read PNG at all, and a bar that renders the old way is better than
+    one that fails to start.
+    """
+    global _MARK_PHOTOS_UNAVAILABLE
+    if _MARK_PHOTOS_UNAVAILABLE:
+        return None
+    photo = _MARK_PHOTOS.get(key)
+    if photo is not None:
+        return photo
+    try:
+        png = render()
+    except (ValueError, OverflowError):
+        return None  # a colour this build does not understand; not fatal
+    try:
+        photo = tk_module.PhotoImage(data=base64.b64encode(png).decode("ascii"))
+    except Exception:  # pragma: no cover - depends on the host Tk build
+        _MARK_PHOTOS_UNAVAILABLE = True
+        return None
+    _MARK_PHOTOS[key] = photo
+    return photo
+
+
+def _brand_mark_photo(tk_module: object, height: float, blue: str, ink: str) -> object | None:
+    return _cached_photo(
+        tk_module,
+        ("mark", round(float(height), 2), blue, ink),
+        lambda: brand_mark.render_mark_png(height, blue, ink),
+    )
+
+
+def _paint_face(
+    tk_module: object,
+    canvas: object,
+    face: object,
+    eyes: object,
+    eye_thickness: float,
+    gaze: tuple,
+    panel: str,
+    eye_colour: str,
+) -> None:
+    """Draw the Companion's face as one anti-aliased image where Tk allows it.
+
+    Panel and eyes go in together so their curves blend against each other
+    rather than against whatever Tk last drew; as separate canvas items they
+    were the last stair-stepped thing in the bubble once the mark became an
+    image.
+    """
+    gaze_x, gaze_y = gaze
+    segments = tuple(
+        (
+            round(eye.x0 - face.x0 + gaze_x, 2), round(eye.y0 - face.y0 + gaze_y, 2),
+            round(eye.x1 - face.x0 + gaze_x, 2), round(eye.y1 - face.y0 + gaze_y, 2),
+        )
+        for eye in eyes
+    )
+    photo = _cached_photo(
+        tk_module,
+        ("face", round(face.width, 2), round(face.height, 2), segments,
+         round(eye_thickness, 2), panel, eye_colour),
+        lambda: brand_mark.render_face_png(
+            face.width, face.height, segments, eye_thickness, panel, eye_colour,
+        ),
+    )
+    if photo is not None:
+        try:
+            canvas.create_image(face.x0, face.y0, image=photo, anchor="nw")
+            return
+        except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+            pass
+    radius = face.height / 2.0
+    canvas.create_oval(face.x0, face.y0, face.x0 + face.height, face.y1, fill=panel, outline="")
+    canvas.create_oval(face.x1 - face.height, face.y0, face.x1, face.y1, fill=panel, outline="")
+    canvas.create_rectangle(face.x0 + radius, face.y0, face.x1 - radius, face.y1, fill=panel, outline="")
+    for x0, y0, x1, y1 in segments:
+        canvas.create_line(
+            face.x0 + x0, face.y0 + y0, face.x0 + x1, face.y0 + y1,
+            fill=eye_colour, width=eye_thickness, capstyle=tk_module.ROUND,
+        )
+
+
+def _paint_ring(tk_module: object, canvas: object, rect: object, stroke: float, colour: str) -> None:
+    """Draw a circular outline, anti-aliased where Tk allows.
+
+    The running arc is deliberately NOT drawn through here: it moves every
+    frame, so it would need a cached image per angle, and rendering those on
+    the Tk main thread would stutter the first revolution. It stays a Tk arc.
+    """
+    photo = _cached_photo(
+        tk_module,
+        ("ring", round(rect.width, 2), round(stroke, 2), colour),
+        lambda: brand_mark.render_ring_png(rect.width, stroke, colour),
+    )
+    if photo is not None:
+        try:
+            canvas.create_image(rect.x0 - stroke / 2.0, rect.y0 - stroke / 2.0, image=photo, anchor="nw")
+            return
+        except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+            pass
+    canvas.create_oval(*rect, outline=colour, width=stroke)
+
+
+def _paint_disc(tk_module: object, canvas: object, rect: object, colour: str) -> None:
+    """Draw a filled circle -- the count badge -- anti-aliased where Tk allows."""
+    photo = _cached_photo(
+        tk_module,
+        ("disc", round(rect.height, 2), colour),
+        lambda: brand_mark.render_disc_png(rect.height, colour),
+    )
+    if photo is not None:
+        try:
+            canvas.create_image(rect.x0, rect.y0, image=photo, anchor="nw")
+            return
+        except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+            pass
+    canvas.create_oval(*rect, fill=colour, outline="")
+
+
+def _paint_brand_mark(tk_module: object, canvas: object, height: float, blue: str, ink: str) -> None:
+    """Draw the mark at the canvas origin, anti-aliased where Tk can manage it."""
+    photo = _brand_mark_photo(tk_module, height, blue, ink)
+    if photo is None:
+        _draw_brand_mark(canvas, height=height, blue=blue, ink=ink)
+        return
+    try:
+        canvas.create_image(0, 0, image=photo, anchor="nw")
+    except tk_module.TclError:  # pragma: no cover - a torn-down interpreter
+        _draw_brand_mark(canvas, height=height, blue=blue, ink=ink)
 
 
 def run_native_presence(
@@ -3269,6 +3440,7 @@ def run_native_presence(
     offline_expanded = False
     try:
         import tkinter as tk
+        from tkinter import font as tkfont
         from tkinter import ttk
     except Exception as exc:  # pragma: no cover - depends on host Python build
         print(f"AIWatcher companion presence unavailable: {exc}", file=sys.stderr)
@@ -3297,8 +3469,19 @@ def run_native_presence(
     expanded_height = 58
     # 52, not 44: the count badge needs room inside the bubble -- see the
     # matching constant in the Swift bar.
-    collapsed_width = 52
-    collapsed_height = 52
+    # The one number that sets how large the bubble is. Everything below --
+    # the canvas, the mark, the face, the eyes, the rim, the badge and the
+    # badge's type size -- is derived from it, so this is the only edit a size
+    # change needs. It was 52, which on a 2560-wide display reads as a speck.
+    collapsed_width = 72
+    collapsed_height = 72
+    # The canvas is what is left of the window after the frame's padding. It
+    # used to be typed as 36x40 beside a 52px window and happened to agree;
+    # that is the same trap as everything else in this bubble.
+    collapsed_padding = (8, 6)
+    collapsed_canvas_width = collapsed_width - 2 * collapsed_padding[0]
+    collapsed_canvas_height = collapsed_height - 2 * collapsed_padding[1]
+    bubble = brand_mark.bubble_layout(collapsed_canvas_width, collapsed_canvas_height)
     row_height = 30
     max_waiting_rows = 5
     screen_width = int(root.winfo_screenwidth())
@@ -3333,13 +3516,44 @@ def run_native_presence(
     style.configure("PresenceTitle.TLabel", background="#090d14", foreground="#f7fbff", font=("Helvetica", 11, "bold"))
     style.configure("PresenceMuted.TLabel", background="#090d14", foreground="#a8b6ca", font=("Helvetica", 9))
     style.configure("PresenceDrag.TLabel", background="#090d14", foreground="#8ea3bd", font=("Helvetica", 10, "bold"))
-    style.configure("Presence.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
-    style.configure("PresenceAttention.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
-    style.configure("PresenceMini.TButton", font=("Helvetica", 9, "bold"), padding=(4, 2))
+    # clam's stock button is a light grey chip with a bevel, which on this
+    # dark bar read as a dialog from another decade. These are flat, dark and
+    # borderless, and they carry hover and press in the fill rather than in a
+    # raised edge. Padding stays close to the old (6, 3): the bar is a fixed
+    # 640 wide and the busy layouts fill most of it, so there is no room to
+    # spend on breathing space.
+    #
+    # Only the buttons change typeface. Segoe UI is the native Windows face,
+    # but the title and subtitle widths are tuned to the current label metrics
+    # -- the subtitle's 46-character cap is measured against them -- so the
+    # labels keep theirs.
+    button_face = "Segoe UI" if sys.platform == "win32" else "Helvetica"
+    button_base: dict[str, object] = {
+        "font": (button_face, 9, "bold"),
+        "background": "#1b2636",
+        "foreground": "#dce7f7",
+        "borderwidth": 0,
+        "relief": "flat",
+        "focuscolor": "",
+    }
+    button_states: dict[str, object] = {
+        "background": [("disabled", "#141c28"), ("pressed", "#2c3c57"), ("active", "#22304a")],
+        "foreground": [("disabled", "#4a586c")],
+    }
+    style.configure("Presence.TButton", padding=(8, 4), **button_base)
+    style.map("Presence.TButton", **button_states)
+    style.configure("PresenceAttention.TButton", padding=(8, 4), **button_base)
+    style.map(
+        "PresenceAttention.TButton",
+        background=[("disabled", "#141c28"), ("pressed", "#b84816"), ("active", "#f07a3a")],
+        foreground=[("disabled", "#f3d8c8")],
+    )
+    style.configure("PresenceMini.TButton", padding=(5, 3), **button_base)
+    style.map("PresenceMini.TButton", **button_states)
 
     frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
     frame.pack(fill="both", expand=True)
-    collapsed_frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
+    collapsed_frame = ttk.Frame(root, padding=collapsed_padding, style="Presence.TFrame")
     left = ttk.Frame(frame, style="Presence.TFrame")
     left.pack(side="left", fill="both", expand=True)
     title_var = tk.StringVar(value="AIWatcher")
@@ -3390,6 +3604,12 @@ def run_native_presence(
     delivery_confirmed_var = tk.BooleanVar(value=False)
     delivery_receipt_id_var = tk.StringVar(value="")
     orbit_angle_var = tk.IntVar(value=0)
+    # The running arc's canvas id, so its angle can be nudged on its own frame
+    # clock without re-running update_attention_style's full redraw. Cleared
+    # whenever the canvas is torn down, and None whenever no arc is drawn.
+    # "running" says whether a frame timer is already in flight, so the redraw
+    # can start one without ever stacking two.
+    orbit_item: dict[str, object] = {"id": None, "running": False}
     expression_phase_var = tk.IntVar(value=0)
     focus_lock_ticks_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
@@ -3404,7 +3624,7 @@ def run_native_presence(
     # expanded bar is always the dark ground, so the ink ring takes the
     # dark-theme ink.
     mark_canvas = tk.Canvas(frame, width=32, height=26, bg="#090d14", highlightthickness=0, bd=0)
-    _draw_brand_mark(mark_canvas, height=26.0, blue="#0052F5", ink="#DCE6F6")
+    _paint_brand_mark(tk, mark_canvas, 26.0, "#0052F5", "#DCE6F6")
     mark_canvas.pack(side="left", padx=(0, 8), before=left)
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
@@ -3415,7 +3635,23 @@ def run_native_presence(
     ttk.Label(title_stack, textvariable=pressure_stats_var, style="PresenceMuted.TLabel").pack(side="left", padx=(10, 0))
     subtitle_row = ttk.Frame(left, style="Presence.TFrame")
     subtitle_row.pack(anchor="w", fill="x")
-    ttk.Label(subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(side="left")
+    # One line, by contract: expanded_height is sized for a single subtitle
+    # line, so a wrapped subtitle pushes the rows beneath it off the bottom of
+    # the window -- the Optimize state did exactly that and clipped the row
+    # below out of reach. A character cap cannot hold that contract on a
+    # proportional font: 46 characters of "5 review groups; top group: 2 older
+    # session re" measure 251px against this 250px wrap, one pixel over. So the
+    # cap is in pixels, measured in the label's own font, and set_subtitle is
+    # the only way the text is written.
+    SUBTITLE_WRAP_PX = 250
+    subtitle_font = tkfont.Font(font=style.lookup("PresenceMuted.TLabel", "font") or ("Helvetica", 9))
+
+    def set_subtitle(text: object) -> None:
+        subtitle_var.set(_elide_to_width(str(text), subtitle_font.measure, SUBTITLE_WRAP_PX))
+
+    ttk.Label(
+        subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=SUBTITLE_WRAP_PX,
+    ).pack(side="left")
     # Context-pressure meter for the resting state: the one graphic the bar
     # carries. Packed only while the payload says the number is measurable.
     meter_canvas = tk.Canvas(subtitle_row, width=70, height=9, bg="#090d14", highlightthickness=0, bd=0)
@@ -3467,13 +3703,17 @@ def run_native_presence(
         review = str(row.get("review_label") or waited)
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
-        scope = str(row.get("scope_label") or "")
         if kind in {"finished", "recently_observed"}:
             parts = ["Recently quiet", project, tool, waited]
         elif kind == "session_waiting":
             parts = ["Waiting", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context health", scope, project, tool, severity, activity, review]
+            # No "Context health" prefix and no "Review when ready" scope. The
+            # bar's own header and the FOR REVIEW section label already say
+            # both, and at this row's width the pair costs ~200px -- enough to
+            # push the replay figure off the end, which is the one field a
+            # reader decides on. The macOS bar keeps them; it is 706px wide.
+            parts = [project, tool, severity, activity, review]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -3511,7 +3751,7 @@ def run_native_presence(
                 f"{hidden} more in UI. Pick a row or open UI."
                 if hidden > 0 else "Pick a row or open UI."
             )
-        return subtitle_var.get()[:46]
+        return subtitle_var.get()
 
     def row_action_label(index: int) -> str:
         if index < len(waiting_row_action_labels) and waiting_row_action_labels[index]:
@@ -3565,7 +3805,7 @@ def run_native_presence(
         skip_session_ids_var.set("")
         state_var.set("offline")
         title_var.set("UI offline")
-        subtitle_var.set("Start dashboard + Companion")
+        set_subtitle("Start dashboard + Companion")
         primary_label_var.set("Restart")
         primary_action_var.set("restart_aiwatcher")
         primary_url_var.set(url)
@@ -3749,17 +3989,17 @@ def run_native_presence(
         # frame: 34 holds the planner's longest label (32) on the 560-wide
         # bar, where 18 cut it to "Continue only afte".
         title_var.set(str(payload.get("label") or "AIWatcher")[:34])
-        subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
+        subtitle_text = str(payload.get("subtitle") or "Watching quietly")
         if isinstance(activity_sections, list) and len(activity_sections) > 1:
-            subtitle_text = str(payload.get("activity_line") or subtitle_text)[:46]
+            subtitle_text = str(payload.get("activity_line") or subtitle_text)
         remaining = payload.get("expires_in_seconds")
         if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
-        subtitle_var.set(subtitle_text)
+        set_subtitle(subtitle_text)
         root.title(f"AIWatcher Companion: {str(payload.get('activity_line') or subtitle_text)[:120]}")
         if incoming_state in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
             title_var.set(review_title())
-            subtitle_var.set(review_subtitle())
+            set_subtitle(review_subtitle())
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
@@ -3797,7 +4037,7 @@ def run_native_presence(
 
     def scan_now() -> None:
         title_var.set("Scanning")
-        subtitle_var.set("Checking local AI work...")
+        set_subtitle("Checking local AI work...")
         try:
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/companion-scan", timeout=12.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -3806,10 +4046,10 @@ def run_native_presence(
                 apply_state(state_payload)
             else:
                 title_var.set("Scan done")
-                subtitle_var.set("Open UI for details")
+                set_subtitle("Open UI for details")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
             title_var.set("Scan failed")
-            subtitle_var.set("Open UI for details")
+            set_subtitle("Open UI for details")
         update_attention_style()
 
     def open_primary() -> None:
@@ -3817,7 +4057,7 @@ def run_native_presence(
         if primary_action_var.get() == "restart_aiwatcher":
             restart_requested = True
             title_var.set("Restarting AIWatcher")
-            subtitle_var.set("Dashboard and Companion will reopen")
+            set_subtitle("Dashboard and Companion will reopen")
             primary_button.state(["disabled"])
             root.after(80, root.destroy)
             return
@@ -3831,12 +4071,12 @@ def run_native_presence(
                 pass
             if not saved:
                 title_var.set("Still pending")
-                subtitle_var.set("Could not save receipt view")
+                set_subtitle("Could not save receipt view")
                 update_attention_style()
                 return
             state_var.set("watching")
             title_var.set("Watching quietly")
-            subtitle_var.set("Fresh Start receipt opened")
+            set_subtitle("Fresh Start receipt opened")
             skip_state_var.set("")
             update_attention_style()
             schedule_auto_collapse(1200)
@@ -3870,7 +4110,7 @@ def run_native_presence(
     def copy_fresh_start_from_companion() -> None:
         session_id = primary_session_id_var.get().strip()
         title_var.set("Copying brief")
-        subtitle_var.set("Preparing Fresh Start...")
+        set_subtitle("Preparing Fresh Start...")
         try:
             encoded = urllib.parse.quote(session_id)
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/handoff?id={encoded}&target=generic", timeout=8.0) as response:
@@ -3892,7 +4132,7 @@ def run_native_presence(
                 state_var.set("clipboard_confirm")
                 suppress_passive_refresh_until.set(time.time() + 30.0)
                 title_var.set("Clipboard has text")
-                subtitle_var.set("Click Replace to copy Fresh Start")
+                set_subtitle("Click Replace to copy Fresh Start")
                 primary_label_var.set("Replace")
                 update_attention_style()
                 schedule_auto_collapse(30000)
@@ -3900,7 +4140,7 @@ def run_native_presence(
             pending_clipboard_override_session_var.set("")
             if not set_clipboard_text(brief):
                 title_var.set("Copy failed")
-                subtitle_var.set("Open UI to copy the brief")
+                set_subtitle("Open UI to copy the brief")
                 update_attention_style()
                 webbrowser.open(primary_url_var.get() or url)
                 return
@@ -3940,13 +4180,13 @@ def run_native_presence(
             state_var.set("fresh_start_copied")
             suppress_passive_refresh_until.set(time.time() + 12.0)
             title_var.set("Fresh Start copied")
-            subtitle_var.set("Paste it into a fresh chat")
+            set_subtitle("Paste it into a fresh chat")
             primary_url_var.set(url)
             update_attention_style()
             schedule_auto_collapse(12000)
         except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError, tk.TclError):
             title_var.set("Fresh Start")
-            subtitle_var.set("Open UI to copy the brief")
+            set_subtitle("Open UI to copy the brief")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
 
@@ -3977,7 +4217,7 @@ def run_native_presence(
         session_id = primary_session_id_var.get().strip()
         if not set_clipboard_text(command):
             title_var.set("Copy failed")
-            subtitle_var.set("Open UI to copy /compact")
+            set_subtitle("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
             return
@@ -3986,7 +4226,7 @@ def run_native_presence(
         state_var.set("compact_copied")
         suppress_passive_refresh_until.set(time.time() + 3.0)
         title_var.set("Copied")
-        subtitle_var.set("Paste /compact into that session")
+        set_subtitle("Paste /compact into that session")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(12000)
@@ -3997,7 +4237,7 @@ def run_native_presence(
         command = waiting_row_commands[index] if index < len(waiting_row_commands) else ""
         if not set_clipboard_text(command):
             title_var.set("Copy failed")
-            subtitle_var.set("Open UI to copy /compact")
+            set_subtitle("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(waiting_row_urls[index] if index < len(waiting_row_urls) else url)
             return
@@ -4031,12 +4271,12 @@ def run_native_presence(
                 pass
             if not released:
                 title_var.set("Still paused")
-                subtitle_var.set("Open Review Gate to continue")
+                set_subtitle("Open Review Gate to continue")
                 update_attention_style()
                 return
             state_var.set("watching")
             title_var.set("Continuing")
-            subtitle_var.set("Original prompt released")
+            set_subtitle("Original prompt released")
             continue_action_var.set("")
             continue_url_var.set("")
             primary_url_var.set(url)
@@ -4069,13 +4309,13 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set("Could not save Continue")
+            set_subtitle("Could not save Continue")
             update_attention_style()
             return
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
-        subtitle_var.set("Fresh Start decision saved")
+        set_subtitle("Fresh Start decision saved")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(1200)
@@ -4105,7 +4345,7 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set(short_skip_failure_message())
+            set_subtitle(short_skip_failure_message())
             update_attention_style()
             return
         skip_state_var.set("")
@@ -4116,7 +4356,7 @@ def run_native_presence(
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
-        subtitle_var.set("Companion nudge skipped")
+        set_subtitle("Companion nudge skipped")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(1200)
@@ -4182,7 +4422,7 @@ def run_native_presence(
         # The honesty rule from the transient overlay applies here too: wait
         # for the result, and on failure say why and open the session in
         # AIWatcher -- never report a return that did not happen.
-        subtitle_var.set("Returning...")
+        set_subtitle("Returning...")
         request = urllib.request.Request(
             f"{url.rstrip('/')}/api/runtime-return",
             data=json.dumps({"session_id": session_id}).encode("utf-8"),
@@ -4200,14 +4440,18 @@ def run_native_presence(
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             pass
         if ok:
-            subtitle_var.set((message or "Opened your AI tool. Answer it there.")[:46])
+            set_subtitle(message or "Opened your AI tool. Answer it there.")
         else:
             webbrowser.open(fallback_url)
-            subtitle_var.set("No live return. Opened in AIWatcher.")
+            set_subtitle("No live return. Opened in AIWatcher.")
         schedule_auto_collapse(2500)
 
     def open_waiting_row(index: int) -> None:
         if not 0 <= index < len(waiting_row_urls):
+            return
+        # Rows with no action hide their button; clicking the row itself must
+        # agree with that rather than opening something the row never offered.
+        if index < len(waiting_row_actions) and waiting_row_actions[index] == "none":
             return
         if (
             index < len(waiting_row_actions)
@@ -4244,17 +4488,35 @@ def run_native_presence(
             webbrowser.open(target)
             schedule_auto_collapse(1500)
 
+    row_font = tkfont.Font(font=style.lookup("PresenceMuted.TLabel", "font") or ("Helvetica", 9))
+
+    def row_text_limit(index: int) -> int:
+        """Pixels the row label may use once the row's fixed parts are placed.
+
+        Read off the widgets rather than hard-coded, so restyling the button
+        or the dot moves the budget with it instead of silently clipping.
+        """
+        _frame, _label, button, wants, dot = row_widgets[index]
+        used = 28 + dot.winfo_reqwidth() + 6 + button.winfo_reqwidth() + wants.winfo_reqwidth() + 8
+        return max(0, expanded_width - used)
+
     def apply_waiting_rows() -> None:
         rows = 0 if collapsed.get() else visible_waiting_rows()
         for index in range(min(rows, len(waiting_row_texts))):
             section = waiting_row_sections[index] if index < len(waiting_row_sections) else ""
             label = waiting_row_texts[index]
-            row_widgets[index][1].configure(text=f"{section.upper()}   {label}" if section else label)
+            full_text = f"{section.upper()}   {label}" if section else label
+            row_widgets[index][1].configure(
+                text=_elide_to_width(full_text, row_font.measure, row_text_limit(index)),
+            )
             row_widgets[index][2].configure(
                 text=row_action_label(index),
             )
             kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
             action = waiting_row_actions[index] if index < len(waiting_row_actions) else ""
+            # Only rows that lead somewhere claim the pointer.
+            for target in (row_widgets[index][0], row_widgets[index][1], row_widgets[index][3], row_widgets[index][4]):
+                target.configure(cursor="" if action == "none" else "hand2")
             if action == "none":
                 row_widgets[index][2].pack_forget()
                 row_widgets[index][3].configure(text="")
@@ -4264,21 +4526,21 @@ def run_native_presence(
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
                 if action:
-                    row_widgets[index][2].pack(side="right")
+                    row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
                 else:
                     row_widgets[index][2].pack_forget()
             elif kind.startswith("prompt_"):
                 # "working 3 min" or "done" where a waiting row says what it wants.
                 tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
                 row_widgets[index][3].configure(text=tag)
-                row_widgets[index][2].pack(side="right")
+                row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
             else:
-                row_widgets[index][2].pack(side="right")
+                row_widgets[index][2].pack(side="right", before=row_widgets[index][1])
                 wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
                 row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
         if rows == rows_shown.get():
             return
-        for row_frame, _row_label, _row_button, _row_wants in row_widgets:
+        for row_frame, *_row_parts in row_widgets:
             row_frame.pack_forget()
         if rows_packed.get():
             rows_frame.pack_forget()
@@ -4370,11 +4632,10 @@ def run_native_presence(
         style.configure("PresenceTitle.TLabel", background=shell_bg)
         style.configure("PresenceMuted.TLabel", background=shell_bg)
         style.configure("PresenceDrag.TLabel", background=shell_bg)
-        style.configure(
-            "PresenceAttention.TButton",
-            background=attention_bg if needs_attention else "#f2f6fb",
-            foreground="#ffffff" if needs_attention else "#111827",
-        )
+        # The button swaps back to Presence.TButton when nothing needs the
+        # user, so this style is only ever on screen while it does: it is
+        # always the orange chip, pulsing between the two oranges.
+        style.configure("PresenceAttention.TButton", background=attention_bg, foreground="#ffffff")
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
         # The blue ring is the mark's state channel, speaking the dashboard
         # favicon's vocabulary: orange when something needs you, mint while a
@@ -4385,15 +4646,12 @@ def run_native_presence(
             else ("#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5")
         )
         mark_canvas.delete("all")
-        _draw_brand_mark(mark_canvas, height=26.0, blue=ring_colour, ink="#DCE6F6")
+        _paint_brand_mark(tk, mark_canvas, 26.0, ring_colour, "#DCE6F6")
         collapsed_canvas.configure(bg="#ffffff")
         collapsed_canvas.delete("all")
-        _draw_brand_mark(
-            collapsed_canvas, height=18.0,
-            blue=ring_colour,
-            ink="#141314",
-        )
-        collapsed_canvas.move("all", 7.0, 13.0)
+        orbit_item["id"] = None
+        _paint_brand_mark(tk, collapsed_canvas, bubble.mark_height, ring_colour, "#141314")
+        collapsed_canvas.move("all", bubble.mark.x0, bubble.mark.y0)
         # Companion-only expression inside the front ring. The dashboard and
         # expanded bar keep the official mark untouched; this small viewport
         # makes the persistent bubble feel watchful without introducing an
@@ -4408,32 +4666,36 @@ def run_native_presence(
             phase=int(expression_phase_var.get()),
             reduce_motion=reduce_motion or motion_mode_var.get() != "expressive",
         )
-        collapsed_canvas.create_oval(16, 16, 23, 23, fill="#141314", outline="")
-        collapsed_canvas.create_rectangle(19, 16, 25, 23, fill="#141314", outline="")
-        collapsed_canvas.create_oval(21, 16, 28, 23, fill="#141314", outline="")
-        eye_width = 3 if int(focus_lock_ticks_var.get() or 0) > 0 else 2
-        collapsed_canvas.create_line(
-            18 + gaze_x, 19 + gaze_y, 20 + gaze_x, 19 + gaze_y,
-            fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
-        )
-        collapsed_canvas.create_line(
-            24 + gaze_x, 19 + gaze_y, 26 + gaze_x, 19 + gaze_y,
-            fill=eye_colour, width=eye_width, capstyle=tk.ROUND,
+        face = bubble.face
+        # A focus lock thickens the gaze; both come from the face's own size.
+        eye_width = bubble.eye_thickness * (1.4 if int(focus_lock_ticks_var.get() or 0) > 0 else 1.0)
+        # Gaze is a nudge in units of the face, not a fixed pixel, so it stays
+        # proportionate if the bubble is ever drawn larger.
+        gaze_step = max(1.0, face.height * 0.12)
+        _paint_face(
+            tk, collapsed_canvas, face, bubble.eyes, eye_width,
+            (gaze_x * gaze_step, gaze_y * gaze_step), "#141314", eye_colour,
         )
         if int(focus_lock_ticks_var.get() or 0) > 0 and not needs_attention:
-            collapsed_canvas.create_oval(5, 7, 33, 35, outline=ring_colour, width=2)
-        # The running indicator: a mint arc stepping around the bubble's rim
-        # while any session is working, advanced on the existing pulse tick.
-        # Coarser than the Swift bar's continuous orbit, which is the Tk
-        # fallback's usual fidelity. Attention outranks it. A third of the
+            _paint_ring(tk, collapsed_canvas, bubble.focus_rim, bubble.focus_stroke, ring_colour)
+        # The running indicator: a mint arc travelling around the bubble's rim
+        # while any session is working. Attention outranks it. A third of the
         # circle at 4 wide, the Swift bar's 5 x 33% scaled to this canvas.
+        # spin_orbit owns the angle -- drawing only places the arc where that
+        # clock has already put it.
         if int(working_count_var.get() or 0) > 0 and not needs_attention:
-            if not reduce_motion and motion_mode_var.get() != "quiet":
-                orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
-            collapsed_canvas.create_arc(
-                2, 4, 34, 36, start=orbit_angle_var.get(), extent=120,
-                style="arc", outline="#43d9a3", width=4,
+            orbit_item["id"] = collapsed_canvas.create_arc(
+                *bubble.rim, start=orbit_angle_var.get(), extent=120,
+                style="arc", outline="#43d9a3", width=bubble.orbit_stroke,
             )
+            # The frame timer only exists while there is an arc to move, so
+            # drawing one is what starts it.
+            if not orbit_item["running"]:
+                orbit_item["running"] = True
+                try:
+                    root.after(orbit_frame_ms, spin_orbit)
+                except tk.TclError:
+                    orbit_item["running"] = False
         # The attention rim: the whole circle in orange while something needs
         # the user. Tk has no layer opacity, so a hard gate pulses between
         # orange and a pale tint of it rather than between two oranges --
@@ -4443,7 +4705,7 @@ def run_native_presence(
             rim_colour = "#ed6a24"
             if hard_gate and not reduce_motion and motion_mode_var.get() != "quiet" and not pulse_var.get():
                 rim_colour = "#f8cdb5"
-            collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)
+            _paint_ring(tk, collapsed_canvas, bubble.rim, bubble.orbit_stroke, rim_colour)
         # The collapsed bubble reserves numbers for things needing attention.
         # Completed work is reward/status text after expansion, not a mystery
         # count sitting on screen all day.
@@ -4456,14 +4718,14 @@ def run_native_presence(
         # state from being the quietest one.
         badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")
         if badge_text:
-            # Fully inside the 36-wide canvas -- the old (26..42) oval ran
-            # past the canvas edge and rendered cropped.
-            collapsed_canvas.create_oval(
-                19, 2, 35, 18,
-                fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5", outline="",
+            _paint_disc(
+                tk, collapsed_canvas, bubble.badge,
+                attention_bg if waiting_count > 0 or needs_attention else "#0052F5",
             )
+            badge_x, badge_y = bubble.badge.centre
             collapsed_canvas.create_text(
-                27, 10, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
+                badge_x, badge_y, text=badge_text, fill="#ffffff",
+                font=("Helvetica", bubble.badge_font_size, "bold"),
             )
         for button in (plan_button, ask_button, scan_button, console_button):
             button.state(["disabled"] if offline else ["!disabled"])
@@ -4558,6 +4820,47 @@ def run_native_presence(
         apply_waiting_rows()
         apply_window_visibility()
 
+    # The arc used to advance 103 degrees on each 800ms pulse tick: three
+    # frames to a revolution, which reads as a stutter rather than a spin. It
+    # now has its own frame clock, and moves only its own canvas item --
+    # update_attention_style tears down and rebuilds both canvases, which is
+    # far too heavy to run at frame rate.
+    #
+    # 9 degrees per 50ms is the same two-second revolution at 20fps. 30fps
+    # measured 2.2% of a core against 0.4% for the old stutter, which is too
+    # much to ask of a bar that is meant to sit open all day; 20fps is a third
+    # cheaper and a two-second rotation does not read as choppy at it.
+    orbit_frame_ms = 50
+    orbit_step_degrees = 9
+
+    def spin_orbit() -> None:
+        item = orbit_item["id"]
+        spinning = (
+            item is not None
+            and collapsed.get()
+            # winfo_viewable is a cheap mapped-state check: a withdrawn bubble
+            # (nudges-only, or an ai-apps window with no AI app in front) has
+            # nothing on screen to animate.
+            and bool(root.winfo_viewable())
+            and not reduce_motion_active()
+            and motion_mode_var.get() != "quiet"
+        )
+        if not spinning:
+            # Stop rather than idle at a slower tick. A bar that sits open all
+            # day should cost nothing while nothing is running, and the next
+            # redraw that draws an arc starts the timer again.
+            orbit_item["running"] = False
+            return
+        orbit_angle_var.set((int(orbit_angle_var.get()) - orbit_step_degrees) % 360)
+        try:
+            collapsed_canvas.itemconfigure(item, start=orbit_angle_var.get())
+        except tk.TclError:
+            orbit_item["id"] = None
+        try:
+            root.after(orbit_frame_ms, spin_orbit)
+        except tk.TclError:
+            orbit_item["running"] = False
+
     def pulse_attention() -> None:
         reduce_motion = reduce_motion_active()
         visible_surface = should_show_window()
@@ -4582,13 +4885,12 @@ def run_native_presence(
             pass
 
     # Reaching the dashboard is a measurement, and a failed probe only says
-    # "no answer inside the budget". The 0.8s timeout below runs on the Tk main
-    # thread, so it is a stall cap rather than a verdict: the dashboard's first
-    # scan over a large local history takes tens of seconds, and every probe
-    # during it times out. Painting "UI offline" there pointed the user at
-    # Restart, which starts that scan again, so the false alarm renewed itself.
-    # Unreachable therefore carries its own state until it has outlived that
-    # scan window, and only then becomes a claim about the dashboard.
+    # "no answer inside the budget": the dashboard's first scan over a large
+    # local history takes tens of seconds, and every probe during it times out.
+    # Painting "UI offline" there pointed the user at Restart, which starts
+    # that scan again, so the false alarm renewed itself. Unreachable therefore
+    # carries its own state until it has outlived that scan window, and only
+    # then becomes a claim about the dashboard.
     #
     # Both numbers are stopgaps: nothing local reports how long a startup scan
     # will take, so there is nothing to derive them from. 45s covers the "tens
@@ -4608,34 +4910,67 @@ def run_native_presence(
         if float(probe["last_ok"]) <= 0.0:
             state_var.set("connecting")
             title_var.set("Connecting\u2026")
-            subtitle_var.set("Dashboard starting. First scan can be slow.")
+            set_subtitle("Dashboard starting. First scan can be slow.")
         update_attention_style()
 
     def refresh_state() -> None:
-        try:
-            request_url = f"{url.rstrip('/')}/api/companion-state"
-            with urllib.request.urlopen(request_url, timeout=0.8) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            probe["failures"] = 0.0
-            probe["last_ok"] = time.monotonic()
-            apply_state(payload)
-        except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
-            probe["failures"] = float(probe["failures"]) + 1.0
-            unreachable_since = float(probe["last_ok"]) or float(probe["since"])
-            if (
-                float(probe["failures"]) >= offline_after_failures
-                and time.monotonic() - unreachable_since >= offline_after_seconds
-            ):
-                apply_offline_state()
-            else:
-                apply_connecting_state()
-        finally:
-            update_attention_style()
-            schedule_auto_collapse(10000 if has_primary_action() else 4000)
+        # The request runs off the Tk main thread. Blocking it here froze the
+        # whole bar for the length of the timeout on every tick -- dragging,
+        # hover and the running arc all stopped -- and it was worst exactly
+        # when the dashboard was slow or down and every probe spent its full
+        # budget, which is when the bar most needs to look alive. Off the main
+        # thread the budget can also be generous enough to ride out a slow
+        # answer instead of counting it as a failure.
+        #
+        # The worker only writes to a dict and the main thread picks the result
+        # up, because Tk calls are not safe from another thread. Same shape as
+        # the usage panel's fetch below.
+        request_url = f"{url.rstrip('/')}/api/companion-state"
+        box: dict[str, object] = {}
+
+        def fetch() -> None:
+            try:
+                with urllib.request.urlopen(request_url, timeout=2.5) as response:
+                    box["payload"] = json.loads(response.read().decode("utf-8"))
+            except (OSError, ValueError):
+                box["error"] = True
+            finally:
+                box["done"] = True
+
+        def settle() -> None:
+            if not box.get("done"):
+                try:
+                    root.after(60, settle)
+                except tk.TclError:
+                    pass
+                return
+            payload = box.get("payload")
+            try:
+                if isinstance(payload, dict):
+                    probe["failures"] = 0.0
+                    probe["last_ok"] = time.monotonic()
+                    apply_state(payload)
+                else:
+                    probe["failures"] = float(probe["failures"]) + 1.0
+                    unreachable_since = float(probe["last_ok"]) or float(probe["since"])
+                    if (
+                        float(probe["failures"]) >= offline_after_failures
+                        and time.monotonic() - unreachable_since >= offline_after_seconds
+                    ):
+                        apply_offline_state()
+                    else:
+                        apply_connecting_state()
+                update_attention_style()
+                schedule_auto_collapse(10000 if has_primary_action() else 4000)
+            except tk.TclError:
+                pass
             try:
                 root.after(3000, refresh_state)
             except tk.TclError:
                 pass
+
+        threading.Thread(target=fetch, daemon=True).start()
+        settle()
 
     usage_state: dict[str, object] = {"window": None, "session_id": "", "request": 0}
 
@@ -4760,12 +5095,17 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
-    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label]] = []
+    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label, ttk.Label]] = []
     for row_index in range(max_waiting_rows):
         row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
-        ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
-        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
-        row_label.pack(side="left", fill="x", expand=True)
+        row_dot = ttk.Label(row_frame, text="●", style="PresenceDot.TLabel")
+        row_dot.pack(side="left", padx=(0, 6))
+        # The button and the chip are packed before the label on purpose. Tk
+        # hands out the row's width in packing order, so an expanding label
+        # that goes first claims the whole cavity and leaves the button none:
+        # it stayed in the widget tree and drew at zero width, which read as a
+        # row that simply could not be clicked. Reserve the fixed parts first
+        # and the label takes what is left.
         row_button = ttk.Button(
             row_frame, text="Open", width=7, style="Presence.TButton",
             command=lambda index=row_index: open_waiting_row(index),
@@ -4773,14 +5113,20 @@ def run_native_presence(
         row_button.pack(side="right")
         row_wants = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
         row_wants.pack(side="right", padx=(0, 8))
-        row_widgets.append((row_frame, row_label, row_button, row_wants))
+        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_label.pack(side="left", fill="x", expand=True)
+        # The whole row opens it, not just the button: the text is the part a
+        # reader aims at, and on a narrow bar it is most of the row.
+        for target in (row_frame, row_dot, row_label, row_wants):
+            target.bind("<Button-1>", lambda _event, index=row_index: open_waiting_row(index))
+        row_widgets.append((row_frame, row_label, row_button, row_wants, row_dot))
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.
     collapsed_canvas = tk.Canvas(
         collapsed_frame,
-        width=36,
-        height=40,
+        width=collapsed_canvas_width,
+        height=collapsed_canvas_height,
         bg="#ffffff",
         highlightthickness=1,
         highlightcolor="#0052F5",
@@ -4820,6 +5166,7 @@ def run_native_presence(
     set_collapsed(True)
     refresh_state()
     pulse_attention()
+    spin_orbit()
     root.mainloop()
     if restart_requested:
         return 0 if _launch_aiwatcher_restart(url, position, visibility, interval) else 2
@@ -4925,10 +5272,10 @@ def run_native_overlay(
     header = ttk.Frame(frame, style="AIW.TFrame")
     header.pack(fill="x")
     mark_canvas = tk.Canvas(header, width=38, height=30, bg=shell, highlightthickness=0, bd=0)
-    _draw_brand_mark(
-        mark_canvas, height=30.0,
-        blue="#ed6a24" if (severity or "").lower() == "critical" else "#0052F5",
-        ink=ink,
+    _paint_brand_mark(
+        tk, mark_canvas, 30.0,
+        "#ed6a24" if (severity or "").lower() == "critical" else "#0052F5",
+        ink,
     )
     mark_canvas.pack(side="left", padx=(0, 10))
     ttk.Label(header, text=title or "Start a fresh AI session", style="AIWTitle.TLabel", wraplength=560).pack(

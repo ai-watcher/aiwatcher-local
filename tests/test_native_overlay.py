@@ -406,7 +406,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("max_waiting_rows = 5", tk_source)
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
-        self.assertIn("create_text(\n                27, 10, text=badge_text", tk_source)
+        self.assertIn("badge_x, badge_y, text=badge_text", tk_source)
         self.assertIn('"badge" in payload', tk_source)
         self.assertIn('visible_waiting_rows() == 0 or state_var.get() in {"control_review", "context_review"}', tk_source)
         self.assertIn("def row_display_text", tk_source)
@@ -416,7 +416,11 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('return f"{shown} of {count} projects need review"', tk_source)
         self.assertIn('f"{hidden} more saved in Watch. Review all or pick a project."', tk_source)
         self.assertIn('row.get("review_label")', tk_source)
-        self.assertIn('row.get("scope_label")', tk_source)
+        # No scope_label on the Tk row: "Review when ready" repeats the bar's
+        # own header, and at 640px it cost the replay figure at the tail. The
+        # macOS bar still carries it -- it is 706px wide, asserted above.
+        self.assertNotIn('row.get("scope_label")', tk_source)
+        self.assertIn("parts = [project, tool, severity, activity, review]", tk_source)
         self.assertIn("def apply_offline_state", tk_source)
         self.assertIn("skip_projects_var", tk_source)
 
@@ -625,7 +629,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         )
         self.assertIn('activity_tone_var.get() == "attention"', tk_source)
         self.assertIn("badge_count = waiting_count or review_count", tk_source)
-        self.assertIn('fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
+        # The badge disc is rasterised now, so the colour is an argument to
+        # _paint_disc rather than a fill= on a Tk oval.
+        self.assertIn('attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
 
     def test_the_away_digest_rides_the_queue_rows(self) -> None:
         # History entries reuse the waiting-row machinery: mint/amber dots by
@@ -703,7 +709,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def reduce_motion_active()", tk_source)
         self.assertIn("root.after(800 if animate_surface else (30000 if not visible_surface else 8000)", tk_source)
         self.assertIn("entered_attention or activity_changed or delivered or recovered", tk_source)
-        self.assertIn("capstyle=tk.ROUND", tk_source)
+        # The eyes moved into _paint_face, which draws them into the face
+        # image; the round cap survives as the Tk fallback's stroke.
+        self.assertIn("capstyle=tk_module.ROUND", inspect.getsource(native_overlay._paint_face))
         self.assertIn("working_count_var.set(0)", tk_source.split("def apply_offline_state")[1][:900])
         self.assertIn('activity_tone_var.set("")', tk_source.split("def apply_offline_state")[1][:900])
 
@@ -756,7 +764,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("extent=120", tk_source)
-        self.assertIn('style="arc", outline="#43d9a3", width=4', tk_source)
+        # The width is brand_mark.ORBIT_STROKE now, because the mark's size is
+        # derived from it -- the arc's inner edge is what the mark must clear.
+        self.assertIn('style="arc", outline="#43d9a3", width=bubble.orbit_stroke', tk_source)
+        self.assertEqual(native_overlay.brand_mark.ORBIT_STROKE, 4.0)
 
     def test_a_hard_gate_is_never_the_quietest_state(self) -> None:
         # A prompt or command gate holds the user's own prompt until they act,
@@ -785,7 +796,17 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('hard_gate = state_var.get() in {"prompt_gate", "command_gate"}', tk_source)
-        self.assertIn("collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)", tk_source)
+        # The rim is the layout's, not a typed box; brand_mark derives it as
+        # the largest centred circle inside the canvas. It is rasterised now,
+        # with _paint_ring keeping the Tk oval as its fallback.
+        self.assertIn(
+            "_paint_ring(tk, collapsed_canvas, bubble.rim, bubble.orbit_stroke, rim_colour)",
+            tk_source,
+        )
+        self.assertIn(
+            "canvas.create_oval(*rect, outline=colour, width=stroke)",
+            inspect.getsource(native_overlay._paint_ring),
+        )
         self.assertIn('rim_colour = "#f8cdb5"', tk_source)
         self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)
         self.assertIn("and not was_hard_gate and collapsed.get():\n            set_collapsed(False)", tk_source)
@@ -819,7 +840,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("text=\"Plan\"", source)
         self.assertIn("text=\"Scan\"", source)
         self.assertIn("text=\"UI\"", source)
-        self.assertIn("_draw_brand_mark", source)
+        # The mark goes through the painting helper now, which prefers an
+        # anti-aliased image and keeps _draw_brand_mark as the fallback for a
+        # Tk that cannot read PNG. tests/test_brand_mark.py covers both paths.
+        self.assertIn("_paint_brand_mark", source)
         self.assertIn("#0052F5", source)
         self.assertIn("collapsed_button_motion", source)
         self.assertIn("collapsed_button_release", source)
@@ -889,6 +913,51 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("Plan Prompt", source)
         self.assertIn("Scan Now", source)
 
+    def test_the_running_arc_spins_on_a_frame_clock_not_the_pulse_tick(self) -> None:
+        # The arc advanced 103 degrees per 800ms pulse: three frames to a
+        # revolution, which reads as a stutter rather than a spin. The angle
+        # now belongs to spin_orbit, which nudges the arc's own canvas item --
+        # update_attention_style rebuilds both canvases and is far too heavy to
+        # run at frame rate.
+        source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("orbit_frame_ms = 50", source)
+        self.assertIn("orbit_step_degrees = 9", source)
+        self.assertIn("def spin_orbit()", source)
+        self.assertNotIn("- 103) % 360", source)
+
+        spin = source[source.index("def spin_orbit()"):][:1400]
+        self.assertIn("collapsed_canvas.itemconfigure(item, start=orbit_angle_var.get())", spin)
+        # Reduced motion, quiet mode and an unmapped window each stop it dead,
+        # and a rebuilt canvas must not be nudged through a stale item id.
+        self.assertIn("not reduce_motion_active()", spin)
+        self.assertIn('motion_mode_var.get() != "quiet"', spin)
+        self.assertIn("root.winfo_viewable()", spin)
+        self.assertIn('orbit_item["id"] = None', source)
+
+        # The frame timer exists only while there is an arc to move: a bar
+        # that sits open all day must cost nothing while nothing is running,
+        # so spin_orbit returns instead of idling, and the redraw that draws
+        # an arc is what starts it again -- without ever stacking two timers.
+        self.assertIn('orbit_item["running"] = False\n            return', spin)
+        self.assertIn('if not orbit_item["running"]:', source)
+        self.assertIn('orbit_item["running"] = True', source)
+
+    def test_the_bar_buttons_are_flat_and_dark_rather_than_stock_clam_chips(self) -> None:
+        # clam's stock button is a light grey chip with a bevel, which on this
+        # dark bar read as a dialog from another decade.
+        source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('"background": "#1b2636"', source)
+        self.assertIn('"borderwidth": 0', source)
+        self.assertIn('"relief": "flat"', source)
+        self.assertIn('style.map("Presence.TButton"', source)
+        self.assertIn('style.map("PresenceMini.TButton"', source)
+        # The attention chip maps its own oranges rather than the dark fills,
+        # so its map is spelled across several lines.
+        self.assertIn('("pressed", "#b84816")', source)
+        self.assertEqual(source.count("style.map("), 3)
+        # Nothing on the dark bar is a near-white chip any more.
+        self.assertNotIn("#f2f6fb", source)
+
     def test_main_routes_tray_mode_separately_from_presence(self) -> None:
         source = inspect.getsource(native_overlay.main)
 
@@ -909,21 +978,19 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertNotIn("Dashboard is starting. Its first scan can take a moment.", source)
 
     def test_an_unanswered_probe_is_not_yet_a_claim_that_the_ui_is_down(self) -> None:
-        # The 0.8s probe timeout is a main-thread stall cap, not a verdict: the
-        # dashboard's first scan over a large local history takes tens of
-        # seconds and every probe during it times out. Painting "UI offline"
-        # there offered Restart, which starts that scan again, so the false
-        # alarm renewed itself. Offline must therefore outlive both a failure
-        # count and the scan window before it is claimed.
+        # A probe that did not answer says "not known yet", not "it is down":
+        # the dashboard's first scan over a large local history takes tens of
+        # seconds and every probe during it fails. Painting "UI offline" there
+        # offered Restart, which starts that scan again, so the false alarm
+        # renewed itself. Offline must outlive both a failure count and the
+        # scan window before it is claimed.
         source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("offline_after_failures = 3", source)
         self.assertIn("offline_after_seconds = 45.0", source)
         self.assertIn("def apply_connecting_state", source)
 
-        # Anchored inside refresh_state: the same except clause spelling
-        # appears in the scan handler further up.
-        refresh = source[source.index("def refresh_state()"):][:1600]
-        failure_branch = refresh[refresh.index("except (OSError, urllib.error.URLError"):]
+        refresh = source[source.index("def refresh_state()"):][:3000]
+        failure_branch = refresh[refresh.index("def settle()"):]
         self.assertIn("apply_connecting_state()", failure_branch)
         self.assertIn("float(probe[\"failures\"]) >= offline_after_failures", failure_branch)
         self.assertIn("time.monotonic() - unreachable_since >= offline_after_seconds", failure_branch)
@@ -940,6 +1007,16 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertNotIn("connecting", primary_states)
         show_window = source[source.index("def should_show_window()"):][:600]
         self.assertNotIn("connecting", show_window)
+
+        # The request stays off the Tk main thread. Blocking it froze the bar
+        # for the whole timeout on every tick, worst exactly when the dashboard
+        # was slow and every probe spent its full budget. The worker may only
+        # touch the dict -- Tk calls from another thread are not safe.
+        self.assertIn("threading.Thread(target=fetch, daemon=True).start()", refresh)
+        worker = refresh[refresh.index("def fetch()"):refresh.index("def settle()")]
+        self.assertIn("urllib.request.urlopen(request_url, timeout=2.5)", worker)
+        self.assertNotIn("root.", worker)
+        self.assertNotIn("_var.set(", worker)
 
         # The macOS bar is the same contract, so the two cannot disagree.
         mac = native_overlay.MACOS_SWIFT_PRESENCE
@@ -1003,6 +1080,126 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
                 finally:
                     os.unlink(path)
                 self.assertEqual(completed.returncode, 0, f"Swift {name} source does not typecheck:\n{completed.stderr}")
+
+
+class ElideToWidthTests(unittest.TestCase):
+    """A row label may only use the width the row's button left behind."""
+
+    @staticmethod
+    def _measure(text: str) -> int:
+        # A fixed-width stand-in for a font's measure(); the real one is
+        # proportional, but the helper only asks that it grow with the prefix.
+        return 10 * len(text)
+
+    def test_text_that_fits_is_returned_untouched(self) -> None:
+        self.assertEqual(native_overlay._elide_to_width("abcde", self._measure, 50), "abcde")
+
+    def test_a_long_line_is_cut_and_marked(self) -> None:
+        # 8 characters of budget once the ellipsis has taken its own 10px.
+        self.assertEqual(
+            native_overlay._elide_to_width("abcdefghijklmno", self._measure, 90),
+            "abcdefgh…",
+        )
+
+    def test_the_cut_does_not_leave_a_dangling_separator(self) -> None:
+        # Cutting mid-separator would render a row promising a field that is
+        # not there; the trailing separator goes with it.
+        self.assertEqual(
+            native_overlay._elide_to_width("project · tool", self._measure, 100),
+            "project…",
+        )
+
+    def test_no_room_at_all_degrades_instead_of_raising(self) -> None:
+        self.assertEqual(native_overlay._elide_to_width("abc", self._measure, 5), "…")
+        self.assertEqual(native_overlay._elide_to_width("abc", self._measure, 0), "")
+        self.assertEqual(native_overlay._elide_to_width("", self._measure, 99), "")
+
+
+class WaitingRowLayoutTests(unittest.TestCase):
+    """The row's button must survive a long label, and the row must be clickable.
+
+    Tk hands out a row's width in packing order, so an expanding label packed
+    before the button leaves it nothing: the button stayed in the widget tree
+    and drew at zero width, which read as a row that could not be clicked.
+    The widget tree needs a display to build, so this reads the source.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = inspect.getsource(native_overlay.run_native_presence)
+
+    def test_the_button_is_packed_before_the_expanding_label(self) -> None:
+        block = self.source[self.source.index("row_widgets: list[tuple["):]
+        block = block[:block.index("row_widgets.append(")]
+        self.assertLess(
+            block.index('row_button.pack(side="right")'),
+            block.index('row_label.pack(side="left", fill="x", expand=True)'),
+        )
+
+    def test_repacking_the_button_keeps_it_ahead_of_the_label(self) -> None:
+        # pack_forget()/pack() would otherwise append it to the end of the
+        # packing order again and bring the bug straight back.
+        repacks = re.findall(r'row_widgets\[index\]\[2\]\.pack\([^)]*\)', self.source)
+        self.assertTrue(repacks)
+        for call in repacks:
+            self.assertIn("before=row_widgets[index][1]", call)
+
+    def test_the_whole_row_opens_it_not_only_the_button(self) -> None:
+        self.assertIn('target.bind("<Button-1>"', self.source)
+
+    def test_a_row_with_no_action_stays_inert(self) -> None:
+        block = self.source[self.source.index("def open_waiting_row"):]
+        self.assertIn('waiting_row_actions[index] == "none"', block[:600])
+
+    def test_the_label_is_elided_to_the_space_the_button_left(self) -> None:
+        self.assertIn("_elide_to_width(full_text, row_font.measure, row_text_limit(index))", self.source)
+
+
+class SubtitleFitTests(unittest.TestCase):
+    """The bar's subtitle must stay on one line.
+
+    expanded_height is sized for a single subtitle line, so a wrapped subtitle
+    pushes the rows beneath it off the bottom of the window. The Optimize
+    state did exactly that: its subtitle, cut to 46 characters, measured 251px
+    against a 250px wraplength -- one pixel over -- and the row below lost its
+    button off the bottom edge. The widget tree needs a display, so this reads
+    the source.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = inspect.getsource(native_overlay.run_native_presence)
+
+    def test_the_subtitle_has_exactly_one_entry_point(self) -> None:
+        # Any other writer could put an unfitted string in the label.
+        self.assertEqual(self.source.count("subtitle_var.set("), 1)
+        block = self.source[self.source.index("def set_subtitle("):]
+        self.assertIn("subtitle_var.set(", block[:300])
+
+    def test_the_entry_point_fits_the_text_in_pixels(self) -> None:
+        block = self.source[self.source.index("def set_subtitle("):]
+        self.assertIn("_elide_to_width(", block[:300])
+        self.assertIn("subtitle_font.measure", block[:300])
+
+    def test_the_label_and_the_cap_share_one_number(self) -> None:
+        # Stated twice, they drift, and the drift is invisible until a
+        # subtitle wraps and eats the row below.
+        self.assertIn("wraplength=SUBTITLE_WRAP_PX", self.source)
+        self.assertNotIn("wraplength=250", self.source)
+
+    def test_no_character_cap_survives_on_the_subtitle_path(self) -> None:
+        # A character count cannot hold a pixel contract on a proportional
+        # font; that mismatch is the whole bug.
+        self.assertNotIn("subtitle_var.get()[:46]", self.source)
+        self.assertNotIn('or "Watching quietly")[:46]', self.source)
+
+    def test_the_optimize_subtitle_is_the_regression_case(self) -> None:
+        # Fixed-width stand-in: 6px per character puts the real Optimize
+        # subtitle well past the 250px wrap, so it must come back elided.
+        text = "5 review groups; top group: 2 older session records. Organization only."
+        fitted = native_overlay._elide_to_width(text, lambda value: 6 * len(value), 250)
+        self.assertTrue(fitted.endswith("…"))
+        self.assertLessEqual(6 * len(fitted), 250)
 
 
 if __name__ == "__main__":
