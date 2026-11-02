@@ -1243,7 +1243,13 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         # Two words for the title and one for the button: the bar caps them
         # at 18 and 12 characters, and the first version came out as
         # "Compact before the" and "Copy /compac".
-        self.assertEqual(state["primary_label"], "Review")
+        #
+        # Not "Review" any more. A context-health row's button says that, and
+        # the bar swaps between states in place, so the word has to mean one
+        # thing. This button opens what compaction would keep and drop; it does
+        # not compact, which happens in the owning app.
+        self.assertEqual(state["primary_label"], "Preview")
+        self.assertLessEqual(len(state["primary_label"]), 12)
         self.assertEqual(state["label"], "Compact now")
         self.assertLessEqual(len(state["label"]), 18)
         self.assertLessEqual(len(state["subtitle"]), 46)

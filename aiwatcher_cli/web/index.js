@@ -6837,8 +6837,17 @@ function ambientRunning(card, presence) {
       + (liveCount > 1 ? ' &middot; 1 of ' + liveCount + ' live' : ''),
     meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
     sentence: runway + bloat,
+    // Says the recommendation was already acted on, in the one place the
+    // reader would click to act on it again. A label swap, not a new line:
+    // the facts row below already wraps at 880px, and a card that grows
+    // here breaks the equal-height contract between the ambient states.
+    // The button stays live -- a copied brief is not a finished handoff.
     actions: (card.can_handoff
-      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Review Fresh Start</button>'
+      ? '<button class="' + (card.handoff_decision ? 'btn-quiet' : 'btn-primary') + '" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">'
+        + (card.handoff_decision
+            ? 'Brief copied ' + esc(card.handoff_decision.age_label || '')
+            : 'Review Fresh Start')
+        + '</button>'
       : '')
       + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
     facts: [

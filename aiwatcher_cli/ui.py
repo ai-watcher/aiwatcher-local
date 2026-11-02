@@ -317,6 +317,12 @@ SUMMARY_WINDOWS = (1, 7, 30)
 ACTIVE_SESSION_MINUTES = LIVE_WINDOW_MINUTES
 RECENT_SESSION_HOURS = 4
 FRESH_START_PROJECT_COOLDOWN_MINUTES = 2 * 24 * 60
+# How long the bar keeps explaining a handoff it just recorded. Acting on the
+# context row removes it for 24 hours (_recent_handoff_decision_session_ids),
+# and the row simply vanished -- the next state took its place in the same spot
+# and the swap was invisible. This is the window in which the bar still says
+# what happened to it.
+HANDOFF_ACK_HOLD_MINUTES = 45
 UNATTRIBUTED_PROJECT = "__unattributed__"
 UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 
@@ -4702,6 +4708,53 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
     return cards
 
 
+def _mark_context_health_handoffs(
+    context_health: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+) -> None:
+    """Tell each context-health card whether its recommendation was already acted on.
+
+    The Companion drops a session's row for 24 hours once a handoff is recorded
+    (_recent_handoff_decision_session_ids), but that filter is applied to the
+    bubble alone. Watch renders the unfiltered list, so the bar went quiet while
+    this page carried on flagging the same session at the same severity, with
+    nothing on the card saying the brief had already been copied twenty minutes
+    earlier. Same evidence, two verdicts, and only one of them knew why.
+
+    The row is not hidden. The warning is true -- the session really is heavy --
+    and hiding a true warning to match the bar would trade one wrong answer for
+    another. What the card was missing is that somebody already acted.
+    """
+    if not context_health or not decisions:
+        return
+    now = datetime.now(timezone.utc)
+    latest: dict[str, dict[str, object]] = {}
+    for row in decisions:
+        if not isinstance(row, dict):
+            continue
+        session_id = str(row.get("session_id") or "")
+        created_at = _parse_iso_datetime(row.get("created_at"))
+        if not session_id or created_at is None or now - created_at > timedelta(hours=24):
+            continue
+        current = latest.get(session_id)
+        if current is None or created_at > current["_at"]:
+            latest[session_id] = {"_at": created_at, "row": row}
+    if not latest:
+        return
+    for card in context_health:
+        if not isinstance(card, dict):
+            continue
+        found = latest.get(str(card.get("session_id") or ""))
+        if not found:
+            continue
+        minutes = max(0, int((now - found["_at"]).total_seconds() // 60))
+        card["handoff_decision"] = {
+            "decision": str(found["row"].get("decision") or ""),
+            "created_at": found["_at"].isoformat(),
+            "age_label": f"{minutes}m ago" if minutes < 60 else f"{minutes // 60}h ago",
+        }
+
+
 def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object] | None:
     """Pick the single highest-value handoff prompt for Today.
 
@@ -6734,6 +6787,9 @@ def build_summary(
         row for row in context_health
         if str(row.get("session_id", "")) not in suppressed_handoff_sessions
     ])
+    # The same filter the bubble applies, told to the cards instead of hidden
+    # from them: Watch keeps the row and says it was already acted on.
+    _mark_context_health_handoffs(context_health, handoff_decisions)
 
     insights = []
     if projects:
@@ -9075,7 +9131,11 @@ def _compact_companion_state(base: dict[str, object], compact: dict[str, object]
         **common,
         "label": "Compact now",
         "subtitle": _fit_name(name, figures) if name else f"{when} · {figures} before checkpoint",
-        "primary_label": "Review",
+        # Not "Review" either. This button does not compact anything -- the
+        # detail below says to compact in the owning app -- it opens what
+        # compaction would keep and drop. "Preview" says that, and leaves
+        # "Review" to mean one thing on this bar.
+        "primary_label": "Preview",
         "primary_action": "open_url",
         "compact_command": str(lead.get("command") or ""),
         "skip_state": "compact_recommended",
@@ -9862,19 +9922,33 @@ def _build_companion_state() -> dict[str, object]:
                 continue
             if str(receipt.get("proof_status") or "").lower() != "proof pending":
                 continue
-            if receipt.get("receipt_viewed_at"):
-                continue
             created_at = _parse_iso_datetime(receipt.get("created_at"))
-            if created_at is not None and now - created_at > timedelta(minutes=45):
+            if created_at is not None and now - created_at > timedelta(minutes=HANDOFF_ACK_HOLD_MINUTES):
                 continue
+            # Reading the receipt and the context row being snoozed are two
+            # different facts. Viewing one still stops the proof reminder --
+            # that is deliberate -- but inside the hold the bar is the only
+            # place that explains why the row it was showing went away, so the
+            # explanation outlives the reminder.
+            viewed = bool(receipt.get("receipt_viewed_at"))
+            proof_reason = str(receipt.get("proof_reason") or "Waiting to observe the follow-up session.")
+            snoozed = (
+                "Fresh Start brief copied · snoozed 24h"
+                if str(receipt.get("decision") or "") in {"copy_handoff", "new_chat"}
+                else "Fresh Start recorded · snoozed 24h"
+            )
             return {
                 **base,
                 "state": "watching",
-                "label": "Watching proof",
-                "subtitle": str(receipt.get("proof_reason") or "Waiting to observe the follow-up session."),
+                "label": "Watching quietly" if viewed else "Watching proof",
+                "subtitle": snoozed,
                 "primary_label": "Console",
                 "primary_url": "/?view=receipts",
-                "detail": "AIWatcher copied or recorded an intervention and is waiting for observed outcome evidence.",
+                "detail": (
+                    ("Receipt reviewed. " if viewed else "")
+                    + proof_reason
+                    + " This session's context row stays quiet for 24 hours."
+                ),
             }
     optimize = summary.get("optimize")
     if isinstance(optimize, dict) and optimize.get("status") == "needs_action":
@@ -9894,7 +9968,12 @@ def _build_companion_state() -> dict[str, object]:
                 "label": "Optimize",
                 "title": "Optimize workspace",
                 "subtitle": subtitle,
-                "primary_label": "Review",
+                # Not "Review". A context-health row's button says that, and the
+                # bar swaps between the two states in place -- same word, same
+                # spot, different destination, and the click lands on whichever
+                # arrived last. This one is organization only by its own
+                # reward_basis, so it says so.
+                "primary_label": "Tidy up",
                 "primary_url": "/?view=control#optimizeWorkspace",
                 "skip_label": "Skip",
                 "skip_state": "optimize_available",

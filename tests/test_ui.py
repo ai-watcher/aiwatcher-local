@@ -6586,6 +6586,130 @@ class SessionSearchTests(unittest.TestCase):
         self.assertEqual(result["sessions"][0]["inferred_outcome"], "needs_review")
 
 
+class CompanionNotificationClarityTests(unittest.TestCase):
+    """One notification must not be mistakable for another, or vanish unexplained."""
+
+    def test_the_cleanup_nudge_does_not_borrow_the_word_review(self) -> None:
+        # A context-health row's own button says "Review". The bar swaps between
+        # that state and this one in place, so sharing the word means the click
+        # lands on whichever arrived last -- which is how a context review
+        # turned into a cleanup screen.
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "handoff_decisions": [],
+                "optimize": {
+                    "status": "needs_action",
+                    "summary": "1 cleanup opportunity found.",
+                    "candidate_count": 1,
+                    "top": {"kind": "session_cluster", "session_count": 2, "project_full": "p"},
+                },
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "optimize_available")
+        self.assertEqual(state["primary_label"], "Tidy up")
+
+    def _proof_state(self, viewed: bool) -> dict:
+        receipt = {
+            "session_id": "sess-1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "decision": "copy_handoff",
+            "proof_status": "Proof pending",
+            "proof_reason": "No later same-project local session has been observed yet.",
+        }
+        if viewed:
+            receipt["receipt_viewed_at"] = datetime.now(timezone.utc).isoformat()
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [receipt],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
+            return ui.build_companion_state()
+
+    def test_the_bar_says_the_row_was_snoozed_not_just_that_it_is_waiting(self) -> None:
+        # The row disappearing was the complaint; "Waiting to observe the
+        # follow-up session" never explained where it went.
+        state = self._proof_state(viewed=False)
+        self.assertIn("snoozed 24h", state["subtitle"])
+        self.assertIn("copied", state["subtitle"])
+        self.assertIn("24 hours", state["detail"])
+
+    def test_reading_the_receipt_does_not_erase_the_explanation(self) -> None:
+        # Viewing the receipt still stops the proof reminder -- that is
+        # deliberate -- but inside the hold the bar is the only place that says
+        # why the context row went quiet.
+        state = self._proof_state(viewed=True)
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["primary_label"], "Console")
+        self.assertIn("snoozed 24h", state["subtitle"])
+        self.assertIn("Receipt reviewed", state["detail"])
+
+    def test_the_hold_still_expires(self) -> None:
+        # It explains a swap; it does not become a third notification.
+        stale = {
+            "session_id": "sess-1",
+            "created_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            "decision": "copy_handoff",
+            "proof_status": "Proof pending",
+        }
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [stale],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
+            state = ui.build_companion_state()
+        self.assertEqual(state["label"], "Watching quietly")
+
+
+class ContextHealthHandoffMarkerTests(unittest.TestCase):
+    """Watch must not flag a session the bar has already stood down on."""
+
+    def _cards(self, created_at, session_id="sess-1"):
+        cards = [{"session_id": "sess-1", "severity": "warning"}]
+        ui._mark_context_health_handoffs(cards, [{
+            "session_id": session_id,
+            "created_at": created_at.isoformat(),
+            "decision": "copy_handoff",
+        }])
+        return cards
+
+    def test_a_recent_handoff_is_recorded_on_the_card(self) -> None:
+        cards = self._cards(datetime.now(timezone.utc) - timedelta(minutes=20))
+        self.assertEqual(cards[0]["handoff_decision"]["decision"], "copy_handoff")
+        self.assertEqual(cards[0]["handoff_decision"]["age_label"], "20m ago")
+
+    def test_the_row_is_marked_not_removed(self) -> None:
+        # The warning is true; hiding it to agree with the bar would trade one
+        # wrong answer for another. Only the "already acted on" fact was absent.
+        cards = self._cards(datetime.now(timezone.utc))
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["severity"], "warning")
+
+    def test_an_old_handoff_leaves_the_card_alone(self) -> None:
+        cards = self._cards(datetime.now(timezone.utc) - timedelta(hours=30))
+        self.assertNotIn("handoff_decision", cards[0])
+
+    def test_another_sessions_handoff_is_not_borrowed(self) -> None:
+        cards = self._cards(datetime.now(timezone.utc), session_id="sess-other")
+        self.assertNotIn("handoff_decision", cards[0])
+
+
 if __name__ == "__main__":
     unittest.main()
 
