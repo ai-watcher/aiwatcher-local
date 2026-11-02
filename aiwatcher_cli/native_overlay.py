@@ -4677,7 +4677,7 @@ def run_native_presence(
         if float(probe["last_ok"]) <= 0.0:
             state_var.set("connecting")
             title_var.set("Connecting\u2026")
-            subtitle_var.set("Dashboard starting. First scan can be slow.")
+            set_subtitle("Dashboard starting. First scan can be slow.")
         update_attention_style()
 
     def refresh_state() -> None:
