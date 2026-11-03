@@ -2466,6 +2466,46 @@ function renderChangeTotals(rows, meta, unbanked) {
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);
 }
+function optimizeIsRefreshing(optimize, cache = {}) {
+  const state = optimize?.review_state;
+  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
+  return state === 'refreshing' || cache.refreshing
+    || ['building', 'refreshing', 'stale'].includes(cache.status) || outdated;
+}
+// Keep a rebuilt panel readable instead of emptying it.
+//
+// Evidence rebuilds take tens of seconds, and replacing the card with a status
+// line for that long is the whole of "it wipes the screen to update": you lose
+// your place mid-sentence and wait for the same text to come back. The numbers
+// on screen are the ones the last completed check produced, so they are worth
+// more than a blank panel -- but they are not current, so the controls that act
+// on them are disabled until they are.
+function markPanelUpdating(node, updating, message) {
+  if (!node) return;
+  const existing = node.querySelector(':scope > .panel-updating');
+  if (!updating) {
+    if (existing) existing.remove();
+    node.removeAttribute('aria-busy');
+    node.querySelectorAll('[data-updating-disabled]').forEach(control => {
+      control.disabled = false;
+      control.removeAttribute('data-updating-disabled');
+    });
+    return;
+  }
+  node.setAttribute('aria-busy', 'true');
+  if (!existing) {
+    const banner = document.createElement('div');
+    banner.className = 'panel-updating';
+    banner.setAttribute('role', 'status');
+    banner.setAttribute('aria-live', 'polite');
+    banner.textContent = message || 'Updating evidence. Showing the last completed check until it is ready.';
+    node.prepend(banner);
+  }
+  node.querySelectorAll('button:not([disabled])').forEach(control => {
+    control.disabled = true;
+    control.setAttribute('data-updating-disabled', '1');
+  });
+}
 function renderOptimizeWorkspace(optimize, cache = {}) {
   const state = optimize?.review_state;
   const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
@@ -7268,7 +7308,16 @@ async function loadOnce(resetDetail, forceRefresh) {
     : 'Fresh Start receipts · every one stored, newest first';
   document.getElementById('sessionContextHealth').innerHTML =
     renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
-  setPanelHtml(document.getElementById('optimizeWorkspaceBody'), renderOptimizeWorkspace(data.optimize || null, data.cache || {}));
+  const optimizePanel = document.getElementById('optimizeWorkspaceBody');
+  // A rebuild keeps whatever the last completed check rendered. Only a panel
+  // with real cards in it is worth holding: with nothing there yet, the status
+  // line is the most honest thing to show.
+  if (optimizeIsRefreshing(data.optimize || null, data.cache || {}) && optimizePanel?.querySelector('.action-queue')) {
+    markPanelUpdating(optimizePanel, true);
+  } else {
+    markPanelUpdating(optimizePanel, false);
+    setPanelHtml(optimizePanel, renderOptimizeWorkspace(data.optimize || null, data.cache || {}));
+  }
   // The summary has to carry the count, or a collapsed card hides the fact that
   // there is anything in it at all.
   const optimizeSummary = document.getElementById('optimizeWorkspaceSummary');

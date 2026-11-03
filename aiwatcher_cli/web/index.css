@@ -572,6 +572,14 @@
     .cache-pill.fresh, .health-pill.healthy, .session-state.active { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); background: var(--green-soft); }
     .cache-pill.building, .cache-pill.stale, .health-pill.limited, .session-state.ended, .session-state.stale, .session-state.unknown { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .45); background: var(--blue-soft); }
     .health-pill.critical { color: var(--on-danger); border-color: rgba(var(--red-rgb), .45); background: var(--red-soft); }
+    /* Says the panel below is the last completed check, not current. Deliberately
+       quiet: it sits above content the reader is mid-sentence in, and the point
+       of keeping that content on screen is not to interrupt it. */
+    .panel-updating {
+      margin-bottom: var(--sp-2); border-radius: var(--r-md); border: 1px solid rgba(var(--amber-rgb), .45);
+      background: var(--amber-soft); color: var(--on-warning);
+      padding: 6px 10px; font-size: var(--fs-1); font-weight: var(--fw-bold);
+    }
     button, select {
       border: 1px solid var(--line-strong);
       background: var(--surface-raised);
