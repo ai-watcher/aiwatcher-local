@@ -1410,6 +1410,45 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
         self.assertEqual(compact_nudge("w1", sha)["after_actual"], 80_384)
 
+    def test_a_finished_compaction_does_not_sit_in_for_review(self):
+        # The header already says "Compacted / 592.8k → 80.4k per reply".
+        # A row under it repeated that sentence word for word, carried no
+        # button in either client, and -- because it landed in "For review"
+        # -- made the activity line claim work was pending on a bar that is
+        # always open. Nothing about a finished compaction is reviewable.
+        for stage, reason in (
+            ("compacting", "/compact was typed."),
+            ("compacted", "Compacted; the next reply will show the new size."),
+            ("confirmed", "The context already shed since that commit."),
+        ):
+            with self.subTest(stage=stage):
+                sha = f"{stage[0]}9" + "5" * 38
+                self._compact_state(self._assessment(sha=sha))
+                state = self._compact_state(self._assessment(
+                    sha=sha, stage=stage, recommend=False, latest_turn_tokens=85_000,
+                    context_before_shed=592_810, context_after_shed=80_384, reason=reason,
+                ))
+                self.assertEqual(state["state"], "compact_recommended")
+                self.assertEqual(state["compact_stage"], stage)
+                sections = {row["id"]: row for row in state["activity_sections"]}
+                self.assertNotIn("needs_you", sections)
+                self.assertNotIn("to review", state["activity_line"])
+                self.assertNotIn("need", state["activity_line"])
+                # The bubble still has to show something while collapsed.
+                self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+
+    def test_a_live_nudge_keeps_its_row_for_review(self):
+        # The counterpart to the test above: while the nudge is live there is
+        # a real decision on the bar, so the row and its button stay.
+        state = self._compact_state(self._assessment(sha="e" * 40))
+        sections = {row["id"]: row for row in state["activity_sections"]}
+        self.assertEqual(sections["needs_you"]["label"], "For review")
+        self.assertEqual(sections["needs_you"]["count"], 1)
+        self.assertEqual(state["activity_line"], "1 to review")
+        row = sections["needs_you"]["rows"][0]
+        self.assertEqual(row["normalized_action"]["type"], "open_url")
+        self.assertTrue(row["normalized_action"]["available"])
+
     def test_a_compaction_nobody_asked_for_is_not_announced(self):
         # The tool's own auto-compact writes the same boundary; with no
         # receipt and no typed command it is not this feature's to claim.
