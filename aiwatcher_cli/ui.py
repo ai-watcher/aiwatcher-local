@@ -106,6 +106,9 @@ from .local_state import (
     recent_interventions,
     recent_delivery_events,
     recent_optimize_decisions,
+    clear_unlanded_resolution,
+    record_unlanded_resolution,
+    unlanded_resolutions,
     recent_work_receipts,
     get_ambient_intervention,
     mark_active_command_gate_seen,
@@ -291,6 +294,7 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/optimize-ai-assist",
     "/api/optimize-review",
     "/api/optimize-decision",
+    "/api/unlanded-resolution",
     "/api/delivery-review",
     "/api/delivery-review-approve",
     "/api/delivery-reviews",
@@ -2351,10 +2355,17 @@ def build_optimize_inventory(
         # Only the stranded shape earns the card. A branch nobody ever merged is
         # usually an experiment dropped on purpose, and listing those is how the
         # card this replaced lost the user's trust.
-        found = report.stranded
+        #
+        # Settled commits are dropped outright rather than quieted for a day.
+        # These findings are read from git history, which never ages out, so a
+        # 24-hour receipt would hand the user a row that returns every morning
+        # with nothing they can do about it.
+        settled = unlanded_resolutions()
+        found = [change for change in report.stranded if change.sha not in settled]
         if not found:
             continue
-        abandoned = len(report.unmerged_anywhere)
+        abandoned = sum(1 for change in report.unmerged_anywhere if change.sha not in settled)
+        resolved_here = sum(1 for change in report.unlanded if change.sha in settled)
         biggest = found[0]
         branches = sorted({change.branch for change in found})
         oldest = min((change.committed_at for change in found if change.committed_at), default=None)
@@ -2406,6 +2417,7 @@ def build_optimize_inventory(
                 + (f" · {abandoned} more on branches never merged" if abandoned else "")
             ),
             "unmerged_anywhere_count": abandoned,
+            "resolved_count": resolved_here,
             "why_inactive": (
                 f"No commit on {report.main_ref} makes the same change, and most of the lines these commits "
                 f"added are not in {report.main_ref}'s files today. A pull request can report merged and still "
@@ -10932,6 +10944,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/first-run-dismissed",
             "/api/optimize-ai-assist",
             "/api/optimize-decision",
+            "/api/unlanded-resolution",
             "/api/optimize-review",
             "/api/companion-skip",
             "/api/companion-preferences",
@@ -11432,6 +11445,33 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._send(409, json.dumps({"error": "Review item changed; refresh Optimize."}), "application/json; charset=utf-8")
                 return
             self._send(200, json.dumps(_refresh_optimize_review_candidate(candidate)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/unlanded-resolution":
+            # Settling one commit, not quieting a card: the receipt is keyed by
+            # sha so it stays true, and `undo` exists because a permanent
+            # decision the user cannot take back is its own trap.
+            sha = str(payload.get("sha", "")).strip()
+            try:
+                if payload.get("undo") is True:
+                    record = {"sha": sha.lower(), "cleared": clear_unlanded_resolution(sha)}
+                else:
+                    record = record_unlanded_resolution(
+                        sha=sha,
+                        decision=str(payload.get("decision", "")).strip(),
+                        branch=str(payload.get("branch", "")).strip() or None,
+                        reason=str(payload.get("reason", "")).strip(),
+                    )
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save the resolution: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/optimize-decision":
             decision = str(payload.get("decision", "")).strip()

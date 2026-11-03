@@ -3650,6 +3650,51 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(top["lines_at_stake"], 79)
         self.assertNotIn("feat/still-open", json.dumps(top))
 
+    def test_a_commit_marked_checked_never_comes_back(self) -> None:
+        """Git history does not age out, so quieting for a day is not enough.
+
+        The rest of Optimize quiets a candidate for 24 hours against an evidence
+        hash built partly from a relative time label, so the row returns as soon
+        as the clock ticks. A finding here is keyed by commit sha instead.
+        """
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="sess-0", tool="claude-code", project_path="/repo/app",
+                started_at=now - timedelta(hours=9), updated_at=now - timedelta(hours=8),
+            )
+        ]
+        landing = LandingReport(repo="/repo/app", main_ref="origin/main", branches_scanned=2)
+        for sha in ("5tranded0001", "5tranded0002"):
+            landing.changes.append(UnlandedChange(
+                sha=sha, branch="fix/stacked", subject=f"stranded {sha}",
+                committed_at=now - timedelta(days=40), lines_added=80, lines_present=1,
+                files_measured=1, measurable=True, merged_into=("origin/codex/parent",),
+            ))
+
+        def inventory(settled):
+            with (
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "_agent_workspace_rows", return_value=[]),
+                patch.object(ui, "recent_optimize_decisions", return_value=[]),
+                patch.object(ui, "unlanded_work_for_project", return_value=landing),
+                patch.object(ui, "unlanded_resolutions", return_value=settled),
+            ):
+                return ui.build_optimize_inventory(rows, outcomes={}, handoff_decisions=[])
+
+        both = inventory({})["top"]
+        self.assertEqual(both["unlanded_count"], 2)
+
+        one_checked = inventory({"5tranded0001": {"decision": "resolved"}})["top"]
+        self.assertEqual([change["sha"] for change in one_checked["changes"]], ["5tranded0002"])
+        self.assertEqual(one_checked["resolved_count"], 1)
+
+        # Every finding settled means no card at all, not a quieter one.
+        self.assertIsNone(inventory({
+            "5tranded0001": {"decision": "resolved"},
+            "5tranded0002": {"decision": "relanded"},
+        })["top"])
+
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
         runtime = SimpleNamespace(stale=True, rss_kb=147251)
         with (

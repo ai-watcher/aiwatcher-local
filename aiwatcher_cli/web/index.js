@@ -242,6 +242,39 @@ function formatOptimizeTime(value) {
     year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
   });
 }
+async function resolveUnlandedChange(button, decision) {
+  // Settles one commit for good. These findings come from git history, which
+  // never ages out, so the 24-hour receipt the rest of Optimize uses would hand
+  // the user the same row again tomorrow with nothing they could do about it.
+  const sha = button?.dataset?.sha;
+  if (!sha) return;
+  const row = button.closest('tr');
+  button.disabled = true;
+  try {
+    const res = await fetch('/api/unlanded-resolution', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: decision === 'undo'
+        ? JSON.stringify({ sha, undo: true })
+        : JSON.stringify({ sha, decision, branch: button.dataset.branch || '', reason: 'Checked from the dashboard.' }),
+    });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.error || 'save failed');
+    }
+    if (decision === 'undo') {
+      if (row) row.innerHTML = `<td colspan="3">Re-opened: <code>${esc(sha)}</code> will appear again after the next refresh.</td>`;
+      return;
+    }
+    if (row) {
+      row.style.opacity = '.45';
+      row.innerHTML = `<td colspan="3">Checked: <code>${esc(sha)}</code> will not be raised again. <button class="btn-quiet" data-sha="${esc(sha)}" onclick="resolveUnlandedChange(this, 'undo')">Undo</button></td>`;
+    }
+  } catch (err) {
+    button.disabled = false;
+    showToast(err.message || 'Could not save the resolution', 'error');
+  }
+}
 function renderOptimizeReviewEvidence(item, expanded = false) {
   const activity = item.project_activity || {};
   const rows = item.sessions || [];
@@ -258,7 +291,7 @@ function renderOptimizeReviewEvidence(item, expanded = false) {
     ${changes.length ? `<details class="aiw-details" ${expanded ? 'open' : ''}><summary>Inspect ${changes.length} exact change${changes.length === 1 ? '' : 's'} and where each one is</summary><div class="optimize-session-table"><table><thead><tr><th>Change</th><th>Where it is</th><th>What main is missing</th></tr></thead><tbody>${changes.map(change => `<tr>
       <td><strong>${esc(change.subject || 'No commit subject')}</strong><br><code>${esc(change.sha)}</code><br>${esc(formatOptimizeTime(change.committed_at))}</td>
       <td><code>${esc(change.branch)}</code>${(change.merged_into || []).length ? `<br>Merged into:<br>${(change.merged_into || []).map(ref => `<code>${esc(ref)}</code>`).join('<br>')}` : '<br>No other branch contains it'}</td>
-      <td><strong>${esc(change.lines_absent)} of ${esc(change.lines_added)} added lines</strong> not in main<br>${esc(change.present_pct === null ? 'not measurable' : `${change.present_pct}% still present`)}<br>${esc(change.confidence || '')}</td>
+      <td><strong>${esc(change.lines_absent)} of ${esc(change.lines_added)} added lines</strong> not in main<br>${esc(change.present_pct === null ? 'not measurable' : `${change.present_pct}% still present`)}<br>${esc(change.confidence || '')}<br><button class="btn-quiet" data-sha="${esc(change.sha)}" data-branch="${esc(change.branch)}" onclick="resolveUnlandedChange(this, 'resolved')">Mark checked</button></td>
     </tr>`).join('')}</tbody></table></div></details>` : ''}
     ${item.unmerged_anywhere_count ? `<p class="receipt-note">${esc(item.unmerged_anywhere_count)} further change(s) sit on branches no other branch merged. Those are more often experiments dropped on purpose, so they are counted here and not listed.</p>` : ''}
     ${item.omitted_change_count ? `<p class="receipt-note">${esc(item.omitted_change_count)} further change(s) are outside this bounded review. No recommendation applies to them.</p>` : ''}

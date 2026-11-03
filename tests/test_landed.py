@@ -192,6 +192,41 @@ class UnlandedWorkTests(unittest.TestCase):
         self.assertGreater(abandoned[0].lines_absent, stranded[0].lines_absent)
         self.assertIs(report.unlanded[0], stranded[0])
 
+    def test_code_that_moved_to_another_file_is_not_reported_as_missing(self) -> None:
+        """PR #185's one-line Windows fix: on main, in a file it did not touch."""
+        git(self.repo, "switch", "-c", "fix/moved", "main")
+        (self.repo / "cli.py").write_text(ISOLATION_FIXTURE, encoding="utf-8")
+        git(self.repo, "add", "cli.py")
+        git(self.repo, "commit", "-m", "add the helper to cli.py")
+        moved_sha = git(self.repo, "rev-parse", "HEAD")
+        # Merged into a branch that never reached main, so it is on the shown
+        # path -- the only path a move is probed on.
+        git(self.repo, "switch", "-c", "codex/parent", "main")
+        git(self.repo, "merge", "--no-ff", moved_sha, "-m", "Merge pull request #185")
+        git(self.repo, "switch", "main")
+        # Main has the same lines, in a module the commit never touched, so a
+        # same-path check sees an empty file and scores zero.
+        (self.repo / "delivery_tracking.py").write_text(ISOLATION_FIXTURE, encoding="utf-8")
+        git(self.repo, "add", "delivery_tracking.py")
+        git(self.repo, "commit", "-m", "the helper now lives here")
+
+        report = find_unlanded_work(str(self.repo), now=self.later)
+
+        self.assertEqual(report.unlanded, [])
+        moved = [change for change in report.changes if change.moved_in_main]
+        self.assertTrue(moved, msg="the moved change should be recognised, not just dropped")
+        self.assertIn("moved rather than went missing", moved[0].reason or "")
+        self.assertEqual(moved[0].present_pct, 0.0)
+
+    def test_probing_for_a_move_is_skipped_when_the_change_is_clearly_present(self) -> None:
+        sha = self._branch_with_fixture("fix/present")
+        git(self.repo, "cherry-pick", sha)
+
+        change = measure_unlanded_change(str(self.repo), sha, branch="fix/present", main_ref="main")
+
+        self.assertEqual(change.present_pct, 100.0)
+        self.assertEqual(change.probes, 0)
+
     def test_the_threshold_leaves_room_on_both_sides(self) -> None:
         """Guards the measured gap: squashes read 88-100%, losses 0-21%."""
         self.assertGreater(PRESENT_PCT_THRESHOLD, 21.0)
