@@ -2162,14 +2162,56 @@ def link_handoff_decision_next_session(
 
 
 EXPLICIT_FRESH_START_LINK_METHODS = frozenset({"explicit_receipt", "manual_link", "user_confirmed"})
+DEFAULT_FRESH_START_FOLLOWUP_WINDOW_HOURS = 24
+# Only a receipt the correlator is still waiting on can run out of time. A
+# linked, candidate or ambiguous correlation already has its answer, and a
+# receipt with no stored correlation was never evaluated, so no window of its
+# own is known to have closed.
+EXPIRABLE_FRESH_START_CORRELATION_STATUSES = frozenset({"waiting"})
 
 
-def fresh_start_followup_evidence(record: dict[str, Any]) -> dict[str, Any]:
+def fresh_start_window_hours(correlation: dict[str, Any] | None) -> int:
+    """The matching window this receipt was recorded under, in hours."""
+    try:
+        hours = int((correlation or {}).get("window_hours"))
+    except (TypeError, ValueError):
+        return DEFAULT_FRESH_START_FOLLOWUP_WINDOW_HOURS
+    return hours if hours > 0 else DEFAULT_FRESH_START_FOLLOWUP_WINDOW_HOURS
+
+
+def _fresh_start_window_close(record: dict[str, Any], correlation: dict[str, Any]) -> datetime | None:
+    """When this receipt's follow-up matching window closed, if it is knowable."""
+    created_at = _parse_waiting_stamp(record.get("created_at"))
+    if created_at is None:
+        return None
+    return created_at + timedelta(hours=fresh_start_window_hours(correlation))
+
+
+def _is_fresh_start_receipt(record: dict[str, Any]) -> bool:
+    return (
+        record.get("receipt_kind") == "fresh_start"
+        or record.get("decision") in {"new_chat", "copy_handoff"}
+    )
+
+
+def fresh_start_followup_evidence(
+    record: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Classify a Fresh Start follow-up without promoting proximity to proof.
 
     Older AIWatcher versions stored the first later same-project session in
     ``next_session_id``.  That is useful discovery evidence, but project and
     timing alone cannot prove that the handoff was pasted or used.
+
+    ``expired`` is the terminal state for a receipt whose matching window has
+    closed with nothing observed: the correlator only looks for a follow-up
+    inside that window, so after it closes the answer can no longer change.
+    It is neither success nor failure -- the brief was copied and whether it
+    was used was never confirmed -- and it is derived from the stored
+    timestamp here rather than written into the record, so it needs no
+    migration and does not depend on the correlator having run again.
     """
     correlation = (
         record.get("next_session_correlation")
@@ -2191,6 +2233,16 @@ def fresh_start_followup_evidence(record: dict[str, Any]) -> dict[str, Any]:
     else:
         state = "pending"
 
+    window_closed_at = _fresh_start_window_close(record, correlation)
+    if (
+        state == "pending"
+        and _is_fresh_start_receipt(record)
+        and status in EXPIRABLE_FRESH_START_CORRELATION_STATUSES
+        and window_closed_at is not None
+        and window_closed_at <= (now or datetime.now(timezone.utc))
+    ):
+        state = "expired"
+
     return {
         "state": state,
         "next_session_id": next_session_id if confirmed else None,
@@ -2198,6 +2250,8 @@ def fresh_start_followup_evidence(record: dict[str, Any]) -> dict[str, Any]:
         "confidence": correlation.get("confidence"),
         "reason": correlation.get("reason"),
         "method": method or None,
+        "window_hours": fresh_start_window_hours(correlation),
+        "window_closed_at": window_closed_at.isoformat() if window_closed_at else None,
     }
 
 

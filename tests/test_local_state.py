@@ -852,6 +852,142 @@ class LocalStateTests(unittest.TestCase):
         self.assertIsNone(evidence["next_session_id"])
         self.assertEqual(evidence["candidate_session_id"], "unknown-provenance")
 
+    @staticmethod
+    def _waiting_fresh_start_receipt(
+        *,
+        age_hours: float,
+        correlation: dict | None = None,
+        **overrides,
+    ) -> dict:
+        stored = {
+            "status": "waiting",
+            "method": "first_following_local_session",
+            "window_hours": 24,
+            "confidence": None,
+            "reason": "No later same-project local session has been observed yet.",
+        }
+        stored.update(correlation or {})
+        record = {
+            "id": "receipt",
+            "receipt_kind": "fresh_start",
+            "decision": "copy_handoff",
+            "created_at": (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat(),
+            "next_session_id": None,
+            "next_session_correlation": stored,
+        }
+        record.update(overrides)
+        return record
+
+    def test_waiting_fresh_start_receipt_inside_its_window_is_still_pending(self) -> None:
+        evidence = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(age_hours=2)
+        )
+
+        self.assertEqual(evidence["state"], "pending")
+
+    def test_waiting_fresh_start_receipt_past_its_window_expires(self) -> None:
+        """The correlator only matches inside the window, so after it closes the
+        answer can no longer change: waiting forever is not a state."""
+        record = self._waiting_fresh_start_receipt(age_hours=76 * 24)
+
+        evidence = local_state.fresh_start_followup_evidence(record)
+
+        self.assertEqual(evidence["state"], "expired")
+        self.assertEqual(evidence["window_hours"], 24)
+        self.assertEqual(
+            evidence["window_closed_at"],
+            (
+                datetime.fromisoformat(record["created_at"]) + timedelta(hours=24)
+            ).isoformat(),
+        )
+        # Evidence survives expiry: the reason the receipt is unresolved is
+        # still readable, and nothing was written back into the record.
+        self.assertEqual(
+            evidence["reason"], "No later same-project local session has been observed yet."
+        )
+        self.assertEqual(record["next_session_correlation"]["status"], "waiting")
+        self.assertNotIn("expired", json.dumps(record))
+
+    def test_expiry_uses_the_window_the_receipt_was_recorded_under(self) -> None:
+        inside = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(age_hours=48, correlation={"window_hours": 72})
+        )
+        past = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(age_hours=80, correlation={"window_hours": 72})
+        )
+
+        self.assertEqual(inside["state"], "pending")
+        self.assertEqual(past["state"], "expired")
+
+    def test_expiry_boundary_is_the_close_of_the_window(self) -> None:
+        record = self._waiting_fresh_start_receipt(age_hours=0)
+        closed_at = datetime.fromisoformat(record["created_at"]) + timedelta(hours=24)
+
+        before = local_state.fresh_start_followup_evidence(
+            record, now=closed_at - timedelta(seconds=1)
+        )
+        at_close = local_state.fresh_start_followup_evidence(record, now=closed_at)
+
+        self.assertEqual(before["state"], "pending")
+        self.assertEqual(at_close["state"], "expired")
+
+    def test_linked_candidate_and_ambiguous_receipts_do_not_expire(self) -> None:
+        linked = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(
+                age_hours=76 * 24,
+                correlation={"status": "linked", "confidence": "high"},
+                next_session_id="legacy-auto-match",
+            )
+        )
+        candidate = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(
+                age_hours=76 * 24,
+                correlation={"status": "candidate", "candidate_session_id": "maybe"},
+            )
+        )
+        ambiguous = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(
+                age_hours=76 * 24,
+                correlation={
+                    "status": "ambiguous",
+                    "reason": "Multiple same-project sessions started at the same time after the action.",
+                },
+            )
+        )
+
+        self.assertEqual(linked["state"], "possible")
+        self.assertEqual(candidate["state"], "possible")
+        # Ambiguous has an answer AIWatcher cannot choose between, not a window
+        # that ran out; expiring it would hide the choice.
+        self.assertEqual(ambiguous["state"], "pending")
+
+    def test_receipt_whose_source_project_is_unavailable_expires_with_its_reason(self) -> None:
+        """Its window closes like any other, and it was never resolvable: the
+        correlator cannot identify a follow-up without a source project."""
+        evidence = local_state.fresh_start_followup_evidence(
+            self._waiting_fresh_start_receipt(
+                age_hours=76 * 24,
+                correlation={
+                    "reason": "Source project is unavailable, so AIWatcher cannot safely identify a follow-up session.",
+                },
+            )
+        )
+
+        self.assertEqual(evidence["state"], "expired")
+        self.assertIn("Source project is unavailable", evidence["reason"])
+
+    def test_receipt_without_a_stored_correlation_does_not_expire(self) -> None:
+        """No stored correlation means the correlator never evaluated it, so no
+        window of its own is known to have closed."""
+        evidence = local_state.fresh_start_followup_evidence({
+            "id": "legacy",
+            "receipt_kind": "fresh_start",
+            "decision": "copy_handoff",
+            "created_at": (datetime.now(timezone.utc) - timedelta(days=76)).isoformat(),
+        })
+
+        self.assertEqual(evidence["state"], "pending")
+
     def test_mark_recent_handoff_receipts_viewed_acknowledges_fresh_start_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
