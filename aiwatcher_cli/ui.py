@@ -2166,10 +2166,10 @@ def _fresh_start_duplicate_window_match(
 def _receipt_followup_evidence(record: dict[str, object]) -> dict[str, object]:
     """Classify a receipt, or reuse the classification a row already carries.
 
-    build_optimize_inventory is handed rendered receipt rows, and those drop
-    ``next_session_correlation``. Re-deriving the state from one of them loses
-    the stored status, so an expired receipt -- and an explicitly linked one --
-    reads as plainly pending. The row carries its own classification instead.
+    A rendered receipt row drops ``next_session_correlation``, so re-deriving
+    the state from one loses the stored status and an expired receipt -- or an
+    explicitly linked one -- reads as plainly pending. build_summary feeds the
+    stored records now, but a row still answers for itself if one arrives.
     """
     carried = record.get("followup")
     if isinstance(carried, dict) and carried.get("state"):
@@ -7285,7 +7285,11 @@ def build_summary(
     optimize = build_optimize_inventory(
         rows,
         outcomes=window_outcomes,
-        handoff_decisions=handoff_decisions,
+        # The stored receipts, not the rendered rows above: a rendered row
+        # drops source_project_path, so every Fresh Start receipt reached the
+        # card with no project and they grouped into one "Unattributed
+        # sessions" row no matter which projects they came from.
+        handoff_decisions=recent_handoff_decisions(limit=10),
     )
     useful_rows = [
         row for row in rows
