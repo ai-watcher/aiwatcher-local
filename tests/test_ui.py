@@ -3608,6 +3608,48 @@ class DashboardWindowTests(unittest.TestCase):
             self.assertNotIn(phrase, prompt.lower())
         self.assertIn("evidence_hash", inventory["top"])
 
+    def test_a_branch_no_other_branch_merged_is_counted_but_never_shown(self) -> None:
+        """An open pull request's own branch must not become a finding.
+
+        Its commits are absent from main by definition until it merges, so the
+        card would otherwise accuse every branch in flight. Idle branches are
+        skipped earlier; this is the second guard, for one that sits open past
+        that window.
+        """
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="sess-0", tool="codex-cli", project_path="/repo/app",
+                started_at=now - timedelta(hours=9), updated_at=now - timedelta(hours=8),
+            )
+        ]
+        landing = LandingReport(repo="/repo/app", main_ref="origin/main", branches_scanned=2)
+        landing.changes.append(UnlandedChange(
+            sha="5tranded0001", branch="fix/stacked", subject="work a parent branch swallowed",
+            committed_at=now - timedelta(days=40), lines_added=80, lines_present=1,
+            files_measured=1, measurable=True, merged_into=("origin/codex/parent",),
+        ))
+        landing.changes.append(UnlandedChange(
+            sha="0penpr000001", branch="feat/still-open", subject="an open pull request's own commit",
+            committed_at=now - timedelta(days=20), lines_added=900, lines_present=0,
+            files_measured=4, measurable=True, merged_into=(),
+        ))
+
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+            patch.object(ui, "unlanded_work_for_project", return_value=landing),
+        ):
+            top = ui.build_optimize_inventory(rows, outcomes={}, handoff_decisions=[])["top"]
+
+        self.assertEqual([change["sha"] for change in top["changes"]], ["5tranded0001"])
+        self.assertEqual(top["unlanded_count"], 1)
+        self.assertEqual(top["unmerged_anywhere_count"], 1)
+        # The 900 absent lines of the open branch must not inflate the headline.
+        self.assertEqual(top["lines_at_stake"], 79)
+        self.assertNotIn("feat/still-open", json.dumps(top))
+
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
         runtime = SimpleNamespace(stale=True, rss_kb=147251)
         with (
