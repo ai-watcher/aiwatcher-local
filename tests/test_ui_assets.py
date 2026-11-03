@@ -3201,15 +3201,27 @@ class AiAssistDrawerTest(unittest.TestCase):
         # open had to be opened again every few seconds. Each mount that can
         # contain a <details> goes through setPanelHtml, which carries the
         # choice across the rebuild.
-        for mount in (
-            "optimizeWorkspaceBody",
-            "coverageRowsSettings",
-            "insightFeed",
-            "improveResults",
-        ):
+        # A panel held through a rebuild reaches setPanelHtml by way of
+        # setPanelHtmlHolding, so the write is named per mount rather than
+        # assumed to be one literal call.
+        writes = {
+            "optimizeWorkspaceBody": (
+                "const optimizePanel = document.getElementById('optimizeWorkspaceBody')",
+                "setPanelHtml(optimizePanel,",
+            ),
+            "coverageRowsSettings": ("setPanelHtml(document.getElementById('coverageRowsSettings')",),
+            "insightFeed": ("setPanelHtmlHolding(document.getElementById('insightFeed')",),
+            "improveResults": ("setPanelHtml(document.getElementById('improveResults')",),
+        }
+        for mount, expected in writes.items():
             with self.subTest(mount=mount):
-                self.assertIn(f"setPanelHtml(document.getElementById('{mount}')", self.js)
+                for fragment in expected:
+                    self.assertIn(fragment, self.js)
                 self.assertNotIn(f"document.getElementById('{mount}').innerHTML =", self.js)
+        # Holding a panel must not become a way around the open-state helper.
+        start = self.js.index("function setPanelHtmlHolding(")
+        holding = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("setPanelHtml(node, html)", holding)
         self.assertIn("setPanelHtml(deliveryTrackingNode,", self.js)
         self.assertIn("setPanelHtml(companionNode,", self.js)
 

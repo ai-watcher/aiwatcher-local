@@ -2466,6 +2466,81 @@ function renderChangeTotals(rows, meta, unbanked) {
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);
 }
+function optimizeIsRefreshing(optimize, cache = {}) {
+  const state = optimize?.review_state;
+  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
+  return state === 'refreshing' || cache.refreshing
+    || ['building', 'refreshing', 'stale'].includes(cache.status) || outdated;
+}
+// Keep a rebuilt panel readable instead of emptying it.
+//
+// Evidence rebuilds take tens of seconds, and replacing the card with a status
+// line for that long is the whole of "it wipes the screen to update": you lose
+// your place mid-sentence and wait for the same text to come back. The numbers
+// on screen are the ones the last completed check produced, so they are worth
+// more than a blank panel -- but they are not current, so the controls that act
+// on them are disabled until they are.
+function markPanelUpdating(node, updating, message) {
+  if (!node) return;
+  const existing = node.querySelector(':scope > .panel-updating');
+  if (!updating) {
+    if (existing) existing.remove();
+    node.removeAttribute('aria-busy');
+    node.querySelectorAll('[data-updating-disabled]').forEach(control => {
+      control.disabled = false;
+      control.removeAttribute('data-updating-disabled');
+    });
+    return;
+  }
+  node.setAttribute('aria-busy', 'true');
+  if (!existing && node.textContent.replace(/\s+/g, ' ').trim().length >= PANEL_UPDATING_MIN_CHARS) {
+    const banner = document.createElement('div');
+    banner.className = 'panel-updating';
+    banner.setAttribute('role', 'status');
+    banner.setAttribute('aria-live', 'polite');
+    banner.textContent = message || 'Updating evidence. Showing the last completed check until it is ready.';
+    node.prepend(banner);
+  }
+  node.querySelectorAll('button:not([disabled])').forEach(control => {
+    control.disabled = true;
+    control.setAttribute('data-updating-disabled', '1');
+  });
+}
+// Only banner a panel big enough that the line is smaller than what it labels.
+const PANEL_UPDATING_MIN_CHARS = 400;
+// Below this share of what is already there, a render arriving mid-rebuild is
+// the cache answering with nothing yet rather than with news.
+const PANEL_REBUILD_KEEP_RATIO = 0.4;
+
+function summaryIsRebuilding(cache) {
+  return !!(cache && (cache.refreshing || ['building', 'refreshing', 'stale'].includes(cache.status)));
+}
+
+// Hold a panel's last answer while the summary cache rebuilds.
+//
+// These panels empty for a different reason than Optimize does: mid-rebuild the
+// payload carries empty arrays, so the renderers correctly draw nothing and the
+// panel goes blank for as long as the rebuild runs. Measured here, one refresh
+// took changeRows from 5,005 characters to 60 and insightFeed from 8,521 to
+// 534. Nothing announces that, so it reads as the screen wiping itself.
+//
+// Judged by size rather than by each renderer's own idea of "empty", because
+// there are several of those and they would have to be kept in step.
+function setPanelHtmlHolding(node, html, rebuilding) {
+  if (!node) return;
+  if (rebuilding) {
+    const probe = document.createElement('div');
+    probe.innerHTML = html;
+    const incoming = probe.textContent.replace(/\s+/g, ' ').trim().length;
+    const current = node.textContent.replace(/\s+/g, ' ').trim().length;
+    if (current > 120 && incoming < current * PANEL_REBUILD_KEEP_RATIO) {
+      markPanelUpdating(node, true);
+      return;
+    }
+  }
+  markPanelUpdating(node, false);
+  setPanelHtml(node, html);
+}
 function renderOptimizeWorkspace(optimize, cache = {}) {
   const state = optimize?.review_state;
   const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
@@ -7266,9 +7341,19 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('freshStartReceiptScope').textContent = freshStartStored > freshStartShown
     ? `of ${freshStartStored} Fresh Start receipts · newest first, not filtered by the window above`
     : 'Fresh Start receipts · every one stored, newest first';
-  document.getElementById('sessionContextHealth').innerHTML =
-    renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
-  setPanelHtml(document.getElementById('optimizeWorkspaceBody'), renderOptimizeWorkspace(data.optimize || null, data.cache || {}));
+  const rebuilding = summaryIsRebuilding(data.cache);
+  setPanelHtmlHolding(document.getElementById('sessionContextHealth'),
+    renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence), rebuilding);
+  const optimizePanel = document.getElementById('optimizeWorkspaceBody');
+  // A rebuild keeps whatever the last completed check rendered. Only a panel
+  // with real cards in it is worth holding: with nothing there yet, the status
+  // line is the most honest thing to show.
+  if (optimizeIsRefreshing(data.optimize || null, data.cache || {}) && optimizePanel?.querySelector('.action-queue')) {
+    markPanelUpdating(optimizePanel, true);
+  } else {
+    markPanelUpdating(optimizePanel, false);
+    setPanelHtml(optimizePanel, renderOptimizeWorkspace(data.optimize || null, data.cache || {}));
+  }
   // The summary has to carry the count, or a collapsed card hides the fact that
   // there is anything in it at all.
   const optimizeSummary = document.getElementById('optimizeWorkspaceSummary');
@@ -7298,8 +7383,9 @@ async function loadOnce(resetDetail, forceRefresh) {
     (trendNodes[row.session_id] || []).forEach(node => drawTrend(node, row.chart));
   });
   changeRowsCache = data.changes || [];
-  document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
-  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
+  setPanelHtmlHolding(document.getElementById('changeRows'), renderChangeRows(changeRowsCache), rebuilding);
+  setPanelHtmlHolding(document.getElementById('changeTotals'),
+    renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked), rebuilding);
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
   setPanelHtml(document.getElementById('coverageRowsSettings'), renderCoverage(coverage));
@@ -7365,7 +7451,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('analystOverhead').textContent = overhead
     ? `${overhead.label} — ${overhead.detail}`
     : '';
-  setPanelHtml(document.getElementById('insightFeed'), renderInsightFeed(data.insights));
+  setPanelHtmlHolding(document.getElementById('insightFeed'), renderInsightFeed(data.insights), rebuilding);
   setPanelHtml(document.getElementById('improveResults'), renderImproveResults(data.improve_results));
   // Same two-step as the runway charts: markup first, SVG appended after, and
   // nodes collected by attribute rather than by a selector built from data.
