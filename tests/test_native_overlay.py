@@ -1202,5 +1202,49 @@ class SubtitleFitTests(unittest.TestCase):
         self.assertLessEqual(6 * len(fitted), 250)
 
 
+class PresenceDragTests(unittest.TestCase):
+    """The bar is draggable from anywhere, which must not steal row clicks.
+
+    A Tk toplevel binding fires for every descendant, so the bar's drag
+    handlers run on presses that land on its buttons as well. They are only
+    safe there if the grab is measured against the window and a click has room
+    to be imprecise.
+    """
+
+    def test_the_grab_is_measured_against_the_window_not_the_widget(self) -> None:
+        # Window parked at (500, 20); the press lands on a row button near the
+        # right edge, 7px into that button. The grab is 240px into the window,
+        # not 7 -- measuring the widget is what made the bar jump to the
+        # pointer and cancelled the Open click.
+        self.assertEqual(
+            native_overlay._drag_grab_offset((740, 60), (500, 20)),
+            (240, 40),
+        )
+
+    def test_a_drag_keeps_the_grabbed_point_under_the_pointer(self) -> None:
+        grab = native_overlay._drag_grab_offset((740, 60), (500, 20))
+        pointer = (760, 95)
+        moved = (pointer[0] - grab[0], pointer[1] - grab[1])
+        self.assertEqual(moved, (520, 55))
+        # The button the press started on is still under the pointer, so the
+        # release still reaches it.
+        self.assertEqual((moved[0] + grab[0], moved[1] + grab[1]), pointer)
+
+    def test_a_click_that_jitters_is_not_a_drag(self) -> None:
+        press = (740, 60)
+        for pointer in ((740, 60), (741, 60), (742, 61), (740, 63)):
+            self.assertFalse(native_overlay._drag_has_travelled(press, pointer), pointer)
+        self.assertTrue(native_overlay._drag_has_travelled(press, (744, 60)))
+        self.assertTrue(native_overlay._drag_has_travelled(press, (738, 62)))
+
+    def test_the_bar_and_the_bubble_share_one_travel_rule(self) -> None:
+        source = inspect.getsource(native_overlay.run_native_presence)
+        # The grab and the threshold both come from the helpers, and nothing
+        # reads the widget-local coordinates for a drag any more.
+        self.assertIn("_drag_grab_offset(", source)
+        self.assertEqual(source.count("_drag_has_travelled("), 2)
+        self.assertNotIn('drag_start["x"] = int(event.x)', source)
+
+
 if __name__ == "__main__":
     unittest.main()

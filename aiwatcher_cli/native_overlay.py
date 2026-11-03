@@ -3423,6 +3423,37 @@ def _paint_brand_mark(tk_module: object, canvas: object, height: float, blue: st
         _draw_brand_mark(canvas, height=height, blue=blue, ink=ink)
 
 
+# A press has to travel before it counts as a drag. The macOS bubble uses the
+# same few points for the same reason: a click is never pixel-perfect, and a
+# bar that slides on the first stray pixel takes the release with it, so the
+# button under the press never gets its click.
+PRESENCE_DRAG_TRAVEL_PX = 3
+
+
+def _drag_grab_offset(pointer_root: tuple[int, int], window_root: tuple[int, int]) -> tuple[int, int]:
+    """Where inside the window the press landed, in screen coordinates.
+
+    Both arguments are screen coordinates: the pointer, and the window's own
+    top-left corner. Measuring the grab against the *widget* that received the
+    press is the bug this replaces -- a Tk toplevel binding fires for every
+    descendant, so a press on a row's Open button arrived carrying that
+    button's local coordinates, a handful of pixels, and the window then
+    parked its corner under the pointer on the first motion. That read as the
+    bar jumping to the cursor, and it dragged the button out from under the
+    press, so the click never completed.
+    """
+    return (pointer_root[0] - window_root[0], pointer_root[1] - window_root[1])
+
+
+def _drag_has_travelled(
+    press_root: tuple[int, int],
+    pointer_root: tuple[int, int],
+    travel_px: int = PRESENCE_DRAG_TRAVEL_PX,
+) -> bool:
+    """True once the pointer has moved far enough to mean a drag, not a click."""
+    return abs(pointer_root[0] - press_root[0]) + abs(pointer_root[1] - press_root[1]) > travel_px
+
+
 def run_native_presence(
     url: str,
     *,
@@ -3656,15 +3687,27 @@ def run_native_presence(
     # carries. Packed only while the payload says the number is measurable.
     meter_canvas = tk.Canvas(subtitle_row, width=70, height=9, bg="#090d14", highlightthickness=0, bd=0)
 
-    drag_start: dict[str, int] = {"x": 0, "y": 0}
+    drag_start: dict[str, int] = {"x": 0, "y": 0, "press_x": 0, "press_y": 0, "moved": 0}
 
     def begin_drag(event: tk.Event) -> None:
-        drag_start["x"] = int(event.x)
-        drag_start["y"] = int(event.y)
+        grab_x, grab_y = _drag_grab_offset(
+            (int(event.x_root), int(event.y_root)),
+            (int(root.winfo_rootx()), int(root.winfo_rooty())),
+        )
+        drag_start["x"] = grab_x
+        drag_start["y"] = grab_y
+        drag_start["press_x"] = int(event.x_root)
+        drag_start["press_y"] = int(event.y_root)
+        drag_start["moved"] = 0
 
     def move_window(event: tk.Event) -> None:
-        new_x = int(event.x_root) - drag_start["x"]
-        new_y = int(event.y_root) - drag_start["y"]
+        pointer = (int(event.x_root), int(event.y_root))
+        if not drag_start["moved"]:
+            if not _drag_has_travelled((drag_start["press_x"], drag_start["press_y"]), pointer):
+                return
+            drag_start["moved"] = 1
+        new_x = pointer[0] - drag_start["x"]
+        new_y = pointer[1] - drag_start["y"]
         root.geometry(f"+{new_x}+{new_y}")
         window_box.update(x=new_x, y=new_y)
 
@@ -5145,11 +5188,13 @@ def run_native_presence(
         collapsed_press["x"] = int(event.x_root)
         collapsed_press["y"] = int(event.y_root)
         collapsed_press["moved"] = False
-        drag_start["x"] = int(event.x_root) - int(root.winfo_rootx())
-        drag_start["y"] = int(event.y_root) - int(root.winfo_rooty())
+        # The window offset itself comes from begin_drag, which the toplevel
+        # binding runs for this canvas too.
 
     def collapsed_button_motion(event: tk.Event) -> None:
-        if abs(int(event.x_root) - collapsed_press["x"]) + abs(int(event.y_root) - collapsed_press["y"]) > 3:
+        if _drag_has_travelled(
+            (collapsed_press["x"], collapsed_press["y"]), (int(event.x_root), int(event.y_root))
+        ):
             collapsed_press["moved"] = True
         if collapsed_press["moved"]:
             move_window(event)
