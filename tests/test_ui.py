@@ -3339,6 +3339,131 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("2 source sessions waiting", group["activity_summary"])
         self.assertIn("oldest copied 4d ago", group["activity_summary"])
 
+    @staticmethod
+    def _waiting_receipt(
+        *,
+        receipt_id: str,
+        age_hours: float,
+        correlation: dict | None = None,
+        **overrides,
+    ) -> dict:
+        stored = {
+            "status": "waiting",
+            "method": "first_following_local_session",
+            "window_hours": 24,
+            "confidence": None,
+            "reason": "No later same-project local session has been observed yet.",
+        }
+        stored.update(correlation or {})
+        record = {
+            "id": receipt_id,
+            "receipt_kind": "fresh_start",
+            "created_at": (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat(),
+            "source_session_id": f"source-{receipt_id}",
+            "source_project_path": "/repo/app",
+            "decision": "copy_handoff",
+            "next_session_id": None,
+            "next_session_correlation": stored,
+        }
+        record.update(overrides)
+        return record
+
+    @staticmethod
+    def _inventory(decisions: list[dict]) -> dict:
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            return ui.build_optimize_inventory([], outcomes={}, handoff_decisions=decisions)
+
+    def test_fresh_start_receipt_inside_its_window_still_needs_cleanup(self) -> None:
+        inventory = self._inventory([self._waiting_receipt(receipt_id="live", age_hours=12)])
+
+        self.assertEqual(inventory["top"]["kind"], "fresh_start_pending")
+        self.assertEqual(inventory["top"]["session_count"], 1)
+
+    def test_expired_fresh_start_receipts_leave_no_cleanup_card(self) -> None:
+        """The card used to be unremovable: nothing the user could do resolved a
+        receipt whose 24h matching window had closed, so it returned every day."""
+        decisions = [
+            self._waiting_receipt(receipt_id=f"old-{index}", age_hours=76 * 24)
+            for index in range(3)
+        ]
+
+        inventory = self._inventory(decisions)
+
+        self.assertEqual(
+            [row for row in inventory["candidates"] if row.get("kind") == "fresh_start_pending"],
+            [],
+        )
+
+    def test_cleanup_count_holds_only_receipts_that_can_still_resolve(self) -> None:
+        decisions = [
+            self._waiting_receipt(receipt_id="live", age_hours=12),
+            *(
+                self._waiting_receipt(receipt_id=f"old-{index}", age_hours=76 * 24)
+                for index in range(3)
+            ),
+        ]
+
+        inventory = self._inventory(decisions)
+
+        group = inventory["top"]
+        self.assertEqual(group["kind"], "fresh_start_pending")
+        self.assertEqual(group["session_count"], 1)
+        self.assertEqual(group["receipt_ids"], ["live"])
+        self.assertEqual(group["title"], "Finish Fresh Start cleanup")
+
+    def test_linked_receipt_past_the_window_still_needs_review(self) -> None:
+        """A possible match is a decision the user can still make, unlike a
+        window that closed with nothing observed."""
+        inventory = self._inventory([
+            self._waiting_receipt(
+                receipt_id="linked",
+                age_hours=76 * 24,
+                correlation={"status": "linked", "confidence": "high"},
+                next_session_id="legacy-auto-match",
+            )
+        ])
+
+        self.assertEqual(inventory["top"]["kind"], "fresh_start_pending")
+        self.assertEqual(inventory["top"]["session_count"], 1)
+
+    def test_rendered_receipt_rows_keep_the_expiry_the_card_reads(self) -> None:
+        """The dashboard feeds rendered receipt rows back into the Optimize
+        inventory, and those rows carry no correlation; re-deriving the state
+        from one read every expired receipt as plainly pending."""
+        decisions = [
+            self._waiting_receipt(receipt_id="old", age_hours=76 * 24),
+            self._waiting_receipt(receipt_id="live", age_hours=12),
+        ]
+        with patch.object(ui, "recent_handoff_decisions", return_value=decisions):
+            rows = ui._handoff_decision_rows(limit=10, sessions=[])
+
+        inventory = self._inventory(rows)
+
+        expired_row = next(row for row in rows if row["id"] == "old")
+        self.assertEqual(expired_row["proof_status"], "Follow-up window closed")
+        self.assertIn("No later same-project local session has been observed.", expired_row["proof_reason"])
+        self.assertIn("24h matching window has closed", expired_row["proof_reason"])
+        # Expiry stops the to-do, it does not erase what was observed.
+        self.assertIn("The brief was copied", expired_row["proof_reason"])
+        self.assertEqual(expired_row["followup"]["state"], "expired")
+        self.assertEqual(next(row for row in rows if row["id"] == "live")["proof_status"], "Proof pending")
+        self.assertEqual(inventory["top"]["kind"], "fresh_start_pending")
+        self.assertEqual(inventory["top"]["receipt_ids"], ["live"])
+
+    def test_session_drawer_reports_a_closed_window_rather_than_progress(self) -> None:
+        receipt = self._waiting_receipt(receipt_id="old", age_hours=76 * 24, source_session_id="source")
+        with patch.object(ui, "recent_handoff_decisions", return_value=[receipt]):
+            completion = ui._fresh_start_completion("source")
+
+        self.assertEqual(completion["status"], "window_closed")
+        self.assertEqual(completion["label"], "Fresh Start copied; follow-up window closed")
+        self.assertIn("stopped waiting", completion["reason"])
+        self.assertEqual(completion["receipt_id"], "old")
+
     def test_handoff_receipt_labels_inferred_match_as_possible(self) -> None:
         source = LocalSession(session_id="source", tool="codex-cli", project_path="/repo/app")
         candidate = LocalSession(session_id="candidate", tool="codex-cli", project_path="/repo/app")

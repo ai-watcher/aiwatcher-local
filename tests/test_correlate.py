@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -315,6 +316,43 @@ class CorrelateTests(unittest.TestCase):
         self.assertIsNone(record["next_session_id"])
         self.assertEqual(record["next_session_correlation"]["candidate_session_id"], "candidate")
         self.assertEqual(record["next_session_correlation"]["status"], "candidate")
+
+
+    def test_a_wider_cutoff_rewrites_waiting_while_the_read_side_reports_expired(self) -> None:
+        """Re-running the correlator over older receipts cannot resolve them.
+
+        The matching window closed long before, so the correlator writes
+        "waiting" again no matter how far back `days` reaches. Expiry is read
+        from the receipt's own timestamp instead, which is why widening the
+        cutoff alone would have left the Optimize card unremovable.
+        """
+        now = datetime.now(timezone.utc)
+        copied_at = now - timedelta(days=76)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decision = local_state.record_handoff_decision(
+                    session_id="source",
+                    decision="copy_handoff",
+                    reason="Context pressure.",
+                    source_project_path="/repo/app",
+                )
+                stored = json.loads(Path(state_file).read_text(encoding="utf-8"))
+                for row in stored["handoff_decisions"]:
+                    row["created_at"] = copied_at.isoformat()
+                Path(state_file).write_text(json.dumps(stored), encoding="utf-8")
+
+                correlated = link_recent_fresh_start_receipts_to_sessions(
+                    [session(session_id="much-later", project="/repo/app", started_at=copied_at + timedelta(hours=48))],
+                    days=90,
+                )
+                record = next(
+                    row for row in local_state.recent_handoff_decisions() if row["id"] == decision["id"]
+                )
+
+        self.assertEqual(correlated, 0)
+        self.assertEqual(record["next_session_correlation"]["status"], "waiting")
+        self.assertEqual(local_state.fresh_start_followup_evidence(record)["state"], "expired")
 
 
 if __name__ == "__main__":

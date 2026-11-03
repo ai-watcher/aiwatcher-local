@@ -87,6 +87,10 @@ function renderHandoffDecisionRows(decisions) {
   return decisions.map(decision => {
     const relatedId = decision.next_session_id || decision.candidate_session_id || '';
     const relatedLabel = decision.next_session_id ? 'next' : (decision.candidate_session_id ? 'candidate' : 'next');
+    // "waiting" in the row whose status says the window closed read as a
+    // follow-up still to come.
+    const expired = decision.followup && decision.followup.state === 'expired';
+    const relatedEmpty = expired ? 'none observed' : 'waiting';
     return `<tr>
     <td>${esc(dateLabel(decision.created_at))}</td>
     <td>${esc(handoffDecisionLabel(decision.decision))}</td>
@@ -101,7 +105,7 @@ function renderHandoffDecisionRows(decisions) {
             : decision.outcome || decision.inferred_outcome);
       return specific ? `<br><span class="sub">${esc(specific)}</span>` : '';
     })()}${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
-    <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">${esc(relatedLabel)}</span> ${esc(relatedId || 'waiting')}</td>
+    <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">${esc(relatedLabel)}</span> ${esc(relatedId || relatedEmpty)}</td>
     <td>${relatedId ? `<button class="row-action" onclick="selectSession('${esc(relatedId)}')">Inspect ${decision.next_session_id ? 'next' : 'candidate'}</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
   </tr>`;
   }).join('');
@@ -4338,12 +4342,14 @@ function renderFreshStartCompletion(s) {
   if (!completion) return '';
   const completed = completion.status === 'completed';
   const possible = completion.status === 'possible_followup';
+  // The window closed with nothing observed: settled, but not proof either way.
+  const closed = completion.status === 'window_closed';
   const nextButton = completed && completion.next_session_id
     ? `<button class="btn-primary" onclick="selectSession('${esc(completion.next_session_id)}')">Open follow-up</button>`
     : '';
   return `<section class="detail-section recommended-action action-composer settled fresh-start-completion">
     <div class="action-composer-head">
-      <h3>${completed ? 'Completed' : (possible ? 'Needs confirmation' : 'In progress')}</h3>
+      <h3>${completed ? 'Completed' : (possible ? 'Needs confirmation' : (closed ? 'Window closed' : 'In progress'))}</h3>
       <strong>${esc(completion.label || (completed ? 'Fresh Start completed' : 'Fresh Start proof pending'))}</strong>
       <p>${esc(completion.reason || '')}</p>
     </div>
@@ -4352,7 +4358,7 @@ function renderFreshStartCompletion(s) {
       ${completion.confidence ? `<span class="pill">${esc(completion.confidence)} confidence</span>` : ''}
     </div>
     <div class="action-buttons">${nextButton}<button class="btn-quiet" onclick="showView('receipts'); closeDrawer()">View receipt</button></div>
-    <p class="tool-link-note">${completed ? 'This handoff has a confirmed follow-up. Any current context signal is checked separately.' : 'The receipt remains open until an explicit follow-up link is available.'}</p>
+    <p class="tool-link-note">${completed ? 'This handoff has a confirmed follow-up. Any current context signal is checked separately.' : (closed ? 'The receipt stays readable as evidence that the brief was copied, but it is no longer an open to-do.' : 'The receipt remains open until an explicit follow-up link is available.')}</p>
   </section>`;
 }
 function renderSessionActions(s) {

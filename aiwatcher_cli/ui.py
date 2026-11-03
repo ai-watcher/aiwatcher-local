@@ -2163,6 +2163,37 @@ def _fresh_start_duplicate_window_match(
     return False
 
 
+def _receipt_followup_evidence(record: dict[str, object]) -> dict[str, object]:
+    """Classify a receipt, or reuse the classification a row already carries.
+
+    build_optimize_inventory is handed rendered receipt rows, and those drop
+    ``next_session_correlation``. Re-deriving the state from one of them loses
+    the stored status, so an expired receipt -- and an explicitly linked one --
+    reads as plainly pending. The row carries its own classification instead.
+    """
+    carried = record.get("followup")
+    if isinstance(carried, dict) and carried.get("state"):
+        return carried
+    return fresh_start_followup_evidence(record)
+
+
+def _fresh_start_window_closed_reason(reason: object, window_hours: object) -> str:
+    """Report an expired receipt without erasing what was observed.
+
+    The stored reason was written while AIWatcher was still waiting ("...has
+    not been observed yet"), which contradicts the closed window it is now
+    printed beside, so the waiting tense goes and the window fact is added.
+    """
+    text = str(reason or "No later same-project local session was observed.")
+    if text.endswith(" yet."):
+        text = f"{text[: -len(' yet.')]}."
+    hours = window_hours if isinstance(window_hours, int) and window_hours > 0 else 24
+    return (
+        f"{text} The {hours}h matching window has closed, so AIWatcher stopped waiting. "
+        "The brief was copied; whether it was used was never confirmed, and no saved tokens are claimed."
+    )
+
+
 def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     """Collapse pending Fresh Start rows that nothing on screen distinguishes.
 
@@ -2352,8 +2383,12 @@ def build_optimize_inventory(
             continue
         if str(decision.get("decision") or "") not in {"new_chat", "copy_handoff"}:
             continue
-        followup = fresh_start_followup_evidence(decision)
-        if followup["state"] == "confirmed":
+        followup = _receipt_followup_evidence(decision)
+        # Proven and expired receipts are both settled: one has its follow-up,
+        # the other's matching window closed and will never get one. Neither is
+        # an open to-do, and an expired one has no action left to offer, so the
+        # card would nag about something the user cannot resolve.
+        if followup["state"] in {"confirmed", "expired"}:
             continue
         created_at = _parse_iso_datetime(decision.get("created_at"))
         if created_at is not None and now - created_at < timedelta(hours=2):
@@ -3048,15 +3083,25 @@ def _fresh_start_completion(session_id: str) -> dict[str, object] | None:
         followup = fresh_start_followup_evidence(decision)
         confirmed = followup["state"] == "confirmed"
         possible = followup["state"] == "possible"
-        status = "completed" if confirmed else ("possible_followup" if possible else "proof_pending")
-        label = "Fresh Start completed" if confirmed else ("Possible follow-up found" if possible else "Fresh Start copied; proof pending")
+        expired = followup["state"] == "expired"
+        if confirmed:
+            status, label = "completed", "Fresh Start completed"
+        elif possible:
+            status, label = "possible_followup", "Possible follow-up found"
+        elif expired:
+            status, label = "window_closed", "Fresh Start copied; follow-up window closed"
+        else:
+            status, label = "proof_pending", "Fresh Start copied; proof pending"
+        if expired:
+            reason = _fresh_start_window_closed_reason(followup.get("reason"), followup.get("window_hours"))
+        elif confirmed:
+            reason = str(followup.get("reason") or "The follow-up explicitly linked this Fresh Start receipt.")
+        else:
+            reason = str(followup.get("reason") or "Waiting for explicit follow-up evidence.")
         return {
             "status": status,
             "label": label,
-            "reason": str(
-                followup.get("reason")
-                or ("The follow-up explicitly linked this Fresh Start receipt." if confirmed else "Waiting for explicit follow-up evidence.")
-            ),
+            "reason": reason,
             "receipt_id": decision.get("id"),
             "created_at": decision.get("created_at"),
             "next_session_id": followup.get("next_session_id"),
@@ -6178,6 +6223,14 @@ def _handoff_decision_rows(
             elif followup["state"] == "possible":
                 proof_status = "Possible follow-up"
                 proof_reason = str(followup.get("reason") or "A later same-project session is a possible match, not proof that the handoff was used.")
+            elif followup["state"] == "expired":
+                # The copy stays on record. What ended is the waiting, not the
+                # evidence: AIWatcher only looks for a follow-up inside the
+                # window, so once it closes the answer cannot change.
+                proof_status = "Follow-up window closed"
+                proof_reason = _fresh_start_window_closed_reason(
+                    correlation.get("reason"), followup.get("window_hours")
+                )
             elif status == "ambiguous":
                 proof_status = "Multiple possible next sessions"
                 proof_reason = str(correlation.get("reason") or "AIWatcher found more than one possible follow-up.")
@@ -6258,6 +6311,9 @@ def _handoff_decision_rows(
             "next_session_id": next_session_id,
             "candidate_session_id": candidate_session_id,
             "decision": decision,
+            # Carried so later readers (the Optimize inventory) do not
+            # re-classify this row without its correlation.
+            "followup": followup,
             "receipt_kind": row.get("receipt_kind"),
             "receipt_viewed_at": row.get("receipt_viewed_at"),
             "reason": row.get("reason"),

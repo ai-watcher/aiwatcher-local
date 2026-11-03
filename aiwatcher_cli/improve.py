@@ -186,10 +186,22 @@ def recent_results(state=None):
         followup = local_state.fresh_start_followup_evidence(record)
         confirmed = followup["state"] == "confirmed"
         possible = followup["state"] == "possible"
-        results.append({"title": "Fresh Start follow-up" if confirmed else ("Possible Fresh Start follow-up" if possible else "Fresh Start prepared"),
-                        "body": ("The follow-up was explicitly linked. This is still not proof of improvement."
-                                 if confirmed else ("A later same-project session may be the follow-up; explicit linkage is still missing."
-                                 if possible else "No later session linked yet. Copying a brief does not prove it was used.")),
+        expired = followup["state"] == "expired"
+        if confirmed:
+            title = "Fresh Start follow-up"
+            body = "The follow-up was explicitly linked. This is still not proof of improvement."
+        elif possible:
+            title = "Possible Fresh Start follow-up"
+            body = "A later same-project session may be the follow-up; explicit linkage is still missing."
+        elif expired:
+            title = "Fresh Start follow-up window closed"
+            body = (f"No follow-up session was observed within {followup.get('window_hours') or 24}h, so AIWatcher "
+                    "stopped waiting. The brief was copied; whether it was used was never confirmed.")
+        else:
+            title = "Fresh Start prepared"
+            body = "No later session linked yet. Copying a brief does not prove it was used."
+        results.append({"title": title,
+                        "body": body,
                         "session_id": record.get("source_session_id") or record.get("session_id"),
                         "at": record.get("created_at", "")})
     if state is not None:
