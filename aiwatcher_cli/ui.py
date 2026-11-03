@@ -9611,7 +9611,18 @@ def _companion_activity_contract(payload: dict[str, object]) -> dict[str, object
         raw_needs = payload.get("compact_rows") if state == "compact_recommended" else payload.get("waiting_sessions")
         if isinstance(raw_needs, list):
             headline_needs.extend(dict(row) for row in raw_needs if isinstance(row, dict))
-        if not raw_needs:
+        # A lone compaction only has something to review while the nudge is
+        # live. Past `copied` the step is a fact about work already done: the
+        # header carries it in full, so the synthetic row below repeated that
+        # sentence verbatim two lines under it, with a dead "Open" label and
+        # no button in either client -- and sitting in "For review" it made
+        # the activity line claim "1 to review" on a bar that is always open.
+        # The badge keeps the count, so the collapsed bubble is not blank.
+        spent_compaction = (
+            state == "compact_recommended"
+            and str(payload.get("compact_stage") or "nudge") not in {"nudge", "copied"}
+        )
+        if not raw_needs and not spent_compaction:
             headline_needs.append({
                 "kind": state,
                 "text": str(payload.get("subtitle") or payload.get("title") or "Review needed"),
