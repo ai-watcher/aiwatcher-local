@@ -100,6 +100,7 @@ from .local_state import (
     recent_ambient_interventions,
     recent_ai_assist_runs,
     recent_command_decisions,
+    handoff_decision_count,
     recent_handoff_decisions,
     recent_interventions,
     recent_delivery_events,
@@ -7202,6 +7203,15 @@ def build_summary(
             "rework_outcomes": outcomes["rework"],
             "abandoned_outcomes": outcomes["abandoned"],
             "preflight_decisions": len(interventions),
+            # The Fresh Start receipts table used to head itself with
+            # preflight_decisions above, which counts prompt-preflight
+            # interventions inside the day window -- a different feature over a
+            # different span from the receipt log it sat on. These two describe
+            # that table: how many rows it is being given, and how many
+            # receipts exist, since recent_handoff_decisions takes a limit and
+            # applies no date filter at all.
+            "fresh_start_receipts_shown": len(handoff_decisions),
+            "fresh_start_receipts_stored": handoff_decision_count(),
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         # Daily shape behind the four tiles. Absent from the shell payload
@@ -7575,6 +7585,15 @@ def _build_summary_shell(
             "rework_outcomes": outcomes["rework"],
             "abandoned_outcomes": outcomes["abandoned"],
             "preflight_decisions": len(interventions),
+            # The Fresh Start receipts table used to head itself with
+            # preflight_decisions above, which counts prompt-preflight
+            # interventions inside the day window -- a different feature over a
+            # different span from the receipt log it sat on. These two describe
+            # that table: how many rows it is being given, and how many
+            # receipts exist, since recent_handoff_decisions takes a limit and
+            # applies no date filter at all.
+            "fresh_start_receipts_shown": len(handoff_decisions),
+            "fresh_start_receipts_stored": handoff_decision_count(),
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         "survival": {"available": False, "reason": "Background evidence refresh pending."},

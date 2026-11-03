@@ -7122,7 +7122,6 @@ async function loadOnce(resetDetail, forceRefresh) {
   renderCacheStatus(data.cache || null);
   renderPresence(data.presence || null);
   const totals = data.totals;
-  document.getElementById('windowLabel').textContent = totals.window_label;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('sessions').textContent = totals.sessions;
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
@@ -7155,7 +7154,6 @@ async function loadOnce(resetDetail, forceRefresh) {
   // always evidence for, stated where it is asked.
   document.getElementById('proveClaim').innerHTML =
     renderProveClaim(data.unbanked, data.survival);
-  document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on
   // the fast shell payload, so every tile is reset rather than left showing the
@@ -7189,6 +7187,27 @@ async function loadOnce(resetDetail, forceRefresh) {
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
+  // Each card's inline count is written beside the rows it counts, from the
+  // same array that renders them, so neither number can drift from its table.
+  // The preflight count and the window label used to head the Fresh Start
+  // card, where they described a different feature over a different span: it
+  // read "7 preflight decisions / Last 7 days" above nine August receipts.
+  // preflight_decisions counts the interventions that matched the window; this
+  // table renders at most thirty of them, so say so when more matched.
+  document.getElementById('windowLabel').textContent = totals.window_label;
+  const preflightShown = receiptCache.length;
+  const preflightMatched = Number(totals.preflight_decisions || 0);
+  document.getElementById('preflightDecisions').textContent =
+    preflightMatched > preflightShown ? `${preflightShown} of ${preflightMatched}` : preflightShown;
+  // Fresh Start receipts are not window-filtered -- recent_handoff_decisions
+  // takes a limit and no date filter -- so the scope has to say whether older
+  // receipts exist rather than borrow the window above.
+  const freshStartShown = handoffDecisions.length;
+  const freshStartStored = Math.max(Number(totals.fresh_start_receipts_stored || 0), freshStartShown);
+  document.getElementById('freshStartReceiptCount').textContent = freshStartShown;
+  document.getElementById('freshStartReceiptScope').textContent = freshStartStored > freshStartShown
+    ? `of ${freshStartStored} Fresh Start receipts · newest first, not filtered by the window above`
+    : 'Fresh Start receipts · every one stored, newest first';
   document.getElementById('sessionContextHealth').innerHTML =
     renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null, data.cache || {});

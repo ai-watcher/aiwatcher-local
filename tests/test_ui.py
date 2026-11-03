@@ -5088,6 +5088,38 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(any(item["id"] == "churned" for item in summary["insights"]))
         self.assertEqual(summary["recent_sessions"][0]["inferred_outcome"], "churned")
 
+    def test_totals_describe_the_fresh_start_table_not_the_preflight_log(self) -> None:
+        """The Fresh Start receipts card headed itself with preflight_decisions,
+        which counts prompt-preflight interventions inside the day window. The
+        receipts under it come from recent_handoff_decisions: a limit, and no
+        date filter. So the card needs its own two numbers -- how many rows it
+        is given, and how many receipts exist -- and the second has to come from
+        the stored log, since the rows cannot say whether older ones exist.
+        """
+        now = datetime.now(timezone.utc)
+        receipts = [
+            {
+                "id": f"receipt-{index}",
+                "created_at": (now - timedelta(days=index)).isoformat(),
+                "source_session_id": f"source-{index}",
+                "decision": "copy_handoff",
+            }
+            for index in range(3)
+        ]
+        with (
+            patch.object(ui, "scan_all", return_value=[]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "recent_handoff_decisions", return_value=receipts),
+            patch.object(ui, "handoff_decision_count", return_value=17),
+        ):
+            summary = ui.build_summary(7)
+
+        totals = summary["totals"]
+        self.assertEqual(totals["fresh_start_receipts_shown"], len(summary["handoff_decisions"]))
+        self.assertEqual(totals["fresh_start_receipts_shown"], 3)
+        self.assertEqual(totals["fresh_start_receipts_stored"], 17)
+
     def test_handoff_detail_returns_capsule_for_session(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(

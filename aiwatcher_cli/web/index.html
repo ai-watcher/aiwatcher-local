@@ -464,12 +464,17 @@
       </div>
       <div id="report"></div>
     </section>
-    <!-- The preflight count used to be a standalone card floating above this
-         one with nothing connecting them (P3-4). It is an inline stat on the
-         card it describes. Both ids are kept: load() writes to them. -->
+    <!-- The preflight count used to be a standalone card floating above these
+         ones with nothing connecting them (P3-4). An inline stat belongs on the
+         card it describes -- and that is the Intervention receipts card below,
+         not this one. preflight_decisions counts prompt-preflight interventions
+         inside the selected day window; these rows are Fresh Start receipts
+         from a log that takes a limit and no date filter, so the count and the
+         window both described a different table. This card now states what it
+         is actually showing. -->
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Fresh Start receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up was explicitly linked. Same-project timing is shown only as a possible match.</p></div>
+        <div><h2>Fresh Start receipts</h2><p><strong id="freshStartReceiptCount">-</strong> <span id="freshStartReceiptScope">Fresh Start receipts</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up was explicitly linked. Same-project timing is shown only as a possible match.</p></div>
         <div class="actions"><button class="btn-quiet" aria-pressed="false" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Private</span></div>
       </div>
       <div class="table-wrap"><table>
@@ -479,7 +484,7 @@
     </div>
     <div class="card">
       <div class="section-title">
-        <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
+        <div><h2>Intervention receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
         <span class="note-chip local">Private</span>
       </div>
       <div class="table-wrap"><table>
