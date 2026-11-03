@@ -3229,6 +3229,116 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("explicit follow-up proof", inventory["top"]["summary"])
         self.assertEqual(inventory["top"]["impact_label"], "~120.0k source-session tokens recorded")
 
+    def test_grouped_fresh_starts_report_the_oldest_receipt_age(self) -> None:
+        """The card says "oldest copied X", and X used to be the newest.
+
+        recent_handoff_decisions returns newest-first, so the first candidate
+        the grouper saw was the newest one. A group whose oldest brief was
+        copied in August read as two days old.
+        """
+        now = datetime.now(timezone.utc)
+        decisions = [
+            {
+                "id": f"receipt-{label}",
+                "created_at": (now - timedelta(days=days)).isoformat(),
+                "source_session_id": f"source-{label}",
+                "source_project_path": "/repo/app",
+                "decision": "copy_handoff",
+            }
+            for label, days in (("newest", 2), ("middle", 30), ("oldest", 76))
+        ]
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=decisions)
+
+        group = inventory["top"]
+        self.assertEqual(group["kind"], "fresh_start_pending")
+        self.assertEqual(group["session_count"], 3)
+        self.assertIn("oldest copied 76d ago", group["activity_summary"])
+        self.assertEqual(group["updated_label"], "76d ago")
+        self.assertEqual(
+            group["last_activity"],
+            min(str(decision["created_at"]) for decision in decisions),
+        )
+
+    def test_two_surfaces_recording_one_fresh_start_count_once(self) -> None:
+        """The Companion bubble and the session drawer both wrote a receipt for
+        one decision, 29s apart, and the card counted two sessions waiting.
+        Both receipt ids still have to survive: the cleanup prompt and the
+        receipts view are keyed on them."""
+        now = datetime.now(timezone.utc)
+        copied_at = now - timedelta(days=76)
+        decisions = [
+            {
+                "id": "receipt-drawer",
+                "created_at": (copied_at + timedelta(seconds=29)).isoformat(),
+                "source_session_id": "shared-source",
+                "source_project_path": "/repo/app",
+                "decision": "copy_handoff",
+                "action_channel": "dashboard_session",
+                "expected_saved_context_tokens": 120_000,
+            },
+            {
+                "id": "receipt-companion",
+                "created_at": copied_at.isoformat(),
+                "source_session_id": "shared-source",
+                "source_project_path": "/repo/app",
+                "decision": "copy_handoff",
+                "action_channel": "companion",
+                "expected_saved_context_tokens": 120_000,
+            },
+        ]
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=decisions)
+
+        group = inventory["top"]
+        self.assertEqual(group["session_count"], 1)
+        self.assertEqual(group["source_session_ids"], ["shared-source"])
+        self.assertEqual(sorted(group["receipt_ids"]), ["receipt-companion", "receipt-drawer"])
+        self.assertNotIn("2 source sessions", group["activity_summary"])
+        self.assertIn("2 receipts", group["activity_summary"])
+        # One session's context, not two: the pair describes the same source.
+        self.assertEqual(group["impact_label"], "~120.0k source-session tokens recorded")
+
+    def test_the_same_session_copying_again_later_is_a_second_decision(self) -> None:
+        # The dedup window is for two surfaces writing one action, not for a
+        # user who came back to a long session a day later.
+        now = datetime.now(timezone.utc)
+        decisions = [
+            {
+                "id": "receipt-second",
+                "created_at": (now - timedelta(days=3)).isoformat(),
+                "source_session_id": "shared-source",
+                "source_project_path": "/repo/app",
+                "decision": "copy_handoff",
+            },
+            {
+                "id": "receipt-first",
+                "created_at": (now - timedelta(days=4)).isoformat(),
+                "source_session_id": "shared-source",
+                "source_project_path": "/repo/app",
+                "decision": "copy_handoff",
+            },
+        ]
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=decisions)
+
+        group = inventory["top"]
+        self.assertEqual(group["session_count"], 2)
+        self.assertIn("2 source sessions waiting", group["activity_summary"])
+        self.assertIn("oldest copied 4d ago", group["activity_summary"])
+
     def test_handoff_receipt_labels_inferred_match_as_possible(self) -> None:
         source = LocalSession(session_id="source", tool="codex-cli", project_path="/repo/app")
         candidate = LocalSession(session_id="candidate", tool="codex-cli", project_path="/repo/app")

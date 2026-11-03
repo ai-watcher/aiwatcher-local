@@ -2122,14 +2122,64 @@ def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+# Two surfaces can write a receipt for one user action: the Companion bubble
+# and the session drawer both record a copy_handoff, seconds apart, for the
+# same source session. The only duplicate pair observed in real local state
+# was 29s apart (companion 18:42:00, dashboard_session 18:42:29, one
+# source_session_id, identical receipt_viewed_at to the microsecond -- the
+# viewing path already fuses them). Two minutes leaves that room without
+# merging a user who went back to the same session later and genuinely
+# copied a second brief.
+FRESH_START_DUPLICATE_RECEIPT_WINDOW = timedelta(minutes=2)
+
+
+def _fresh_start_duplicate_window_match(
+    candidate: dict[str, object],
+    members: list[dict[str, object]],
+) -> bool:
+    """True when this receipt is another surface's copy of one already grouped.
+
+    Same source session, same recorded decision, within the window above.
+    Receipts outside the window are kept apart: coming back to a long session
+    a day later and copying a fresh brief again is a second decision.
+    """
+    session_ids = {str(value) for value in (candidate.get("source_session_ids") or []) if value}
+    if not session_ids:
+        return False  # No session to match on; counting it is the honest default.
+    decision = str(candidate.get("receipt_decision") or "")
+    created = _parse_iso_datetime(candidate.get("last_activity"))
+    if created is None:
+        return False
+    for member in members:
+        if str(member.get("receipt_decision") or "") != decision:
+            continue
+        if not session_ids & {str(value) for value in (member.get("source_session_ids") or []) if value}:
+            continue
+        member_created = _parse_iso_datetime(member.get("last_activity"))
+        if member_created is None:
+            continue
+        if abs(created - member_created) <= FRESH_START_DUPLICATE_RECEIPT_WINDOW:
+            return True
+    return False
+
+
 def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     """Collapse pending Fresh Start rows that nothing on screen distinguishes.
 
     One row per project, carrying the count. They differ only by the decision id
     and, sometimes, by how long ago it was -- neither of which is rendered, so
     three of them read as the same item repeated.
+
+    The count answers "how many source sessions are still waiting for follow-up
+    proof?", so duplicate receipts for one session count once; the receipt total
+    is printed beside it when the two differ, because the cleanup prompt and the
+    receipts view both work from receipt ids. The age answers "how long has the
+    oldest of these been waiting?" -- receipts arrive newest-first from
+    recent_handoff_decisions, so the first one seen is the newest, not the
+    oldest.
     """
     grouped: dict[str, dict[str, object]] = {}
+    members: dict[int, list[dict[str, object]]] = {}
     out: list[dict[str, object]] = []
     for candidate in candidates:
         if candidate.get("kind") != "fresh_start_pending":
@@ -2139,24 +2189,66 @@ def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dic
         first = grouped.get(key)
         if first is None:
             grouped[key] = candidate
+            members[id(candidate)] = [candidate]
             out.append(candidate)
             continue
+        group = members[id(first)]
+        duplicate = _fresh_start_duplicate_window_match(candidate, group)
+        group.append(candidate)
+        # Every receipt id survives either way: the review prompt and the
+        # receipts view are keyed on them, and a collapsed duplicate is still
+        # a row the user can go and read.
         first.setdefault("receipt_ids", []).extend(candidate.get("receipt_ids") or [])
-        first.setdefault("source_session_ids", []).extend(candidate.get("source_session_ids") or [])
-        first["session_count"] = int(first.get("session_count") or 1) + 1
-        tokens = int(first.get("token_volume") or 0) + int(candidate.get("token_volume") or 0)
-        first["token_volume"] = tokens
-        first["source_session_tokens"] = tokens
-        first["impact_label"] = f"~{compact_int(tokens)} source-session tokens recorded" if tokens else None
-        count = first["session_count"]
-        first["title"] = f"Finish Fresh Start cleanup ({count} decisions)"
-        first["summary"] = (
-            f"{count} Fresh Start briefs were copied without a linked follow-up session. "
-            "Verify each intended follow-up using its receipt before any separate archive decision."
-        )
-        first["activity_summary"] = (
-            f"{count} Fresh Start receipts · oldest copied {first.get('updated_label') or 'unknown age'} · follow-up proof pending"
-        )
+        if not duplicate:
+            first.setdefault("source_session_ids", []).extend(candidate.get("source_session_ids") or [])
+            first["session_count"] = int(first.get("session_count") or 1) + 1
+            # Only a distinct session adds tokens. Two receipts for one session
+            # describe the same source context, so summing both would print
+            # twice the context that is actually at stake.
+            tokens = int(first.get("token_volume") or 0) + int(candidate.get("token_volume") or 0)
+            first["token_volume"] = tokens
+            first["source_session_tokens"] = tokens
+            first["impact_label"] = f"~{compact_int(tokens)} source-session tokens recorded" if tokens else None
+        # last_activity carries the oldest receipt, not the newest. It feeds the
+        # "Last activity" line in the cleanup prompt and the age pill, both of
+        # which describe how long this group has been waiting; the newest
+        # timestamp made a group of months-old receipts read as two days old.
+        # Nothing orders or suppresses on it: candidates sort by token_volume
+        # then session_count, the 24h quiet window compares a stored receipt's
+        # created_at against the evidence hash, and the hash takes last_activity
+        # only as an identity input (it already changes with session_count, so a
+        # stale Reviewed receipt stops matching either way).
+        oldest_at: datetime | None = None
+        oldest_label: str | None = None
+        for member in group:
+            member_at = _parse_iso_datetime(member.get("last_activity"))
+            if member_at is None:
+                continue  # Unknown age cannot be the oldest; it is just unknown.
+            if oldest_at is None or member_at < oldest_at:
+                oldest_at = member_at
+                oldest_label = str(member.get("updated_label") or "") or None
+        if oldest_at is not None:
+            first["last_activity"] = oldest_at.isoformat()
+            first["updated_label"] = oldest_label or "unknown age"
+        age_label = str(first.get("updated_label") or "") or "unknown age"
+        count = int(first.get("session_count") or 1)
+        receipt_count = len(first.get("receipt_ids") or [])
+        collapsed = f" · {receipt_count} receipts, duplicates from two surfaces collapsed" if receipt_count > count else ""
+        if count > 1:
+            first["title"] = f"Finish Fresh Start cleanup ({count} decisions)"
+            first["summary"] = (
+                f"{count} Fresh Start briefs were copied without a linked follow-up session. "
+                "Verify each intended follow-up using its receipt before any separate archive decision."
+            )
+            first["activity_summary"] = (
+                f"{count} source sessions waiting{collapsed} · oldest copied {age_label} · follow-up proof pending"
+            )
+        else:
+            # Everything merged was another surface's copy of one decision, so
+            # the row stays singular -- with the oldest receipt's age.
+            first["activity_summary"] = (
+                f"Fresh Start receipt · copied {age_label}{collapsed} · follow-up proof pending"
+            )
     return out
 
 
@@ -2274,6 +2366,9 @@ def build_optimize_inventory(
         candidates.append({
             "receipt_ids": [str(decision.get("id") or "")],
             "source_session_ids": [str(decision.get("source_session_id") or decision.get("session_id") or "")],
+            # Not rendered. Grouping needs it to tell one session's duplicate
+            # receipts from the same session choosing differently later.
+            "receipt_decision": str(decision.get("decision") or ""),
             "id": f"fresh-start:{decision.get('id') or decision.get('session_id')}",
             "kind": "fresh_start_pending",
             "title": "Finish Fresh Start cleanup",
