@@ -18,6 +18,7 @@ from urllib import error, request
 from unittest.mock import Mock, patch
 
 from aiwatcher_cli import ui
+from aiwatcher_cli.landed import LandingReport, UnlandedChange
 from aiwatcher_cli.pricing import estimate_cost
 from aiwatcher_cli.ui import money
 from aiwatcher_cli.local_state import (
@@ -2760,7 +2761,7 @@ class DashboardWindowTests(unittest.TestCase):
                     "status": "needs_action",
                     "summary": "1 cleanup opportunity found.",
                     "impact_label": "~1.4M context at risk",
-                    "top": {"project_full": "/repo/app", "kind": "session_cluster", "session_count": 53},
+                    "top": {"project_full": "/repo/app", "kind": "unlanded_work", "unlanded_count": 3, "lines_at_stake": 467},
                     "candidate_count": 5,
                     "candidates": [],
                 },
@@ -2775,9 +2776,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["label"], "Optimize")
         self.assertEqual(state["primary_url"], "/?view=control#optimizeWorkspace")
         self.assertEqual(state["skip_state"], "optimize_available")
-        self.assertIn("5 review groups", state["subtitle"])
-        self.assertIn("53 older session records", state["subtitle"])
-        self.assertIn("Organization only", state["subtitle"])
+        self.assertIn("3 change(s) look absent from main", state["subtitle"])
+        self.assertIn("467 added lines", state["subtitle"])
+        self.assertIn("Check before assuming shipped", state["subtitle"])
 
     def test_companion_state_exposes_ask_deep_link(self) -> None:
         with (
@@ -3533,7 +3534,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(rows[0]["candidate_session_id"], "candidate")
         self.assertIsNone(rows[0]["observed_followup"])
 
-    def test_optimize_inventory_detects_stale_session_cluster(self) -> None:
+    def test_optimize_inventory_detects_work_that_is_not_in_main(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [
             LocalSession(
@@ -3551,34 +3552,50 @@ class DashboardWindowTests(unittest.TestCase):
             for index in range(3)
         ]
         outcomes = {"sess-0": {"outcome": "useful"}}
+        landing = LandingReport(repo="/repo/app", main_ref="origin/main", branches_scanned=4)
+        landing.changes.append(UnlandedChange(
+            sha="c0ffee123456", branch="fix/desktop-coverage", subject="prove Desktop coverage by session id",
+            committed_at=now - timedelta(days=80), lines_added=192, lines_present=7,
+            files_measured=3, measurable=True, merged_into=("origin/codex/parent-branch",),
+        ))
         with (
             patch.object(ui, "safe_runtime_processes", return_value=[]),
             patch.object(ui, "_agent_workspace_rows", return_value=[]),
             patch.object(ui, "recent_optimize_decisions", return_value=[]),
+            patch.object(ui, "unlanded_work_for_project", return_value=landing),
         ):
             inventory = ui.build_optimize_inventory(rows, outcomes=outcomes, handoff_decisions=[])
 
+        top = inventory["top"]
         self.assertEqual(inventory["status"], "needs_action")
-        self.assertEqual(inventory["top"]["kind"], "session_cluster")
-        self.assertEqual(inventory["top"]["project_full"], "/repo/app")
-        self.assertEqual(inventory["top"]["historical_tokens_observed"], 780_000)
-        self.assertEqual(inventory["top"]["token_volume"], 780_000)
-        self.assertNotIn("tokens_at_risk", inventory["top"])
-        self.assertIn("3 sessions", inventory["top"]["activity_summary"])
-        self.assertIn("codex-cli", inventory["top"]["activity_summary"])
-        self.assertIn("~780.0k historical tokens", inventory["top"]["activity_summary"])
-        self.assertEqual(inventory["top"]["impact_label"], "~780.0k historical session tokens")
+        self.assertEqual(top["kind"], "unlanded_work")
+        self.assertEqual(top["project_full"], "/repo/app")
+        self.assertEqual(top["unlanded_count"], 1)
+        self.assertEqual(top["lines_at_stake"], 185)
+        self.assertEqual(top["changes"][0]["merged_into"], ["origin/codex/parent-branch"])
+        # The card replaced one that advertised historical tokens as if they were
+        # a saving. Nothing here may imply a resource is reclaimed.
+        self.assertNotIn("tokens_at_risk", top)
+        self.assertNotIn("token_volume", top)
+        self.assertNotIn("historical_tokens_observed", top)
+        self.assertIn("No disk, token or memory saving", top["reward_basis"])
+        self.assertIn("185 added lines absent from origin/main", top["activity_summary"])
+        self.assertIn("4 idle branches scanned", top["activity_summary"])
+        self.assertEqual(top["impact_label"], "185 added lines not in main")
         self.assertNotIn("context at risk", json.dumps(inventory))
-        self.assertIn("organization", inventory["top"]["summary"])
-        self.assertIn("why_inactive", inventory["top"])
-        self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
+        self.assertNotIn("historical tokens", json.dumps(inventory))
+        self.assertIn("not in origin/main", top["summary"])
+        self.assertIn("why_inactive", top)
+        self.assertEqual(top["action_label"], "Copy check prompt")
         prompt = inventory["top"]["cleanup_prompt"]
         # One prompt per candidate; the separate "checklist" copy that drifted
         # from it is gone.
         self.assertNotIn("checklist", inventory["top"])
         self.assertIn("AIWatcher Optimize cleanup prompt", prompt)
         self.assertIn("Full path: /repo/app", prompt)
-        self.assertIn("Signal: 3 sessions", prompt)
+        self.assertIn("Signal: 185 added lines absent", prompt)
+        self.assertIn("git cherry origin/main", prompt)
+        self.assertIn("proves nothing here", prompt)
         self.assertIn("Safe to archive/review", prompt)
         self.assertIn("Keep active", prompt)
         self.assertIn("Unknown", prompt)

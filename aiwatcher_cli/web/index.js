@@ -245,6 +245,7 @@ function formatOptimizeTime(value) {
 function renderOptimizeReviewEvidence(item, expanded = false) {
   const activity = item.project_activity || {};
   const rows = item.sessions || [];
+  const changes = item.changes || [];
   return `<div class="optimize-review-context">
     <p><strong>Why review:</strong> ${esc(item.selection_rule || item.why_inactive || item.summary || '')}</p>
     ${activity.session_id ? `<p><strong>Latest project activity:</strong> ${esc(activity.title || activity.session_id)} · ${esc(formatOptimizeTime(activity.last_activity))}<br>${esc(activity.status || '')}</p>` : ''}
@@ -254,6 +255,13 @@ function renderOptimizeReviewEvidence(item, expanded = false) {
       <td>${esc(row.tool)} · ${esc(row.surface || 'unknown')}<br>${esc(row.session_role || 'unknown')}${row.parent_session_id ? `<br>Parent: <code>${esc(row.parent_session_id)}</code><br>${esc(row.parent_title || 'Parent title unavailable')}` : ''}</td>
       <td>${esc(formatOptimizeTime(row.last_activity))}<br>Turn: ${esc(row.last_turn_status || 'unknown')}<br>${row.final_response_observed ? 'Final response event observed; text needs review' : 'Final response unverified'}<br>${esc(row.runtime_status || 'Live state unverified')}</td>
     </tr>`).join('')}</tbody></table></div></details>` : ''}
+    ${changes.length ? `<details class="aiw-details" ${expanded ? 'open' : ''}><summary>Inspect ${changes.length} exact change${changes.length === 1 ? '' : 's'} and where each one is</summary><div class="optimize-session-table"><table><thead><tr><th>Change</th><th>Where it is</th><th>What main is missing</th></tr></thead><tbody>${changes.map(change => `<tr>
+      <td><strong>${esc(change.subject || 'No commit subject')}</strong><br><code>${esc(change.sha)}</code><br>${esc(formatOptimizeTime(change.committed_at))}</td>
+      <td><code>${esc(change.branch)}</code>${(change.merged_into || []).length ? `<br>Merged into:<br>${(change.merged_into || []).map(ref => `<code>${esc(ref)}</code>`).join('<br>')}` : '<br>No other branch contains it'}</td>
+      <td><strong>${esc(change.lines_absent)} of ${esc(change.lines_added)} added lines</strong> not in main<br>${esc(change.present_pct === null ? 'not measurable' : `${change.present_pct}% still present`)}<br>${esc(change.confidence || '')}</td>
+    </tr>`).join('')}</tbody></table></div></details>` : ''}
+    ${item.unmerged_anywhere_count ? `<p class="receipt-note">${esc(item.unmerged_anywhere_count)} further change(s) sit on branches no other branch merged. Those are more often experiments dropped on purpose, so they are counted here and not listed.</p>` : ''}
+    ${item.omitted_change_count ? `<p class="receipt-note">${esc(item.omitted_change_count)} further change(s) are outside this bounded review. No recommendation applies to them.</p>` : ''}
     ${item.omitted_session_count ? `<p class="receipt-note">${esc(item.omitted_session_count)} older sessions are outside this bounded review. No recommendation applies to them.</p>` : ''}
     <p class="receipt-note">${esc(item.reward_basis || 'Resource savings are unmeasured. Review in the owning app before any separate cleanup action.')}</p>
   </div>`;
@@ -2513,7 +2521,7 @@ function renderOptimizeWorkspace(optimize, cache = {}) {
         </div></details>` : ''}
       </div>
       <div class="actions optimize-card-actions">
-        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>` : `<button class="btn-primary" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>`}
+        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>` : `<button class="btn-primary" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">${esc(item.action_label || 'Copy cleanup prompt')}</button>`}
         ${aiCleanup}
         <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
         <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
