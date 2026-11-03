@@ -3708,6 +3708,9 @@ function coverageGate(row) {
   // rather than the prose, so it cannot disagree with the pill beside it.
   const map = {
     automatic: ['Automatic', 'automatic'],
+    // Not the same as unverified: the hook had recent work on this surface to
+    // fire for and did not, so saying "Unknown" would understate it.
+    silent: ['Not firing', 'not_detected'],
     limited: ['Unverified', 'unverified'],
     unverified: ['Unverified', 'unverified'],
     companion: ['Companion only', 'companion'],

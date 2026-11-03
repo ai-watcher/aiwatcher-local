@@ -332,6 +332,97 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(coverage_with_hooks["claude-desktop-code"].status, "limited")
         self.assertEqual(coverage_with_hooks["claude-desktop-code"].status_label, "History seen; hook unverified")
 
+    CLAUDE_TOOLS = {
+        "claude-code": True,
+        "codex-cli": False,
+        "cursor": False,
+        "cline": False,
+        "windsurf": False,
+    }
+
+    def _cli_session(self, session_id: str = "cli-1", *, agent_calls: int = 5, age_minutes: int = 30):
+        return scanner.LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            surface="cli",
+            agent_calls=agent_calls,
+            updated_at=datetime.now(timezone.utc) - timedelta(minutes=age_minutes),
+            tokens_in=10,
+        )
+
+    def _cli_row(self, rows, hook_events):
+        with (
+            patch.object(scanner, "discover_tools", return_value=self.CLAUDE_TOOLS),
+            patch.object(scanner, "recent_hook_events", return_value=hook_events),
+        ):
+            return {row.surface_id: row for row in scanner.surface_coverage(rows)}["claude-code-cli"]
+
+    def _event(self, tool: str, session_id: str, *, age_minutes: int = 60):
+        stamp = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
+        return {"tool": tool, "session_id": session_id, "created_at": stamp.isoformat()}
+
+    def test_the_cli_row_claims_automatic_only_when_a_hook_fired_for_that_work(self) -> None:
+        """Detection on disk proves Claude Code ran once, never that it is gated."""
+        session = self._cli_session()
+
+        hooked = self._cli_row([session], [self._event("claude", "cli-1")])
+        self.assertEqual(hooked.status, "automatic")
+        self.assertEqual(hooked.status_label, "Automatic gate + history")
+        self.assertIn("hooks fired for 1 of 1", hooked.detail)
+
+        # Same installed tool, same session, no hook event naming it.
+        unhooked = self._cli_row([session], [self._event("codex", "codex-7")])
+        self.assertEqual(unhooked.status, "silent")
+        self.assertEqual(unhooked.status_label, "Hook not firing")
+        self.assertIn("those prompts were ungated", unhooked.detail)
+        self.assertIn("install-claude-hook", unhooked.action)
+
+    def test_no_recent_cli_work_is_unproven_rather_than_a_failure(self) -> None:
+        """Nothing to check is a different thing from a hook that stopped working."""
+        desktop_only = scanner.LocalSession(
+            session_id="desk-1", tool="claude-code", surface="desktop", agent_calls=5,
+            updated_at=datetime.now(timezone.utc), tokens_in=10,
+        )
+
+        row = self._cli_row([desktop_only], [self._event("claude", "desk-1")])
+
+        self.assertEqual(row.status, "limited")
+        self.assertEqual(row.status_label, "Hook-capable, verify locally")
+        self.assertNotIn("ungated", row.detail)
+
+    def test_a_log_touched_without_model_activity_is_not_judged(self) -> None:
+        """updated_at falls back to file mtime, so a touched log is not evidence."""
+        touched = self._cli_session("cli-touched", agent_calls=0)
+
+        row = self._cli_row([touched], [self._event("codex", "codex-7")])
+
+        self.assertEqual(row.status, "limited")
+        self.assertEqual(row.status_label, "Hook-capable, verify locally")
+
+    def test_work_older_than_the_evidence_buffer_is_not_counted_as_unhooked(self) -> None:
+        """Hook events are a small shared ring buffer; forgetting is not failing."""
+        old_work = self._cli_session("cli-old", age_minutes=60 * 24 * 30)
+
+        row = self._cli_row([old_work], [self._event("codex", "codex-7", age_minutes=10)])
+
+        self.assertEqual(row.status, "limited")
+        self.assertEqual(scanner.hook_liveness(
+            [old_work], [self._event("codex", "codex-7", age_minutes=10)],
+            session_tool="claude-code", hook_tool="claude", surface="cli",
+        ).state, "unproven")
+
+    def test_one_hooked_session_among_several_is_still_working(self) -> None:
+        """A session with no prompt submitted fires no hook; that is normal."""
+        rows = [self._cli_session("cli-1"), self._cli_session("cli-2"), self._cli_session("cli-3")]
+
+        liveness = scanner.hook_liveness(
+            rows, [self._event("claude", "cli-2")],
+            session_tool="claude-code", hook_tool="claude", surface="cli",
+        )
+
+        self.assertEqual(liveness.state, "working")
+        self.assertEqual((liveness.judged, liveness.hooked), (3, 1))
+
     def test_surface_coverage_separates_prompt_gate_from_command_posture(self) -> None:
         tools = {
             "claude-code": True,
