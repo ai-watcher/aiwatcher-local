@@ -3454,6 +3454,53 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(inventory["top"]["kind"], "fresh_start_pending")
         self.assertEqual(inventory["top"]["receipt_ids"], ["live"])
 
+    def test_receipts_from_different_projects_get_their_own_card(self) -> None:
+        decisions = [
+            self._waiting_receipt(receipt_id="app", age_hours=12),
+            self._waiting_receipt(receipt_id="api", age_hours=12, source_project_path="/repo/api"),
+        ]
+
+        inventory = self._inventory(decisions)
+
+        cards = [row for row in inventory["candidates"] if row.get("kind") == "fresh_start_pending"]
+        self.assertEqual(
+            sorted(str(card["project_full"]) for card in cards),
+            ["/repo/api", "/repo/app"],
+        )
+        self.assertEqual([card["session_count"] for card in cards], [1, 1])
+
+    def test_summary_builds_the_cleanup_card_from_stored_receipts(self) -> None:
+        """The card used to be fed the rendered receipt rows, which carry no
+        source_project_path, so receipts from every project collapsed into one
+        card labelled "Unattributed sessions"."""
+        decisions = [
+            self._waiting_receipt(receipt_id="app", age_hours=12),
+            self._waiting_receipt(receipt_id="api", age_hours=12, source_project_path="/repo/api"),
+        ]
+        with (
+            patch.object(ui, "scan_all", return_value=[]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "recent_handoff_decisions", return_value=decisions),
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+            patch.object(ui, "link_recent_fresh_start_receipts_to_sessions", return_value=0),
+            patch.object(ui, "link_recent_interventions_to_sessions", return_value=0),
+        ):
+            summary = ui.build_summary(7)
+
+        cards = [
+            row for row in summary["optimize"]["candidates"]
+            if row.get("kind") == "fresh_start_pending"
+        ]
+        self.assertEqual(
+            sorted(str(card["project_full"]) for card in cards),
+            ["/repo/api", "/repo/app"],
+        )
+        self.assertNotIn(ui.UNATTRIBUTED_PROJECT_LABEL, [card["project"] for card in cards])
+
     def test_session_drawer_reports_a_closed_window_rather_than_progress(self) -> None:
         receipt = self._waiting_receipt(receipt_id="old", age_hours=76 * 24, source_session_id="source")
         with patch.object(ui, "recent_handoff_decisions", return_value=[receipt]):
