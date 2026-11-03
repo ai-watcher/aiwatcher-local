@@ -2076,5 +2076,41 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(decisions[0]["summary"], "decision 7")
 
 
+class UnlandedResolutionTests(unittest.TestCase):
+    """Settling a commit on the "work not in main" card, permanently."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(self.temp.name, "state.json")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_a_resolution_is_keyed_by_sha_and_survives_being_recorded_twice(self) -> None:
+        local_state.record_unlanded_resolution(sha="0b02766a5bd3", decision="resolved", branch="fix/x")
+        local_state.record_unlanded_resolution(sha="0B02766A5BD3", decision="relanded")
+
+        settled = local_state.unlanded_resolutions()
+
+        self.assertEqual(list(settled), ["0b02766a5bd3"])
+        self.assertEqual(settled["0b02766a5bd3"]["decision"], "relanded")
+
+    def test_a_resolution_can_be_undone(self) -> None:
+        local_state.record_unlanded_resolution(sha="0b02766a5bd3", decision="resolved")
+
+        self.assertTrue(local_state.clear_unlanded_resolution("0b02766a5bd3"))
+        self.assertEqual(local_state.unlanded_resolutions(), {})
+        self.assertFalse(local_state.clear_unlanded_resolution("0b02766a5bd3"))
+
+    def test_junk_is_refused_rather_than_stored(self) -> None:
+        for bad in ("", "nothex!!", "abc", "a" * 41):
+            with self.assertRaises(ValueError):
+                local_state.record_unlanded_resolution(sha=bad, decision="resolved")
+        with self.assertRaises(ValueError):
+            local_state.record_unlanded_resolution(sha="0b02766a5bd3", decision="ignore_forever")
+
+        self.assertEqual(local_state.unlanded_resolutions(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

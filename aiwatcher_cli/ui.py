@@ -64,6 +64,7 @@ from .delivery_tracking import delivery_tracking_status, sync_delivery_tracking
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .git_identity import identity_for_session, repository_identity
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, bound_handoff_words, build_handoff_capsule
+from .landed import LandingReport, find_unlanded_work
 from .metrics import (
     model_cost_comparison,
     pace_vs_baseline,
@@ -105,6 +106,9 @@ from .local_state import (
     recent_interventions,
     recent_delivery_events,
     recent_optimize_decisions,
+    clear_unlanded_resolution,
+    record_unlanded_resolution,
+    unlanded_resolutions,
     recent_work_receipts,
     get_ambient_intervention,
     mark_active_command_gate_seen,
@@ -290,6 +294,7 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/optimize-ai-assist",
     "/api/optimize-review",
     "/api/optimize-decision",
+    "/api/unlanded-resolution",
     "/api/delivery-review",
     "/api/delivery-review-approve",
     "/api/delivery-reviews",
@@ -330,6 +335,11 @@ UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 _SUMMARY_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
 _HANDOFF_DETAIL_CACHE: dict[tuple[object, ...], tuple[float, dict[str, object]]] = {}
 HANDOFF_DETAIL_CACHE_TTL_SECONDS = 60.0
+# Scanning this repo's 60 unmerged branches costs ~5s, and branches move far
+# more slowly than a page render, so the landing scan gets its own longer TTL
+# instead of riding the summary cache.
+_UNLANDED_CACHE: dict[str, tuple[float, LandingReport]] = {}
+UNLANDED_CACHE_TTL_SECONDS = 600.0
 _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
@@ -1298,7 +1308,7 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
     title = str(item.get("title") or "Review workspace")
     kind = str(item.get("kind") or "unknown")
     subject = {
-        "session_cluster": "stale chats/sessions",
+        "unlanded_work": "branch work that may not be in main",
         "fresh_start_pending": "pending Fresh Start receipts",
         "worktree": "AI-created git worktree",
         "agent_workspace": "AI-created scratch workspace",
@@ -1380,8 +1390,13 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         "- If evidence is weak or the owner is unclear, mark it unknown and ask the user to verify in the owning app/tool.",
         "- Preserve handoffs, PRs, commits, receipts, useful notes, unresolved tasks, and final source-of-truth files.",
     ]
-    if kind == "session_cluster":
-        lines.append("- Action boundary: this prompt can only recommend review buckets; any archive/mark-done action must be a separate user decision inside the owning AI app.")
+    if kind == "unlanded_work":
+        lines.extend([
+            f"- Inspect first: git -C {shlex.quote(project_full) if project_full else '<repo>'} fetch origin, then for each commit below: git cherry origin/main <branch>",
+            "- The finding is content-based, not a merge badge: a pull request reporting merged proves nothing here, because its base branch may have landed before it did.",
+            "- Confirm before believing it is lost: check whether the change reached main squashed, rebased or cherry-picked under a different commit id, and whether the lines were later renamed or reformatted rather than removed.",
+            "- Action boundary: do not delete or force-push any branch, and do not re-apply the work automatically. If a change really is missing, report which commits and files, then let the user decide whether to open a fresh pull request for it.",
+        ])
     elif kind == "fresh_start_pending":
         lines.append("- Action boundary: this prompt can only recommend whether to link the follow-up session or review the old receipt; make any mark-done/skipped action a separate user decision and do not claim saved tokens without proof.")
     elif kind == "worktree":
@@ -2283,6 +2298,22 @@ def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dic
     return out
 
 
+def unlanded_work_for_project(project: str) -> LandingReport:
+    """Cached landing scan for one project checkout."""
+    now_monotonic = time.monotonic()
+    with _SUMMARY_CACHE_LOCK:
+        cached = _UNLANDED_CACHE.get(project)
+        if cached and now_monotonic - cached[0] <= UNLANDED_CACHE_TTL_SECONDS:
+            return cached[1]
+    report = find_unlanded_work(project)
+    with _SUMMARY_CACHE_LOCK:
+        _UNLANDED_CACHE[project] = (now_monotonic, report)
+        if len(_UNLANDED_CACHE) > 16:
+            oldest = min(_UNLANDED_CACHE, key=lambda key: _UNLANDED_CACHE[key][0])
+            _UNLANDED_CACHE.pop(oldest, None)
+    return report
+
+
 def build_optimize_inventory(
     rows: list[LocalSession],
     *,
@@ -2316,66 +2347,97 @@ def build_optimize_inventory(
     for project, items in by_project.items():
         if project in suppressed_projects:
             continue
-        inactive = [
-            row for row in items
-            if (row.updated_at or row.started_at)
-            and (now - (row.updated_at or row.started_at).astimezone(timezone.utc)) >= timedelta(hours=4)
-        ]
         identities = {row.session_id: session_review_identity(row, by_id) for row in items}
-        excluded_internal = sum(1 for row in inactive if identities[row.session_id]["session_role"] in {"approval_session", "internal_session"})
-        inactive = [row for row in inactive
-                    if identities[row.session_id]["session_role"] not in {"approval_session", "internal_session"}
-                    and (now - (_parse_iso_datetime(identities[row.session_id]["last_activity"]) or MIN_DT)) >= timedelta(hours=4)]
-        if len(inactive) < 2:
+        # The question is about the checkout, not the sessions: work can go
+        # missing from a project whose sessions are all still busy, and a pile of
+        # idle sessions whose work all landed is nothing to report.
+        report = unlanded_work_for_project(project)
+        # Only the stranded shape earns the card. A branch nobody ever merged is
+        # usually an experiment dropped on purpose, and listing those is how the
+        # card this replaced lost the user's trust.
+        #
+        # Settled commits are dropped outright rather than quieted for a day.
+        # These findings are read from git history, which never ages out, so a
+        # 24-hour receipt would hand the user a row that returns every morning
+        # with nothing they can do about it.
+        settled = unlanded_resolutions()
+        found = [change for change in report.stranded if change.sha not in settled]
+        if not found:
             continue
-        tokens = sum(row.tokens_in + row.tokens_out for row in inactive)
-        calls = sum(row.agent_calls for row in inactive)
-        if tokens < 300_000 and calls < 120 and len(inactive) < 3:
-            continue
-        latest = max((_parse_iso_datetime(identities[row.session_id]["last_activity"]) for row in inactive), default=None)
-        completed = sum(1 for row in inactive if outcomes.get(row.session_id, {}).get("outcome") == "useful")
-        tools = sorted({row.tool for row in inactive if row.tool})
+        abandoned = sum(1 for change in report.unmerged_anywhere if change.sha not in settled)
+        resolved_here = sum(1 for change in report.unlanded if change.sha in settled)
+        biggest = found[0]
+        branches = sorted({change.branch for change in found})
+        oldest = min((change.committed_at for change in found if change.committed_at), default=None)
+        age_label = _elapsed_label(oldest, now=now) if oldest else "unknown age"
+        latest = max((_parse_iso_datetime(identities[row.session_id]["last_activity"]) for row in items), default=None)
         latest_label = _elapsed_label(latest, now=now)
-        tool_label = ", ".join(tools[:3]) if tools else "local AI tools"
-        activity_summary = f"{len(inactive)} sessions · last {latest_label} · {tool_label} · ~{compact_int(tokens)} historical tokens"
-        if completed:
-            activity_summary += f" · {completed} useful outcome{'s' if completed != 1 else ''}"
-        why_inactive = (
-            f"Newest log in this older-session group was {latest_label}; {len(inactive)} same-project sessions "
-            f"from {tool_label} account for recorded historical activity."
-        )
-        if completed:
-            why_inactive += f" {completed} have useful outcome labels; these do not prove completion."
+        tools = sorted({row.tool for row in items if row.tool})
         latest_project_row = max(items, key=lambda row: _parse_iso_datetime(identities[row.session_id]["last_activity"]) or MIN_DT)
         latest_project_evidence = identities[latest_project_row.session_id]
         candidates.append({
-            "selection_rule": "At least 2 sessions with no log update for 4+ hours, plus 300k historical tokens, 120 model calls, or 3 sessions. These are review thresholds, not completion proof.",
-            "review_scope": f"{min(REVIEW_BATCH_SIZE, len(inactive))} of {len(inactive)} older sessions, newest first",
-            "sessions": [identities[row.session_id] for row in sorted(inactive, key=lambda row: _parse_iso_datetime(identities[row.session_id]["last_activity"]) or MIN_DT, reverse=True)[:REVIEW_BATCH_SIZE]],
-            "omitted_session_count": max(0, len(inactive) - REVIEW_BATCH_SIZE),
-            "excluded_internal_count": excluded_internal,
+            "selection_rule": (
+                f"Branch commits with no patch-equivalent change on {report.main_ref}, whose added lines are "
+                "then mostly absent from its current files, and which another branch still contains. Branches "
+                "touched in the last 14 days are left alone as work in progress. A commit no branch contains is "
+                "counted but not shown, because it is more often an experiment dropped on purpose."
+            ),
+            "review_scope": f"{min(REVIEW_BATCH_SIZE, len(found))} of {len(found)} changes, most work at stake first",
+            "changes": [change.to_json() for change in found[:REVIEW_BATCH_SIZE]],
+            "omitted_change_count": max(0, len(found) - REVIEW_BATCH_SIZE),
+            "branches": branches,
+            "landing_scan": {
+                "main_ref": report.main_ref,
+                "branches_scanned": report.branches_scanned,
+                "branches_skipped_active": report.branches_skipped_active,
+                "branches_omitted": report.branches_omitted,
+                "commits_examined": report.commits_examined,
+                "notes": report.notes,
+            },
             "project_activity": {**project_activity(items, latest_project_evidence), "latest_session_evidence": latest_project_evidence},
-            "reward_basis": "Organization only. Historical tokens are not current context, saved tokens, RAM or disk relief. Resource savings unknown.",
-            "id": f"sessions:{project}",
-            "kind": "session_cluster",
-            "title": "Review older sessions",
+            "reward_basis": (
+                "Protects work already paid for. No disk, token or memory saving: the benefit is catching a "
+                "change that never reached main before the same job is done a second time."
+            ),
+            "id": f"unlanded:{project}",
+            "kind": "unlanded_work",
+            "title": "Work not in main",
             "project": project_label(project),
             "project_full": project,
-            "summary": f"{len(inactive)} inactive same-project sessions recorded ~{compact_int(tokens)} historical tokens. Archive or mark done only for organization after confirming the work is no longer active.",
-            "activity_summary": activity_summary,
-            "why_inactive": why_inactive,
+            "summary": (
+                f"{len(found)} change{'s' if len(found) != 1 else ''} another branch merged "
+                f"{'are' if len(found) != 1 else 'is'} not in {report.main_ref}. Largest is "
+                f"“{biggest.subject[:72]}” with {biggest.lines_absent} added lines missing. "
+                "Check each before assuming it shipped."
+            ),
+            "activity_summary": (
+                f"{sum(change.lines_absent for change in found)} added lines absent from {report.main_ref} · "
+                f"oldest {age_label} · {report.branches_scanned} idle branch"
+                f"{'es' if report.branches_scanned != 1 else ''} scanned"
+                + (f" · {abandoned} more on branches never merged" if abandoned else "")
+            ),
+            "unmerged_anywhere_count": abandoned,
+            "resolved_count": resolved_here,
+            "why_inactive": (
+                f"No commit on {report.main_ref} makes the same change, and most of the lines these commits "
+                f"added are not in {report.main_ref}'s files today. A pull request can report merged and still "
+                "leave this behind, when the branch it targeted had already gone to main."
+            ),
             "evidence_label": "Observed",
-            "evidence": "Observed from local session timestamps, project path, historical token totals, and outcome metadata. Archive action must happen in the AI app.",
-            "impact_label": f"~{compact_int(tokens)} historical session tokens",
-            "token_volume": tokens,
-            "historical_tokens_observed": tokens,
-            "session_count": len(inactive),
-            "useful_outcome_count": completed,
+            "evidence": (
+                f"Observed from git: patch identity against {report.main_ref}, then added lines read from its "
+                "current files. Line presence is a floor, so work that landed and was later renamed or "
+                "reformatted also reads as absent. Treat a finding as worth checking, not as proven loss."
+            ),
+            "impact_label": f"{sum(change.lines_absent for change in found)} added lines not in main",
+            "lines_at_stake": sum(change.lines_absent for change in found),
+            "unlanded_count": len(found),
+            "session_count": len(items),
             "tool": ", ".join(tools[:3]) if tools else "local AI tools",
             "tools": tools,
             "last_activity": latest.isoformat() if latest else None,
             "updated_label": latest_label,
-            "action_label": "Copy cleanup prompt",
+            "action_label": "Copy check prompt",
         })
 
     for decision in handoff_decisions:
@@ -10356,8 +10418,8 @@ def _build_companion_state() -> dict[str, object]:
         if not (project_quiet or global_quiet or candidate_quiet):
             groups = optimize.get("candidate_count") or len(optimize.get("candidates") or []) or 1
             subtitle = str(top.get("summary") or optimize.get("summary") or "Cleanup review available.")
-            if top.get("kind") == "session_cluster":
-                subtitle = f"{groups} review groups; top group: {top.get('session_count') or 0} older session records. Organization only."
+            if top.get("kind") == "unlanded_work":
+                subtitle = f"{top.get('unlanded_count') or 0} change(s) look absent from main; {top.get('lines_at_stake') or 0} added lines. Check before assuming shipped."
             return {
                 **base,
                 "state": "optimize_available",
@@ -10882,6 +10944,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/first-run-dismissed",
             "/api/optimize-ai-assist",
             "/api/optimize-decision",
+            "/api/unlanded-resolution",
             "/api/optimize-review",
             "/api/companion-skip",
             "/api/companion-preferences",
@@ -11382,6 +11445,33 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._send(409, json.dumps({"error": "Review item changed; refresh Optimize."}), "application/json; charset=utf-8")
                 return
             self._send(200, json.dumps(_refresh_optimize_review_candidate(candidate)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/unlanded-resolution":
+            # Settling one commit, not quieting a card: the receipt is keyed by
+            # sha so it stays true, and `undo` exists because a permanent
+            # decision the user cannot take back is its own trap.
+            sha = str(payload.get("sha", "")).strip()
+            try:
+                if payload.get("undo") is True:
+                    record = {"sha": sha.lower(), "cleared": clear_unlanded_resolution(sha)}
+                else:
+                    record = record_unlanded_resolution(
+                        sha=sha,
+                        decision=str(payload.get("decision", "")).strip(),
+                        branch=str(payload.get("branch", "")).strip() or None,
+                        reason=str(payload.get("reason", "")).strip(),
+                    )
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save the resolution: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/optimize-decision":
             decision = str(payload.get("decision", "")).strip()

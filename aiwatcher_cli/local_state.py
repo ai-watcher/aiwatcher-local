@@ -407,6 +407,9 @@ def _empty_state() -> dict[str, Any]:
         "handoff_decisions": [],
         "optimize_decisions": [],
         "improve_decisions": [],
+        # Commits the user has checked on the "work not in main" card. Keyed by
+        # sha, which never changes, so a resolution is permanent by construction.
+        "unlanded_resolutions": [],
         "companion_skips": [],
         "compact_nudges": [],
         # What each compaction did to the requests after it
@@ -511,6 +514,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("handoff_decisions", [])
     data.setdefault("optimize_decisions", [])
     data.setdefault("improve_decisions", [])
+    data.setdefault("unlanded_resolutions", [])
     data.setdefault("companion_skips", [])
     data.setdefault("compact_nudges", [])
     data.setdefault("compaction_outcomes", [])
@@ -1655,6 +1659,76 @@ def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+MAX_UNLANDED_RESOLUTIONS_STORED = 500
+UNLANDED_RESOLUTIONS = {"resolved", "relanded"}
+
+
+def record_unlanded_resolution(
+    *,
+    sha: str,
+    decision: str,
+    branch: str | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Record that a commit the "work not in main" card raised has been settled.
+
+    Keyed by commit sha, which is why this one can be permanent where the
+    Optimize card's 24-hour receipt could not. That receipt matches on an
+    evidence hash built partly from a relative time label and the project's last
+    activity, so it stops matching as soon as the clock ticks or anyone works in
+    the project. A sha never changes. "I looked at this commit and it is fine"
+    stays true, and new work on the same branch arrives as a different sha and
+    is raised on its own.
+    """
+    if decision not in UNLANDED_RESOLUTIONS:
+        raise ValueError(f"decision must be one of: {', '.join(sorted(UNLANDED_RESOLUTIONS))}")
+    key = str(sha).strip().lower()
+    if not (7 <= len(key) <= 40) or any(c not in "0123456789abcdef" for c in key):
+        raise ValueError("sha must be 7-40 hex characters")
+    record = {
+        "sha": key,
+        "decision": decision,
+        "branch": branch.strip()[:200] if isinstance(branch, str) else None,
+        "reason": reason.strip()[:500],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with _locked_state():
+        data = _load()
+        rows = [row for row in data["unlanded_resolutions"]
+                if isinstance(row, dict) and row.get("sha") != key]
+        rows.append(record)
+        data["unlanded_resolutions"] = rows[-MAX_UNLANDED_RESOLUTIONS_STORED:]
+        _save(data)
+    return record
+
+
+def unlanded_resolutions() -> dict[str, dict[str, Any]]:
+    """Settled commits, keyed by sha."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
+    return {
+        str(row["sha"]): row
+        for row in data.get("unlanded_resolutions", [])
+        if isinstance(row, dict) and row.get("sha")
+    }
+
+
+def clear_unlanded_resolution(sha: str) -> bool:
+    """Undo one resolution, so the commit can be raised again."""
+    key = str(sha).strip().lower()
+    with _locked_state():
+        data = _load()
+        rows = [row for row in data["unlanded_resolutions"]
+                if isinstance(row, dict) and row.get("sha") != key]
+        removed = len(rows) != len(data["unlanded_resolutions"])
+        data["unlanded_resolutions"] = rows
+        _save(data)
+    return removed
 
 
 def record_improve_decision(key: str, decision: str) -> dict[str, Any]:
