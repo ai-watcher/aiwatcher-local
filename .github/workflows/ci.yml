@@ -37,6 +37,7 @@ jobs:
           node --test tests/test-drawer-lifecycle.cjs
           node --test tests/test-optimize-review.cjs
           node --test tests/test-compact-review.cjs
+          node --test tests/test-details-state.cjs
 
   test:
     strategy:
