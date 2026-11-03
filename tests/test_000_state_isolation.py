@@ -1,63 +1,34 @@
-"""Point AIWatcher's state at a throwaway directory for the whole suite.
+"""Point AIWatcher's state at a throwaway directory, and move it per test.
 
 This runs before any test does, and the file name is load-bearing: unittest
 discovery imports ``test*.py`` in sorted order, so ``000`` puts this ahead of
 every other module. ``tests/__init__.py`` does the same thing for the other
 entry point (``python -m unittest tests.test_cli``), which does not import this
-module. Both are guarded, so whichever runs first wins and the other is a
-no-op.
+module. Both call into ``tests/state_isolation.py``, which carries the full
+explanation of what is being isolated and why, and both are guarded, so
+whichever runs first wins and the other is a no-op.
 
-Why it exists: the suite used to write to the developer's real ``~/.aiwatcher``.
-Not hypothetically -- a plain ``python3 -m unittest tests.test_cli`` added
-thirteen rows to the live ledger, and the state file on this machine had
-accumulated fifty hook events and twenty-seven brief tokens that no feature
-ever created.
-
-Two consequences, and the second is the reason this was worth chasing:
-
-1. Running the tests must not edit the data the product reports on. A ledger a
-   test run can write to is not evidence of anything.
-2. Every test shared that one store -- with the tests before it, with previous
-   runs, and with any ``aiwatcher watch`` or dashboard running on the same
-   machine, which appends heartbeats and interventions on a timer. Assertions
-   about "the most recent decision" or "how many events are recorded" were
-   reading a file something else could append to mid-run. That is a flake with
-   no fingerprint: it fails once, passes on the rerun, and leaves nothing
-   behind to explain itself.
-
-AIWATCHER_HOME redirects the state file, the summary cache beside it, analyst
-storage and prompt-signal overrides, so one variable isolates all of them.
-Tests that set it themselves still work -- they override this and restore it.
+The tests below guard the guard. Without them, losing isolation is silent.
 """
 
 from __future__ import annotations
 
-import atexit
 import os
-import shutil
-import tempfile
 import unittest
 from pathlib import Path
 
-PREFIX = "aiwatcher-tests-"
+try:  # package mode: `python -m unittest tests.test_000_state_isolation`
+    from . import state_isolation
+except ImportError:  # discovery mode: `tests` is on sys.path, not a package
+    import state_isolation  # type: ignore[no-redef]
 
+PREFIX = state_isolation.PREFIX
 
-def isolate_state_home() -> str:
-    """Redirect AIWatcher state to a temporary home. Safe to call twice."""
-    current = os.environ.get("AIWATCHER_HOME", "")
-    if PREFIX in current:
-        return current
-    home = tempfile.mkdtemp(prefix=PREFIX)
-    os.environ["AIWATCHER_HOME"] = home
-    atexit.register(shutil.rmtree, home, ignore_errors=True)
-    return home
-
-
-isolate_state_home()
+state_isolation.isolate()
 
 
 class StateIsolationTests(unittest.TestCase):
-    """Guards the guard. Without these, losing isolation is silent."""
+    """The run as a whole must not touch the developer's real store."""
 
     def test_state_is_redirected_away_from_the_real_home(self):
         from aiwatcher_cli import analyst, local_state, prompt_signals
@@ -92,3 +63,48 @@ class StateIsolationTests(unittest.TestCase):
         self.assertIn("isolation-probe", local_state.session_waiting_signals())
         after = real.read_text(encoding="utf-8") if real.exists() else None
         self.assertEqual(before, after, "the real AIWatcher ledger was modified")
+
+
+class PerTestStateIsolationTests(unittest.TestCase):
+    """One test must not inherit the store the test before it wrote.
+
+    These two methods are an ordered pair: unittest sorts test methods by name,
+    so ``test_a_...`` runs before ``test_b_...``. That ordering is the only way
+    to observe from inside the suite what a second test sees of the first, so
+    ``test_b`` refuses to pass if the pair ran out of order or alone.
+    """
+
+    SENTINEL = "per-test-isolation-probe"
+    first_home: str = ""
+
+    def test_a_probe_records_a_signal_in_its_own_home(self):
+        from aiwatcher_cli import local_state
+
+        PerTestStateIsolationTests.first_home = os.environ.get("AIWATCHER_HOME", "")
+        self.assertIn(PREFIX, PerTestStateIsolationTests.first_home)
+        local_state.record_session_waiting(
+            session_id=self.SENTINEL, tool="claude-code", kind="permission",
+        )
+        self.assertIn(self.SENTINEL, local_state.session_waiting_signals())
+
+    def test_b_the_next_test_starts_from_an_empty_store(self):
+        from aiwatcher_cli import local_state
+
+        first_home = PerTestStateIsolationTests.first_home
+        self.assertTrue(
+            first_home,
+            "the probe above did not run, so this proves nothing about "
+            "per-test isolation. Run the whole class.",
+        )
+        home = os.environ.get("AIWATCHER_HOME", "")
+        self.assertNotEqual(
+            home, first_home,
+            "both tests share one AIWatcher home, so each test inherits "
+            "whatever the tests before it recorded. See "
+            "tests/state_isolation.py:isolate_state_per_test.",
+        )
+        self.assertFalse(
+            Path(local_state.state_path()).exists(),
+            f"this test started with a state file already at {local_state.state_path()}",
+        )
+        self.assertNotIn(self.SENTINEL, local_state.session_waiting_signals())

@@ -7061,7 +7061,20 @@ class IntegrationConfigTests(unittest.TestCase):
                         ],
                     }
                 }, handle)
+            # The interpreter is a separate dimension from the one under test,
+            # and it is not portable: this fixture is a POSIX command, so on
+            # Windows `python3` resolves to the Microsoft Store stub and the
+            # healthy hook is reported unhealthy too -- two warnings, and the
+            # test fails for a reason that has nothing to do with sources
+            # being checked independently. A real install never writes this
+            # shape (cli_command_for_current_install builds from
+            # sys.executable and os.pathsep), so the probe is stubbed the way
+            # test_hook_health_distinguishes_missing_source_executable_and_import
+            # stubs it, leaving the PYTHONPATH check to tell the two apart.
+            healthy_probe = subprocess.CompletedProcess(["python3"], 0, "", "")
             with (
+                patch.object(cli.shutil, "which", return_value="/usr/bin/python3"),
+                patch.object(cli.subprocess, "run", return_value=healthy_probe),
                 patch.object(
                     cli,
                     "_claude_settings_path",
