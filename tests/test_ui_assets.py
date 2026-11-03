@@ -577,8 +577,10 @@ class TrimmedHomeTest(unittest.TestCase):
         "Models and Tools": "view-projects",
         "Trust boundary": "view-setup",
         # Lowercase because it is no longer a tile label: the count folded into
-        # the Fresh Start receipts subtitle, where it reads as a sentence
+        # the Intervention receipts subtitle, where it reads as a sentence
         # ("6 preflight decisions, last 7 days") rather than a floating card.
+        # It spent a while on the Fresh Start receipts card, which counts a
+        # different log -- see WindowSummaryTest.
         "preflight decisions": "view-receipts",
     }
 
@@ -2802,6 +2804,44 @@ class PathsAndChartsTest(unittest.TestCase):
         self.assertNotIn('metric-card metric-amber', self.html)
         self.assertIn('id="preflightDecisions"', self.html)
         self.assertIn('id="windowLabel"', self.html)
+
+    def test_the_preflight_count_heads_the_table_it_counts(self):
+        """It read "7 preflight decisions · Last 7 days" above nine August
+        receipts.
+
+        preflight_decisions counts prompt-preflight interventions inside the
+        selected day window, and those are the rows of the Intervention
+        receipts table. The Fresh Start receipts it sat on come from
+        recent_handoff_decisions, which takes a limit and applies no date
+        filter, so both the number and the window described the other table on
+        the page.
+        """
+        fresh_at = self.html.index("<h2>Fresh Start receipts</h2>")
+        interventions_at = self.html.index("<h2>Intervention receipts</h2>")
+        fresh_card = self.html[fresh_at:interventions_at]
+        interventions_card = self.html[interventions_at:]
+        self.assertNotIn('id="preflightDecisions"', fresh_card)
+        self.assertNotIn('id="windowLabel"', fresh_card)
+        self.assertIn('id="preflightDecisions"', interventions_card)
+        self.assertIn('id="windowLabel"', interventions_card)
+        # The Fresh Start card states its own scale rather than going bare.
+        self.assertIn('id="freshStartReceiptCount"', fresh_card)
+        self.assertIn('id="freshStartReceiptScope"', fresh_card)
+
+    def test_each_inline_count_is_written_from_the_rows_it_counts(self):
+        # Taking each number from the array that renders its table is what
+        # stops it drifting from those rows again.
+        load = js_function_source(self.js, "loadOnce")
+        self.assertIn("const preflightShown = receiptCache.length;", load)
+        self.assertIn("const freshStartShown = handoffDecisions.length;", load)
+        self.assertNotIn("freshStartReceiptCount').textContent = totals", load)
+
+    def test_the_fresh_start_scope_does_not_claim_the_window(self):
+        # The receipt log is unfiltered, so a window label there would be a
+        # claim about filtering that nothing performs.
+        load = js_function_source(self.js, "loadOnce")
+        self.assertIn("newest first", load)
+        self.assertNotIn("freshStartReceiptScope').textContent = totals.window_label", load)
 
     def test_the_pending_reason_is_stated_once(self):
         # The same 22 words repeated on every pending row.

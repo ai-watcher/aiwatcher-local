@@ -1593,6 +1593,22 @@ def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
     return list(reversed(rows[-max(1, limit):]))
 
 
+def handoff_decision_count() -> int:
+    """How many Fresh Start receipts are stored, not how many a view shows.
+
+    recent_handoff_decisions() takes a limit and applies no date filter, so a
+    surface rendering its rows cannot tell from them whether older receipts
+    exist. Returns 0 when local state cannot be read; a caller that already
+    holds rows should prefer counting those over trusting a 0 here.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return 0
+    return sum(1 for row in data["handoff_decisions"] if isinstance(row, dict))
+
+
 def record_optimize_decision(
     *,
     decision: str,
