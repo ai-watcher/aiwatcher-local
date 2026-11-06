@@ -3104,7 +3104,10 @@ def record_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
             if isinstance(row, dict) and row.get("receipt_id") == receipt_id
         ), None)
         if existing:
-            for key in ("viewed_at", "superseded_by", "superseded_at", "approval"):
+            for key in (
+                "viewed_at", "superseded_by", "superseded_at", "approval",
+                "review_decision",
+            ):
                 if existing.get(key):
                     record[key] = existing[key]
         new_event = record.get("event") if isinstance(record.get("event"), dict) else {}
@@ -3167,6 +3170,45 @@ def mark_work_receipt_viewed(receipt_id: str) -> dict[str, Any] | None:
             if not row.get("viewed_at"):
                 row["viewed_at"] = datetime.now(timezone.utc).isoformat()
                 _save(data)
+            return dict(row)
+    return None
+
+
+def record_work_receipt_review_decision(
+    receipt_id: str,
+    *,
+    decision: str,
+    evidence_hash: str,
+    action_channel: str = "companion",
+) -> dict[str, Any] | None:
+    """Record the user's checkpoint decision without retaining prompt text."""
+    receipt_id = receipt_id.strip()[:160]
+    decision = decision.strip().lower()
+    evidence_hash = evidence_hash.strip().lower()
+    action_channel = action_channel.strip()[:80] or "companion"
+    if not receipt_id:
+        raise ValueError("receipt_id is required")
+    if decision not in {"confirmed", "declined"}:
+        raise ValueError("decision must be confirmed or declined")
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
+        raise ValueError("a valid evidence_hash is required")
+    now = datetime.now(timezone.utc).isoformat()
+    with _locked_state():
+        data = _load()
+        for row in reversed(data.get("work_receipts", [])):
+            if not isinstance(row, dict) or row.get("receipt_id") != receipt_id:
+                continue
+            if isinstance(row.get("review_decision"), dict):
+                return dict(row)
+            row["review_decision"] = {
+                "status": decision,
+                "evidence_hash": evidence_hash,
+                "decided_at": now,
+                "action_channel": action_channel,
+            }
+            if not row.get("viewed_at"):
+                row["viewed_at"] = now
+            _save(data)
             return dict(row)
     return None
 

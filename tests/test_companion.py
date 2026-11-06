@@ -388,14 +388,25 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         return {
             "receipt_id": "receipt-1",
             "event": {"status": status, "kind": "push"},
-            "snapshot": {"branch": "feature", "commit_shas": ["a" * 40, "b" * 40]},
+            "snapshot": {
+                "branch": "feature", "commit_shas": ["a" * 40, "b" * 40],
+                "changed_file_count": 4, "lines_added": 67, "lines_removed": 0,
+            },
+            "verifications": [{
+                "runner": "python -m unittest", "status": "passed",
+                "scope": "targeted", "exact_state": True,
+            }],
         }
 
     def test_confirmed_delivery_review_owns_an_advisory_companion_state(self):
         state = self._state(self._summary(), delivery_receipts=[self._delivery_receipt()])
         self.assertEqual(state["state"], "delivery_review_ready")
-        self.assertEqual(state["label"], "Delivery review ready")
+        self.assertEqual(state["label"], "Checkpoint ready")
         self.assertIn("2 commits", state["subtitle"])
+        self.assertEqual(state["primary_label"], "Review checkpoint")
+        self.assertEqual(state["primary_action"], "open_delivery_card")
+        self.assertEqual(state["checkpoint_preview"]["changed_file_count"], 4)
+        self.assertEqual(state["checkpoint_preview"]["check_count"], 1)
         self.assertIn("receipt-1", state["primary_url"])
         self.assertTrue(state["delivery_confirmed"])
         self.assertEqual(state["confidence"], "confirmed_delivery")
