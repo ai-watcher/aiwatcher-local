@@ -111,6 +111,7 @@ from .local_state import (
     mark_active_prompt_gate_seen,
     mark_recent_handoff_receipts_viewed,
     mark_work_receipt_viewed,
+    record_work_receipt_review_decision,
     record_companion_skip,
     record_ambient_intervention_action,
     record_ai_assist_cache,
@@ -283,6 +284,7 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/update-apply",
     "/api/update-auto-check",
     "/api/companion-usage",
+    "/api/companion-delivery-decision",
     "/api/companion-preferences",
     "/api/companion-skip",
     "/api/ai-assist-config",
@@ -334,6 +336,7 @@ _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
 _AI_ASSIST_INFLIGHT_LOCK = threading.Lock()
+_COMPANION_DELIVERY_DECISION_LOCK = threading.Lock()
 _AI_ASSIST_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 AI_ASSIST_INFLIGHT_WAIT_SECONDS = 35.0
 _SESSION_INDEX: dict[str, LocalSession] = {}
@@ -4456,6 +4459,96 @@ def approve_delivery_review(payload: dict[str, object]) -> dict[str, object]:
     result["objective"] = objective.to_json()
     result["transient_objective"] = True
     return _finalize_delivery_review(result, event_record, infer_objective=False)
+
+
+def decide_companion_delivery_review(payload: dict[str, object]) -> dict[str, object]:
+    """Confirm or decline one checkpoint at a time in the singleton dashboard."""
+    with _COMPANION_DELIVERY_DECISION_LOCK:
+        return _decide_companion_delivery_review(payload)
+
+
+def _decide_companion_delivery_review(payload: dict[str, object]) -> dict[str, object]:
+    """Apply a decision only to exact evidence still awaiting review."""
+    receipt_id = str(payload.get("receipt_id") or "").strip()[:160]
+    decision = str(payload.get("decision") or "").strip().lower()
+    submitted_hash = str(payload.get("evidence_hash") or "").strip().lower()
+    if not receipt_id:
+        return {"error": "receipt_id is required", "http_status": 400}
+    if decision not in {"confirmed", "declined"}:
+        return {"error": "decision must be confirmed or declined", "http_status": 400}
+    reviews = build_delivery_reviews(limit=100).get("reviews") or []
+    review = next((
+        row for row in reviews
+        if isinstance(row, dict) and row.get("receipt_id") == receipt_id
+    ), None)
+    if review is None:
+        return {"error": "delivery review not found", "http_status": 404}
+    if review.get("superseded_by"):
+        return {"error": "delivery review was superseded; regenerate it", "http_status": 409}
+    if not review.get("ready"):
+        return {"error": "delivery review is not awaiting a Companion decision", "http_status": 409}
+    current_hash = str(review.get("evidence_hash") or "")
+    if submitted_hash != current_hash:
+        return {"error": "delivery evidence changed; review the refreshed checkpoint", "http_status": 409}
+
+    decision_hash = current_hash
+    if decision == "confirmed":
+        objective = str(payload.get("objective") or "").strip()[:2_000]
+        if not objective:
+            return {"error": "Confirm the goal before accepting this checkpoint", "http_status": 400}
+        event = review.get("event") if isinstance(review.get("event"), dict) else {}
+        event_record = next((
+            row for row in recent_delivery_events(limit=500)
+            if isinstance(row, dict) and row.get("event_id") == event.get("event_id")
+        ), None)
+        checkout = str((event_record or {}).get("checkout_path") or "")
+        if not checkout:
+            return {"error": "checkout path is unavailable; open details to review", "http_status": 409}
+        enriched = build_explicit_delivery_review({
+            "project_path": checkout,
+            "objective": objective,
+        })
+        if enriched.get("error"):
+            return {"error": str(enriched["error"]), "http_status": 409}
+        if enriched.get("receipt_id") != receipt_id:
+            return {"error": "delivery evidence changed; review the refreshed checkpoint", "http_status": 409}
+        approved = approve_delivery_review({
+            "receipt_id": receipt_id,
+            "evidence_hash": enriched.get("evidence_hash"),
+            "objective": objective,
+            "confirmed": True,
+        })
+        if approved.get("error"):
+            return approved
+        decision_hash = str(approved.get("evidence_hash") or "")
+
+    try:
+        record = record_work_receipt_review_decision(
+            receipt_id,
+            decision=decision,
+            evidence_hash=decision_hash,
+            action_channel="companion",
+        )
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc), "http_status": 500}
+    if record is None:
+        return {"error": "delivery review not found", "http_status": 404}
+    stored_decision = record.get("review_decision") if isinstance(record.get("review_decision"), dict) else {}
+    if (
+        stored_decision.get("status") != decision
+        or stored_decision.get("evidence_hash") != decision_hash
+    ):
+        return {"error": "delivery review was already decided", "http_status": 409}
+    return {
+        "ok": True,
+        "receipt_id": receipt_id,
+        "decision": decision,
+        "message": (
+            "Checkpoint confirmed for this exact evidence."
+            if decision == "confirmed"
+            else "Checkpoint declined; its evidence remains in Delivery reviews."
+        ),
+    }
 
 
 def build_report(days: int = 7) -> dict[str, object]:
@@ -10048,24 +10141,44 @@ def _build_companion_state() -> dict[str, object]:
         receipt_id = str(delivery_receipt.get("receipt_id") or "")
         branch = str(snapshot.get("branch") or "detached HEAD")
         commit_count = len(snapshot.get("commit_shas") or [])
+        changed_file_count = int(snapshot.get("changed_file_count") or 0)
+        lines_added = int(snapshot.get("lines_added") or 0)
+        lines_removed = int(snapshot.get("lines_removed") or 0)
+        exact_checks = [
+            row for row in (delivery_receipt.get("verifications") or [])
+            if isinstance(row, dict) and row.get("exact_state")
+        ]
         kind = str(event.get("kind") or "delivery")
         destination = "pull request" if kind == "pull_request" else "push"
         review_url = f"/?view=receipts&delivery={quote(receipt_id, safe='')}"
         return {
             **base,
             "state": "delivery_review_ready",
-            "label": "Delivery review ready",
-            "title": "Delivery review ready",
-            "subtitle": f"{branch} · {commit_count} commit{'s' if commit_count != 1 else ''} · {destination} confirmed",
-            "primary_label": "Review evidence",
-            "primary_action": "open_url",
+            "label": "Checkpoint ready",
+            "title": "Checkpoint ready",
+            "subtitle": (
+                f"{commit_count} commit{'s' if commit_count != 1 else ''} · "
+                f"{len(exact_checks)} check{'s' if len(exact_checks) != 1 else ''} · {destination} confirmed"
+            ),
+            "primary_label": "Review checkpoint",
+            "primary_action": "open_delivery_card",
             "primary_url": review_url,
+            "delivery_receipt_id": receipt_id,
+            "checkpoint_preview": {
+                "branch": branch,
+                "commit_count": commit_count,
+                "changed_file_count": changed_file_count,
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+                "check_count": len(exact_checks),
+                "destination": destination,
+            },
             "badge": {
                 "count": 1,
                 "tone": "info",
                 "label": "1 delivery review ready",
             },
-            "detail": "The remote event and delivered Git state were observed locally. Review evidence gaps before copying the PR summary.",
+            "detail": "Open the checkpoint card to confirm or decline this exact delivery evidence. The full UI is optional.",
         }
 
     # Below a blocked session -- blocked outranks done -- and below live work:
@@ -10894,6 +11007,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/delivery-review",
             "/api/delivery-review-approve",
             "/api/delivery-review-viewed",
+            "/api/companion-delivery-decision",
             "/api/delivery-tracking",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
@@ -10964,6 +11078,14 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "Expected a JSON object"}), "application/json; charset=utf-8")
                 return
             response = approve_delivery_review(payload)
+            status = int(response.pop("http_status", 200))
+            self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/companion-delivery-decision":
+            if not isinstance(payload, dict):
+                self._send(400, json.dumps({"error": "Expected a JSON object"}), "application/json; charset=utf-8")
+                return
+            response = decide_companion_delivery_review(payload)
             status = int(response.pop("http_status", 200))
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
             return

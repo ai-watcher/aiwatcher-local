@@ -56,6 +56,21 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(listing["reviews"][0]["objective"]["text"], None)
         self.assertIn("feature.txt", listing["reviews"][0]["snapshot"]["changed_files"])
 
+    def test_companion_decision_rejects_a_candidate_that_was_never_prompted(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Review this local candidate.",
+        })
+
+        result = ui.decide_companion_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "decision": "declined",
+        })
+
+        self.assertEqual(result["http_status"], 409)
+        self.assertIn("not awaiting", result["error"])
+
     def test_repeated_preview_is_stable_and_confirmed_delivery_replaces_it(self) -> None:
         first = ui.build_explicit_delivery_review({"project_path": str(self.repo)})
         second = ui.build_explicit_delivery_review({"project_path": str(self.repo)})
@@ -85,6 +100,59 @@ class DeliveryReviewApiTests(unittest.TestCase):
         listing = ui.build_delivery_reviews()
         self.assertEqual(listing["ready_count"], 0)
         self.assertIsNotNone(listing["reviews"][0]["viewed_at"])
+
+    def test_companion_decline_quiets_checkpoint_and_preserves_evidence(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-decline", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+        review = ui.build_delivery_reviews()["latest_ready"]
+
+        result = ui.decide_companion_delivery_review({
+            "receipt_id": receipt.receipt_id,
+            "evidence_hash": review["evidence_hash"],
+            "decision": "declined",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["decision"], "declined")
+        listing = ui.build_delivery_reviews()
+        self.assertEqual(listing["ready_count"], 0)
+        stored = local_state.recent_work_receipts()[0]
+        self.assertEqual(stored["review_decision"]["status"], "declined")
+        self.assertTrue(stored["viewed_at"])
+        repeated = ui.decide_companion_delivery_review({
+            "receipt_id": receipt.receipt_id,
+            "evidence_hash": review["evidence_hash"],
+            "objective": "A later conflicting decision.",
+            "decision": "confirmed",
+        })
+        self.assertEqual(repeated["http_status"], 409)
+
+    def test_companion_confirm_binds_goal_and_exact_evidence(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-confirm", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+        review = ui.build_delivery_reviews()["latest_ready"]
+
+        result = ui.decide_companion_delivery_review({
+            "receipt_id": receipt.receipt_id,
+            "evidence_hash": review["evidence_hash"],
+            "objective": "Ship the compact Companion checkpoint card.",
+            "decision": "confirmed",
+        })
+
+        self.assertTrue(result["ok"])
+        stored = next(
+            row for row in local_state.recent_work_receipts()
+            if row["receipt_id"] == receipt.receipt_id
+        )
+        self.assertEqual(stored["approval"]["status"], "approved")
+        self.assertEqual(stored["review_decision"]["status"], "confirmed")
+        self.assertNotIn("Ship the compact Companion checkpoint card.", json.dumps(stored))
 
     def test_objective_can_be_applied_transiently_to_confirmed_review(self) -> None:
         confirmed = build_work_receipt(
@@ -468,6 +536,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-approve", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-viewed", ui.SAME_ORIGIN_ONLY_ROUTES)
+        self.assertIn("/api/companion-delivery-decision", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-tracking", ui.SAME_ORIGIN_ONLY_ROUTES)
 
 

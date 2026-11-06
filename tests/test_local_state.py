@@ -124,11 +124,21 @@ class LocalStateTests(unittest.TestCase):
                 local_state.record_work_receipt(receipt("one", "a" * 40))
                 first = local_state.mark_work_receipt_viewed("one")
                 second = local_state.mark_work_receipt_viewed("one")
+                decision = local_state.record_work_receipt_review_decision(
+                    "one", decision="declined", evidence_hash="e" * 64,
+                )
+                repeated = local_state.record_work_receipt_review_decision(
+                    "one", decision="confirmed", evidence_hash="f" * 64,
+                )
+                local_state.record_work_receipt(receipt("one", "a" * 40))
                 local_state.record_work_receipt(receipt("two", "b" * 40))
                 rows = local_state.recent_work_receipts()
 
         self.assertEqual(first["viewed_at"], second["viewed_at"])
         older = next(row for row in rows if row["receipt_id"] == "one")
+        self.assertEqual(decision["review_decision"]["status"], "declined")
+        self.assertEqual(repeated["review_decision"]["status"], "declined")
+        self.assertEqual(older["review_decision"]["evidence_hash"], "e" * 64)
         self.assertEqual(older["superseded_by"], "two")
         self.assertIsNotNone(older["superseded_at"])
 
