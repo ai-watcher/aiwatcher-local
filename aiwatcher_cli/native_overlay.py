@@ -1453,8 +1453,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         checkpointStatus.stringValue = "Reading exact local evidence..."
         checkpointConfirmButton.isEnabled = false
         checkpointDeclineButton.isEnabled = false
-        guard let endpoint = URL(string: dashboardBaseURL + "/api/delivery-reviews?limit=20") else { return }
-        URLSession.shared.dataTask(with: endpoint) { data, response, _ in
+        let encodedReceiptID = deliveryReceiptID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let endpoint = URL(
+            string: dashboardBaseURL + "/api/delivery-reviews?limit=1&receipt_id=" + encodedReceiptID
+        ) else { return }
+        var request = URLRequest(url: endpoint)
+        request.timeoutInterval = 8
+        URLSession.shared.dataTask(with: request) { data, response, _ in
             var payload: [String: Any]? = nil
             if let data = data { payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
             DispatchQueue.main.async {
@@ -5484,7 +5489,9 @@ def run_native_presence(
 
         def fetch() -> None:
             try:
-                with urllib.request.urlopen(f"{url.rstrip('/')}/api/delivery-reviews?limit=20", timeout=8) as response:
+                receipt_id = urllib.parse.quote(delivery_receipt_id_var.get().strip(), safe="")
+                endpoint = f"{url.rstrip('/')}/api/delivery-reviews?limit=1&receipt_id={receipt_id}"
+                with urllib.request.urlopen(endpoint, timeout=8) as response:
                     result["payload"] = json.loads(response.read().decode("utf-8"))
             except (OSError, ValueError):
                 result["error"] = True

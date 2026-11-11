@@ -4291,14 +4291,22 @@ def _finalize_delivery_review(
     return payload
 
 
-def build_delivery_reviews(*, limit: int = 20) -> dict[str, object]:
+def build_delivery_reviews(*, limit: int = 20, receipt_id: str | None = None) -> dict[str, object]:
     """Return recent Local receipts with transient Git paths rehydrated."""
+    selected_receipt_id = str(receipt_id or "").strip()[:160]
     events = {
         str(row.get("event_id")): row
         for row in recent_delivery_events(limit=500)
         if isinstance(row, dict) and row.get("event_id")
     }
-    stored_reviews = recent_work_receipts(limit=max(1, min(100, limit)))
+    stored_reviews = recent_work_receipts(
+        limit=100 if selected_receipt_id else max(1, min(100, limit)),
+    )
+    if selected_receipt_id:
+        stored_reviews = [
+            row for row in stored_reviews
+            if isinstance(row, dict) and row.get("receipt_id") == selected_receipt_id
+        ]
     confirmed_states = {
         (
             str((row.get("event") or {}).get("checkout_id") or ""),
@@ -10912,7 +10920,12 @@ class UIHandler(BaseHTTPRequestHandler):
                 limit = max(1, min(100, int(params.get("limit", ["20"])[0])))
             except ValueError:
                 limit = 20
-            self._send(200, json.dumps(build_delivery_reviews(limit=limit)), "application/json; charset=utf-8")
+            receipt_id = str(params.get("receipt_id", [""])[0]).strip()[:160] or None
+            self._send(
+                200,
+                json.dumps(build_delivery_reviews(limit=limit, receipt_id=receipt_id)),
+                "application/json; charset=utf-8",
+            )
             return
         if parsed.path == "/api/report":
             params = parse_qs(parsed.query)

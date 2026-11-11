@@ -56,6 +56,27 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(listing["reviews"][0]["objective"]["text"], None)
         self.assertIn("feature.txt", listing["reviews"][0]["snapshot"]["changed_files"])
 
+    def test_one_receipt_can_be_loaded_without_hydrating_the_full_history(self) -> None:
+        first = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="first", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        second = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="second", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+
+        with patch.object(
+            ui, "hydrate_persisted_receipt", wraps=ui.hydrate_persisted_receipt,
+        ) as hydrate:
+            listing = ui.build_delivery_reviews(limit=1, receipt_id=first.receipt_id)
+
+        self.assertEqual([row["receipt_id"] for row in listing["reviews"]], [first.receipt_id])
+        self.assertEqual(hydrate.call_count, 1)
+        self.assertNotEqual(first.receipt_id, second.receipt_id)
+
     def test_companion_decision_rejects_a_candidate_that_was_never_prompted(self) -> None:
         candidate = ui.build_explicit_delivery_review({
             "project_path": str(self.repo),
