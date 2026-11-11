@@ -237,6 +237,8 @@ def codex_boundary_stats(path: str, *, since: datetime | None = None) -> dict[st
         }
 
     def consume(s: dict[str, Any], row: dict[str, Any]) -> None:
+        if not isinstance(row, dict):
+            return
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         row_type = row.get("type")
         stamp = _parse_ts(row.get("timestamp"))

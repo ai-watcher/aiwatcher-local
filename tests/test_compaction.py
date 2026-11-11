@@ -413,6 +413,16 @@ class CodexRolloutTests(unittest.TestCase):
         self.assertEqual(result["latest_context"], 88_000)
         self.assertEqual(result["model"], "gpt-tail")
 
+    def test_boundary_stats_ignore_valid_json_rows_that_are_not_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._rollout(tmp)
+            rollout = Path(session.source_path)
+            rollout.write_text("1\n" + rollout.read_text(encoding="utf-8"), encoding="utf-8")
+            result = compaction.codex_boundary_stats(str(rollout))
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["latest_context"], 310_000)
+
     def test_a_codex_shed_since_the_commit_is_seen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = compaction.assess(self._rollout(tmp, shed=True))
