@@ -3215,17 +3215,21 @@ def record_work_receipt_review_decision(
 
 def approve_work_receipt(
     receipt_id: str, *, evidence_hash: str, objective_hash: str,
+    evidence_scope: str = "full",
 ) -> dict[str, Any] | None:
     """Record explicit approval without retaining objective or source text."""
     receipt_id = receipt_id.strip()[:160]
     evidence_hash = evidence_hash.strip().lower()
     objective_hash = objective_hash.strip().lower()
+    evidence_scope = evidence_scope.strip().lower()
     if not receipt_id:
         raise ValueError("receipt_id is required")
     if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
         raise ValueError("a valid evidence_hash is required")
     if not re.fullmatch(r"[0-9a-f]{64}", objective_hash):
         raise ValueError("a valid objective hash is required")
+    if evidence_scope not in {"full", "checkpoint"}:
+        raise ValueError("evidence_scope must be full or checkpoint")
     now = datetime.now(timezone.utc).isoformat()
     with _locked_state():
         data = _load()
@@ -3249,6 +3253,7 @@ def approve_work_receipt(
                 "status": "approved",
                 "evidence_hash": evidence_hash,
                 "objective_hash": objective_hash,
+                "evidence_scope": evidence_scope,
                 "approved_at": now,
             }
             _save(data)

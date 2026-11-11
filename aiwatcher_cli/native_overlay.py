@@ -1674,11 +1674,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.usageIdentity.toolTip = selected["project_path"] as? String
                 let context = selected["context"] as? [String: Any] ?? [:]
                 let available = context["available"] as? Bool ?? false
-                self.usageContext.stringValue = available ? (selected["context_label"] as? String ?? "") : "Context unavailable"
+                self.usageContext.stringValue = selected["context_label"] as? String ?? "Usage unavailable"
                 self.usageContext.font = NSFont.systemFont(ofSize: available ? 20 : 24, weight: .semibold)
                 self.usageMeter.isHidden = !available
                 self.usageMeter.doubleValue = min(max((context["pct_of_turn_limit"] as? NSNumber)?.doubleValue ?? 0, 0), 100)
-                self.usageNote.stringValue = available ? (selected["context_note"] as? String ?? "") : (selected["context_label"] as? String ?? "")
+                self.usageNote.stringValue = selected["context_note"] as? String ?? ""
                 self.usageTotals.stringValue = selected["usage_label"] as? String ?? ""
                 self.usageInput.stringValue = selected["input_label"] as? String ?? ""
                 self.usageCache.stringValue = selected["cache_label"] as? String ?? ""
@@ -5669,11 +5669,11 @@ def run_native_presence(
                 context = selected.get("context") or {}
                 available = context.get("available")
                 text_vars["identity"].set(f"{selected['model']} · {selected['state']}\nSession {sid}")
-                text_vars["context"].set(str(selected["context_label"]) if available else "Context unavailable")
+                text_vars["context"].set(str(selected["context_label"]))
                 if available:
                     meter["value"] = min(100, max(0, context.get("pct_of_turn_limit") or 0))
                     meter.pack(fill="x", pady=8)
-                text_vars["note"].set(str(selected["context_note"] if available else selected["context_label"]))
+                text_vars["note"].set(str(selected["context_note"]))
                 for key, value in (("totals", "usage_label"), ("input", "input_label"), ("cache", "cache_label"), ("cost", "cost_label"), ("boundary", "breakdown_note")):
                     text_vars[key].set(str(selected[value]))
                 text_vars["updated"].set(f"Last activity: {selected.get('updated_at') or 'unknown'}\nTotals through: {selected.get('totals_updated_at') or 'unknown'}\n{payload['total_recent_sessions']} recent sessions · picker limited to 20")

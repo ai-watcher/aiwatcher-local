@@ -4178,27 +4178,38 @@ def _session_is_delegated(session: LocalSession, known_ids: set[str]) -> bool:
     return False
 
 
+def _delivery_review_evidence_hash(
+    payload: dict[str, object], *, scope: str, objective_source_hash: str | None = None,
+) -> str:
+    """Hash only the evidence represented by the selected review surface."""
+    if scope == "checkpoint":
+        payload = {**payload, "intent_source_hash": None}
+    return work_receipt_evidence_hash(payload, objective_source_hash=objective_source_hash)
+
+
 def _finalize_delivery_review(
     payload: dict[str, object],
     event_record: dict[str, object] | None,
     *,
     infer_objective: bool = True,
+    include_session_understanding: bool = True,
 ) -> dict[str, object]:
     """Attach transient objective, approval, and current-state facts to a review."""
     objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
     contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
     linked_sessions: list[LocalSession] = []
     seen_session_ids: set[str] = set()
-    for contribution in contributions:
-        if not isinstance(contribution, dict):
-            continue
-        session_id = str(contribution.get("session_id") or "")
-        if not session_id or session_id in seen_session_ids:
-            continue
-        session = _find_session_row(session_id)
-        if session is not None:
-            seen_session_ids.add(session_id)
-            linked_sessions.append(session)
+    if include_session_understanding:
+        for contribution in contributions:
+            if not isinstance(contribution, dict):
+                continue
+            session_id = str(contribution.get("session_id") or "")
+            if not session_id or session_id in seen_session_ids:
+                continue
+            session = _find_session_row(session_id)
+            if session is not None:
+                seen_session_ids.add(session_id)
+                linked_sessions.append(session)
     linked_sessions.sort(key=lambda row: row.started_at or row.updated_at or MIN_DT)
     delegated_ids = _known_delegated_session_ids() if linked_sessions else set()
     intent_sessions = [
@@ -4263,13 +4274,17 @@ def _finalize_delivery_review(
     )
     current_state_matches = work_receipt_matches_current_checkout(payload, event_record)
     payload["current_state_matches"] = current_state_matches
-    evidence_hash = work_receipt_evidence_hash(payload)
+    evidence_scope = "full" if include_session_understanding else "checkpoint"
+    payload["evidence_scope"] = evidence_scope
+    evidence_hash = _delivery_review_evidence_hash(payload, scope=evidence_scope)
     payload["evidence_hash"] = evidence_hash
     approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
+    approval_scope = str(approval.get("evidence_scope") or "full")
+    approval_evidence_hash = _delivery_review_evidence_hash(payload, scope=approval_scope)
     payload["approval_valid"] = bool(
         current_state_matches
         and approval.get("status") == "approved"
-        and approval.get("evidence_hash") == evidence_hash
+        and approval.get("evidence_hash") == approval_evidence_hash
         and approval.get("objective_hash") == objective.get("source_hash")
     )
     payload["approval_label"] = (
@@ -4325,7 +4340,12 @@ def build_delivery_reviews(*, limit: int = 20, receipt_id: str | None = None) ->
             continue
         event_record = events.get(str(event.get("event_id") or ""))
         payload = hydrate_persisted_receipt(stored, event_record)
-        reviews.append(_finalize_delivery_review(payload, event_record))
+        reviews.append(_finalize_delivery_review(
+            payload,
+            event_record,
+            infer_objective=not selected_receipt_id,
+            include_session_understanding=not selected_receipt_id,
+        ))
     ready = [row for row in reviews if row.get("ready")]
     return {
         "reviews": reviews,
@@ -4484,7 +4504,7 @@ def _decide_companion_delivery_review(payload: dict[str, object]) -> dict[str, o
         return {"error": "receipt_id is required", "http_status": 400}
     if decision not in {"confirmed", "declined"}:
         return {"error": "decision must be confirmed or declined", "http_status": 400}
-    reviews = build_delivery_reviews(limit=100).get("reviews") or []
+    reviews = build_delivery_reviews(limit=1, receipt_id=receipt_id).get("reviews") or []
     review = next((
         row for row in reviews
         if isinstance(row, dict) and row.get("receipt_id") == receipt_id
@@ -4501,34 +4521,39 @@ def _decide_companion_delivery_review(payload: dict[str, object]) -> dict[str, o
 
     decision_hash = current_hash
     if decision == "confirmed":
-        objective = str(payload.get("objective") or "").strip()[:2_000]
-        if not objective:
+        objective_text = str(payload.get("objective") or "").strip()[:2_000]
+        if not objective_text:
             return {"error": "Confirm the goal before accepting this checkpoint", "http_status": 400}
         event = review.get("event") if isinstance(review.get("event"), dict) else {}
         event_record = next((
             row for row in recent_delivery_events(limit=500)
             if isinstance(row, dict) and row.get("event_id") == event.get("event_id")
         ), None)
-        checkout = str((event_record or {}).get("checkout_path") or "")
-        if not checkout:
-            return {"error": "checkout path is unavailable; open details to review", "http_status": 409}
-        enriched = build_explicit_delivery_review({
-            "project_path": checkout,
-            "objective": objective,
-        })
-        if enriched.get("error"):
-            return {"error": str(enriched["error"]), "http_status": 409}
-        if enriched.get("receipt_id") != receipt_id:
-            return {"error": "delivery evidence changed; review the refreshed checkpoint", "http_status": 409}
-        approved = approve_delivery_review({
-            "receipt_id": receipt_id,
-            "evidence_hash": enriched.get("evidence_hash"),
-            "objective": objective,
-            "confirmed": True,
-        })
-        if approved.get("error"):
-            return approved
-        decision_hash = str(approved.get("evidence_hash") or "")
+        if not work_receipt_matches_current_checkout(review, event_record):
+            return {"error": "checkout HEAD changed; refresh the checkpoint", "http_status": 409}
+        objective = ObjectiveClaim(
+            provenance="user_confirmed", confidence="high", text=objective_text,
+            confirmed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        review["objective"] = objective.to_json()
+        approved_review = _finalize_delivery_review(
+            review,
+            event_record,
+            infer_objective=False,
+            include_session_understanding=False,
+        )
+        decision_hash = str(approved_review.get("evidence_hash") or "")
+        try:
+            approved = approve_work_receipt(
+                receipt_id,
+                evidence_hash=decision_hash,
+                objective_hash=str(objective.source_hash or ""),
+                evidence_scope="checkpoint",
+            )
+        except (OSError, ValueError) as exc:
+            return {"error": str(exc), "http_status": 500}
+        if approved is None:
+            return {"error": "delivery review not found", "http_status": 404}
 
     try:
         record = record_work_receipt_review_decision(
@@ -8593,7 +8618,7 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
 # session's updated_at stamp plus the tokens read then (0 = read but not
 # measurable). A session only changes its transcript when it writes, and
 # writing moves updated_at, so a hit means the 13ms parse can be skipped.
-_PRESSURE_TRANSCRIPT_CACHE: dict[str, tuple[str, int, int, str | None]] = {}
+_PRESSURE_TRANSCRIPT_CACHE: dict[tuple[str, bool], tuple[str, int, int, str | None]] = {}
 
 _TRANSIENT_SIGNAL_KINDS = {"loop", "velocity", "runway", "usage_pressure", "prompt_blocked"}
 _TRANSIENT_SIGNAL_LABELS = {
@@ -8610,6 +8635,7 @@ RECENT_SIGNAL_WINDOW_MINUTES = LIVE_WINDOW_MINUTES
 
 def _pressure_block(
     rows: list[SessionPresence], sessions: list[LocalSession], *, session_id: str | None = None,
+    latest_only: bool = False,
 ) -> dict[str, object]:
     """Context pressure of the session being worked in, for the resting bar.
 
@@ -8650,14 +8676,18 @@ def _pressure_block(
             "reason": "this tool reports cumulative totals, not per-turn context",
         }
     stamp = session.updated_at.isoformat() if session.updated_at else ""
-    cached = _PRESSURE_TRANSCRIPT_CACHE.get(session.source_path)
+    cache_key = (session.source_path, latest_only)
+    cached = _PRESSURE_TRANSCRIPT_CACHE.get(cache_key)
     if cached is not None and cached[0] == stamp:
         latest, peak, model = cached[1], cached[2], cached[3]
     else:
         # Codex rollouts carry per-call context in a different shape; the
         # compaction module's reader yields the same fields.
         if "codex" in session.tool.lower():
-            stats = compaction.codex_boundary_stats(session.source_path)
+            stats = (
+                compaction.codex_latest_context(session.source_path)
+                if latest_only else compaction.codex_boundary_stats(session.source_path)
+            )
         else:
             stats = statusline.read_transcript(session.source_path)
         available = bool(stats.get("available"))
@@ -8666,7 +8696,7 @@ def _pressure_block(
         model = stats.get("model") if available else None
         if len(_PRESSURE_TRANSCRIPT_CACHE) > 32:
             _PRESSURE_TRANSCRIPT_CACHE.clear()
-        _PRESSURE_TRANSCRIPT_CACHE[session.source_path] = (stamp, latest, peak, model)
+        _PRESSURE_TRANSCRIPT_CACHE[cache_key] = (stamp, latest, peak, model)
     if latest <= 0:
         return {"available": False, "reason": "no per-turn usage recorded in this session yet"}
     # Same rule as session_health._context_ceiling: a table figure the session
@@ -8677,6 +8707,8 @@ def _pressure_block(
         return {
             "available": False,
             "reason": f"context window unknown for {model or session.model or 'this model'}",
+            "latest_turn_tokens": latest,
+            "model": model or session.model,
         }
     severity = "critical" if latest >= window else "ok"
     pct = round(100 * latest / window)
@@ -8762,13 +8794,21 @@ def build_companion_usage(session_id: str = "") -> dict[str, object]:
     if target is None:
         return payload
     session = by_id[target.session_id]
-    pressure = _pressure_block(rows, sessions, session_id=target.session_id)
+    pressure = _pressure_block(rows, sessions, session_id=target.session_id, latest_only=True)
     total_in = max(0, session.tokens_in or 0)
     total_out = max(0, session.tokens_out or 0)
     total = total_in + total_out
+    latest_turn_tokens = int(pressure.get("latest_turn_tokens") or 0)
+    unavailable_reason = str(
+        pressure.get("reason") or target.reason or "Context is not measurable for this session."
+    )
+    unavailable_reason = unavailable_reason[:1].upper() + unavailable_reason[1:]
     context_label = (
         f"{100 * pressure['latest_turn_tokens'] / pressure['context_window']:.1f}% of model window"
-        if pressure.get("available") else str(pressure.get("reason") or target.reason or "Context unavailable")
+        if pressure.get("available") else (
+            f"{compact_int(latest_turn_tokens)} latest-turn input"
+            if latest_turn_tokens else str(pressure.get("reason") or target.reason or "Context unavailable")
+        )
     )
     indexed_stamp = indexed_stamps.get(target.session_id)
     payload["reason"] = None
@@ -8786,7 +8826,11 @@ def build_companion_usage(session_id: str = "") -> dict[str, object]:
         "context_note": (
             f"{compact_int(pressure['latest_turn_tokens'])} latest input / {compact_int(pressure['context_window'])} model window. "
             "Includes cached input. Window is a model reference estimate, not the owning app's live display."
-            if pressure.get("available") else "Context unavailable."
+            if pressure.get("available") else (
+                f"{compact_int(latest_turn_tokens)} input tokens were observed on the latest call, including cached input. "
+                f"{unavailable_reason.rstrip('.')}. No percentage is shown."
+                if latest_turn_tokens else unavailable_reason
+            )
         ),
         "usage_label": f"Indexed totals: {compact_int(total)} tokens · {session.agent_calls} model calls · {session.tool_calls} tool calls" if total else "Session token totals not recorded",
         "input_tokens": total_in,
