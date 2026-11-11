@@ -36,6 +36,7 @@ _REFLOG_LINE = re.compile(
 # carries that movement's description instead.
 _CREATING_ACTIONS = ("commit", "merge", "cherry-pick", "pull", "revert", "rebase")
 _MAX_FILES_IN_COMMAND = 4
+_CODEX_LATEST_CONTEXT_TAIL_BYTES = 4 * 1024 * 1024
 
 
 @dataclass
@@ -236,6 +237,8 @@ def codex_boundary_stats(path: str, *, since: datetime | None = None) -> dict[st
         }
 
     def consume(s: dict[str, Any], row: dict[str, Any]) -> None:
+        if not isinstance(row, dict):
+            return
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         row_type = row.get("type")
         stamp = _parse_ts(row.get("timestamp"))
@@ -285,6 +288,50 @@ def codex_boundary_stats(path: str, *, since: datetime | None = None) -> dict[st
         result['files_since'] = list(result['files_since'])
         result['available'] = result['turns'] > 0
         return result
+
+
+def codex_latest_context(path: str, *, tail_bytes: int = _CODEX_LATEST_CONTEXT_TAIL_BYTES) -> dict[str, Any]:
+    """Read the latest Codex per-call input without folding the whole rollout."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - max(1, tail_bytes))
+            handle.seek(start)
+            chunk = handle.read()
+    except OSError:
+        return {"available": False, "latest_context": 0, "peak_context": 0, "model": None}
+
+    if start:
+        _, separator, chunk = chunk.partition(b"\n")
+        if not separator:
+            return {"available": False, "latest_context": 0, "peak_context": 0, "model": None}
+
+    latest = 0
+    model: str | None = None
+    for raw in reversed(chunk.splitlines()):
+        try:
+            row = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if not latest and row.get("type") == "event_msg" and payload.get("type") == "token_count":
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+            try:
+                latest = int(last.get("input_tokens") or 0)
+            except (TypeError, ValueError):
+                latest = 0
+            continue
+        if latest and row.get("type") == "turn_context" and payload.get("model"):
+            model = str(payload["model"])
+            break
+    return {
+        "available": latest > 0,
+        "latest_context": latest,
+        "peak_context": latest,
+        "model": model,
+    }
 
 
 def _relative(path: str, root: str | None) -> str:

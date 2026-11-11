@@ -394,7 +394,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('json.keys.contains("badge")', mac)
         self.assertIn("titleLabel.toolTip", mac)
         # Context review queues keep both scopes: row-level Review and Review all.
-        self.assertIn('rowsShown == 0 || ["control_review", "context_review"].contains(stateName)', mac)
+        self.assertIn(
+            'rowsShown == 0 || ["control_review", "context_review", "delivery_review_ready"].contains(stateName)',
+            mac,
+        )
         self.assertIn("skipButton.frame = NSRect(x: 542, y: utilityY, width: 50, height: 28)", mac)
         self.assertIn("consoleButton.frame = NSRect(x: 596, y: utilityY, width: 38, height: 28)", mac)
         self.assertNotIn("consoleButton.isHidden = true", mac)
@@ -408,7 +411,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def apply_waiting_rows", tk_source)
         self.assertIn("badge_x, badge_y, text=badge_text", tk_source)
         self.assertIn('"badge" in payload', tk_source)
-        self.assertIn('visible_waiting_rows() == 0 or state_var.get() in {"control_review", "context_review"}', tk_source)
+        self.assertIn(
+            'or state_var.get() in {"control_review", "context_review", "delivery_review_ready"}',
+            tk_source,
+        )
         self.assertIn("def row_display_text", tk_source)
         self.assertIn('row.get("activity_label")', tk_source)
         self.assertIn('row.get("severity_label")', tk_source)
@@ -465,12 +471,20 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn("titleLabel.lineBreakMode = .byTruncatingTail", mac)
-        self.assertNotIn("prefix(18)", mac)
+        title_assignment = next(
+            line for line in mac.splitlines()
+            if 'self.titleLabel.stringValue = String((json["label"]' in line
+        )
+        self.assertNotIn("prefix(18)", title_assignment)
         self.assertEqual(mac.count("prefix(40)"), 2)
         self.assertLessEqual(longest, 40)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
-        self.assertNotIn("[:18]", tk_source)
+        title_assignment = next(
+            line for line in tk_source.splitlines()
+            if 'title_var.set(str(payload.get("label")' in line
+        )
+        self.assertNotIn("[:18]", title_assignment)
         self.assertEqual(tk_source.count("[:34]"), 2)
         self.assertLessEqual(longest, 34)
 
@@ -574,7 +588,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # Collapsed, the bubble carries the nudge as the calm blue count the
         # review states use -- otherwise a nudge is invisible until the bar
         # happens to be open.
-        self.assertIn('["control_review", "context_review", "compact_recommended"].contains(incomingState)', mac)
+        self.assertIn(
+            '["control_review", "context_review", "compact_recommended", "delivery_review_ready"].contains(incomingState)',
+            mac,
+        )
         # The click is a note on the receipt for the row's own session.
         self.assertIn('recordCompactDecision("copied", sessionID: sessionID, sha: sha)', mac)
         self.assertIn('self.titleLabel.stringValue = "Copied"', mac)
@@ -582,7 +599,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('waiting_sessions = payload.get("compact_rows")', tk_source)
         self.assertIn('if not waiting_row_texts:', tk_source)
-        self.assertIn('{"control_review", "context_review", "compact_recommended"}', tk_source)
+        self.assertIn(
+            '{"control_review", "context_review", "compact_recommended", "delivery_review_ready"}',
+            tk_source,
+        )
         self.assertIn('if kind == "compact":\n            return "Review"', tk_source)
         self.assertIn("def copy_compact_row(index: int)", tk_source)
         self.assertIn("def set_clipboard_text", tk_source)
@@ -739,6 +759,48 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('takefocus=True', tk_source)
         self.assertIn('collapsed_canvas.bind("<Return>"', tk_source)
 
+    def test_delivery_checkpoint_uses_one_native_review_card_on_both_platforms(self) -> None:
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("func openCheckpointCard()", mac)
+        self.assertIn('heading.stringValue = "Review delivery checkpoint"', mac)
+        self.assertIn('NSButton(title: "Confirm"', mac)
+        self.assertIn('NSButton(title: "Decline"', mac)
+        self.assertIn('NSButton(title: "More details"', mac)
+        self.assertIn('/api/companion-delivery-decision', mac)
+        self.assertIn('/api/delivery-reviews?limit=1&receipt_id=', mac)
+        self.assertIn('request.timeoutInterval = 8', mac)
+        self.assertIn('self.usageContext.stringValue = selected["context_label"] as? String ?? "Usage unavailable"', mac)
+        self.assertIn('primaryAction == "open_delivery_card"', mac)
+        self.assertIn('waiting = waiting.filter { ($0["kind"] as? String) != "delivery_confirmed" }', mac)
+        self.assertIn('let animateCheckpoint = self.stateName == "delivery_review_ready" && !self.collapsed', mac)
+        self.assertIn('usagePopover?.isShown == true || checkpointPopover?.isShown == true', mac)
+        self.assertIn('checkpointDeclineButton.isEnabled = false', mac)
+        self.assertIn('func checkpointLines(', mac)
+        self.assertIn('func checkpointLine(', mac)
+        self.assertIn('size(withAttributes: [.font: font]).width', mac)
+        self.assertIn('checkpointChecks = checkpointText(content.view, y: 286, height: 56', mac)
+        self.assertIn('field.maximumNumberOfLines = max(1, Int(height / 16))', mac)
+        self.assertIn('more in details', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("def open_checkpoint_card()", tk_source)
+        self.assertIn('text="Review delivery checkpoint"', tk_source)
+        self.assertIn('text="Confirm"', tk_source)
+        self.assertIn('text="Decline"', tk_source)
+        self.assertIn('text="More details"', tk_source)
+        self.assertIn('/api/companion-delivery-decision', tk_source)
+        self.assertIn('/api/delivery-reviews?limit=1&receipt_id=', tk_source)
+        self.assertIn('text_vars["context"].set(str(selected["context_label"]))', tk_source)
+        self.assertIn('primary_action_var.get() == "open_delivery_card"', tk_source)
+        self.assertIn('str(row.get("kind") or "") != "delivery_confirmed"', tk_source)
+        self.assertIn('"PresenceReview.TButton"', tk_source)
+        self.assertIn('checkpoint_window is not None and checkpoint_window.winfo_exists()', tk_source)
+        self.assertIn('decline_button.state(["disabled"])', tk_source)
+        self.assertIn('def compact_lines(', tk_source)
+        self.assertIn('def compact_line(', tk_source)
+        self.assertIn('checkpoint_font.measure(candidate)', tk_source)
+        self.assertIn('more in details', tk_source)
+
     def test_the_marks_ring_says_running(self) -> None:
         # The ring speaks the dashboard favicon's vocabulary: orange for
         # attention, mint #43d9a3 (the favicon's healthy-live colour) while a
@@ -787,7 +849,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('rimLayer.opacity = (hardGate && !reduceMotion && motionMode != "quiet" && !pulseOn) ? 0.3 : 1.0', mac)
         self.assertIn('(hardGate ? "!" : "")', mac)
         self.assertIn("waitingCount <= 0 && reviewCount <= 0 && !hardGate", mac)
-        self.assertIn("if isHardGate() && !wasHardGate && collapsed {\n            setCollapsed(false)", mac)
+        self.assertIn("if (isHardGate() && !wasHardGate || newCheckpoint) && collapsed", mac)
         auto_collapse = mac.split("func scheduleAutoCollapse", 1)[1].split("\n    func ", 1)[0]
         self.assertIn("if self.isHardGate() {\n                    return", auto_collapse)
         # The rim replaces the flooded-ground and count-badge treatments the
@@ -809,7 +871,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         )
         self.assertIn('rim_colour = "#f8cdb5"', tk_source)
         self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)
-        self.assertIn("and not was_hard_gate and collapsed.get():\n            set_collapsed(False)", tk_source)
+        self.assertIn('(incoming_state in {"prompt_gate", "command_gate"} and not was_hard_gate)', tk_source)
+        self.assertIn("or delivered", tk_source)
         self.assertIn('if state_var.get() in {"prompt_gate", "command_gate"}:\n                        return', tk_source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
@@ -954,7 +1017,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # The attention chip maps its own oranges rather than the dark fills,
         # so its map is spelled across several lines.
         self.assertIn('("pressed", "#b84816")', source)
-        self.assertEqual(source.count("style.map("), 3)
+        self.assertEqual(source.count("style.map("), 4)
         # Nothing on the dark bar is a near-white chip any more.
         self.assertNotIn("#f2f6fb", source)
 

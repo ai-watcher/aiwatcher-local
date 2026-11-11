@@ -285,6 +285,13 @@ same-origin only.
 `/api/delivery-review-approve` requires `receipt_id`, `evidence_hash`, transient
 `objective`, and `confirmed: true`. It rejects stale evidence or a changed HEAD,
 and persists only the objective hash, evidence hash, and approval timestamp.
+`/api/companion-delivery-decision` records the native Companion card's explicit
+`confirmed` or `declined` decision for a ready delivery receipt. The request is
+bound to `receipt_id` and the current `evidence_hash`; confirmation also requires
+the transient objective so the server can rebuild and approve the exact evidence.
+Decisions are write-once, stale or conflicting requests return `409`, and no
+objective text is persisted. This route is same-origin only, while native local
+clients may call it without an `Origin` header.
 `/api/improve-decision` records local feedback on a current Improve evidence key
 (`{"insight_key": "...", "days": 7, "decision": "reviewed" | "later" | "expected" | "helpful" | "not_helpful"}`).
 It is same-origin only, validates the key against current server evidence, and
