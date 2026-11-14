@@ -1450,7 +1450,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         intro.stringValue = "Confirm what was delivered without leaving your AI tool. Details remain local."
         checkpointSection(content.view, title: "Goal", y: 504)
         checkpointGoal = NSTextField(frame: NSRect(x: 20, y: 468, width: 460, height: 28))
-        checkpointGoal.placeholderString = "Enter the intended goal to confirm"
+        checkpointGoal.placeholderString = "Goal unavailable - enter it to confirm"
         checkpointGoal.font = NSFont.systemFont(ofSize: 12)
         content.view.addSubview(checkpointGoal)
         checkpointSection(content.view, title: "Changed", y: 440)
@@ -1550,12 +1550,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     ? "No unresolved evidence gaps were recorded."
                     : self.checkpointLines(attention)
                 self.checkpointGoal.stringValue = objective["text"] as? String ?? ""
+                let objectiveProvenance = objective["provenance"] as? String ?? "unavailable"
                 self.checkpointEvidenceHash = review["evidence_hash"] as? String ?? ""
                 self.checkpointConfirmButton.isEnabled = !self.checkpointEvidenceHash.isEmpty
                 self.checkpointDeclineButton.isEnabled = !self.checkpointEvidenceHash.isEmpty
-                self.checkpointStatus.stringValue = self.checkpointGoal.stringValue.isEmpty
-                    ? "Enter the goal to confirm. Decline keeps the evidence for later review."
-                    : "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
+                if self.checkpointGoal.stringValue.isEmpty {
+                    self.checkpointStatus.stringValue = "Goal could not be inferred. Enter it to confirm; Decline keeps the evidence."
+                } else if objectiveProvenance == "inferred" {
+                    self.checkpointStatus.stringValue = "Goal inferred from the linked session. Edit if needed, then confirm."
+                } else {
+                    self.checkpointStatus.stringValue = "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
+                }
             }
         }.resume()
     }
@@ -5660,11 +5665,12 @@ def run_native_presence(
             checkpoint_state["evidence_hash"] = str(review.get("evidence_hash") or "")
             confirm_button.state(["!disabled"] if checkpoint_state["evidence_hash"] else ["disabled"])
             decline_button.state(["!disabled"] if checkpoint_state["evidence_hash"] else ["disabled"])
-            status_var.set(
-                "Enter the goal to confirm. Decline keeps the evidence for later review."
-                if not goal_var.get().strip()
-                else "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
-            )
+            if not goal_var.get().strip():
+                status_var.set("Goal could not be inferred. Enter it to confirm; Decline keeps the evidence.")
+            elif str(objective.get("provenance") or "") == "inferred":
+                status_var.set("Goal inferred from the linked session. Edit if needed, then confirm.")
+            else:
+                status_var.set("Confirm accepts this exact goal and evidence. Decline keeps the evidence.")
 
         threading.Thread(target=fetch, daemon=True).start()
         root.after(60, settle_card)

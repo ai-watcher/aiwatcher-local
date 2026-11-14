@@ -839,14 +839,32 @@ def _segment_codex_rollout(
     return segments
 
 
-def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) -> str | None:
-    """Return the first genuine user prompt from a Claude Code .jsonl session file.
+def extract_opening_prompt(
+    source_path: str | None,
+    *,
+    max_chars: int = 4000,
+    observed_through: object = None,
+) -> str | None:
+    """Return the first genuine user prompt from a supported .jsonl session file.
 
     Reads prompt content only on demand (the event scan itself stores hashes, not text).
     Returns None when the source is unavailable or holds no readable user prompt.
     """
     if not source_path or not source_path.endswith(".jsonl"):
         return None
+    boundary_requested = observed_through is not None
+    boundary = _parse_ts(observed_through)
+    if boundary_requested and boundary is None:
+        return None
+
+    def within_boundary(row: dict[str, Any]) -> bool:
+        if boundary is None:
+            return True
+        stamp = _parse_ts(row.get("timestamp") or row.get("createdAt"))
+        return stamp is not None and stamp <= boundary
+
+    codex_rollout = _is_codex_rollout(source_path)
+    codex_response_fallback: str | None = None
     try:
         with Path(source_path).open(errors="replace") as handle:
             for line in handle:
@@ -856,7 +874,20 @@ def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) ->
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if codex_rollout:
+                    row_type = str(obj.get("type") or "")
+                    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+                    text = _codex_user_prompt_text(row_type, payload)
+                    if not text or not within_boundary(obj):
+                        continue
+                    if row_type != "response_item":
+                        return text[:max_chars]
+                    if codex_response_fallback is None:
+                        codex_response_fallback = text
+                    continue
                 if obj.get("type") != "user" or obj.get("isMeta"):
+                    continue
+                if not within_boundary(obj):
                     continue
                 message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                 text = _user_prompt_text(message.get("content"))
@@ -864,7 +895,7 @@ def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) ->
                     return text[:max_chars]
     except OSError:
         return None
-    return None
+    return codex_response_fallback[:max_chars] if codex_response_fallback else None
 
 
 def _decode_claude_project_path(encoded: str) -> str:

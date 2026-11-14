@@ -17,6 +17,45 @@ from aiwatcher_cli.pricing import (
 )
 
 
+class OpeningPromptTests(unittest.TestCase):
+    def test_codex_opening_prompt_prefers_typed_user_row_over_response_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "rollout.jsonl")
+            transcript.write_text("\n".join((
+                json.dumps({
+                    "type": "session_meta", "payload": {"id": "codex-1", "cwd": temp_dir},
+                }),
+                json.dumps({
+                    "type": "response_item", "payload": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "Injected context"}],
+                    },
+                }),
+                json.dumps({
+                    "type": "event_msg", "payload": {
+                        "type": "user_message", "message": "Implement the requested checkpoint.",
+                    },
+                }),
+            )) + "\n", encoding="utf-8")
+
+            self.assertEqual(
+                scanner.extract_opening_prompt(str(transcript)),
+                "Implement the requested checkpoint.",
+            )
+
+    def test_opening_prompt_after_delivery_boundary_is_not_inferred(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "session.jsonl")
+            transcript.write_text(json.dumps({
+                "type": "user", "timestamp": "2026-10-09T12:03:00Z",
+                "message": {"content": "Start a later unrelated task."},
+            }) + "\n", encoding="utf-8")
+
+            self.assertIsNone(scanner.extract_opening_prompt(
+                str(transcript), observed_through="2026-10-09T12:02:00Z",
+            ))
+
+
 class WindowActivityProbeTests(unittest.TestCase):
     def test_recent_mtime_does_not_admit_stale_transcript_content(self) -> None:
         since = datetime(2026, 10, 1, tzinfo=timezone.utc)

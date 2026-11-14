@@ -177,6 +177,7 @@ from .scanner import (
     LocalSession,
     discover_tools,
     display_model_name,
+    extract_opening_prompt,
     model_usage_totals,
     populate_session_identities,
     scan_all,
@@ -4199,7 +4200,7 @@ def _finalize_delivery_review(
     contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
     linked_sessions: list[LocalSession] = []
     seen_session_ids: set[str] = set()
-    if include_session_understanding:
+    if include_session_understanding or infer_objective:
         for contribution in contributions:
             if not isinstance(contribution, dict):
                 continue
@@ -4218,10 +4219,11 @@ def _finalize_delivery_review(
     ]
     excluded_delegated_sessions = len(linked_sessions) - len(intent_sessions)
     linked_segments: list[dict[str, object]] = []
-    for session in intent_sessions:
-        linked_segments.extend({**segment, "session_id": session.session_id} for segment in segment_session_by_prompt(
-            session.source_path, max_chars=2_000,
-        ))
+    if include_session_understanding:
+        for session in intent_sessions:
+            linked_segments.extend({**segment, "session_id": session.session_id} for segment in segment_session_by_prompt(
+                session.source_path, max_chars=2_000,
+            ))
     event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
     linked_commit_shas = {
@@ -4245,6 +4247,15 @@ def _finalize_delivery_review(
         and objective.get("provenance") != "user_confirmed"
     ):
         prompt = str((understanding or {}).get("opening_objective") or "").strip()
+        if not prompt and not include_session_understanding:
+            prompt = next((
+                value for session in intent_sessions
+                if (value := str(extract_opening_prompt(
+                    session.source_path,
+                    max_chars=700,
+                    observed_through=event.get("observed_at"),
+                ) or "").strip())
+            ), "")
         if prompt:
             objective = ObjectiveClaim(
                 provenance="inferred", confidence="low", text=prompt,
@@ -4265,8 +4276,13 @@ def _finalize_delivery_review(
             item for item in (payload.get("attention") or [])
             if not str(item).startswith("Objective unavailable.")
         ]
+    # The compact Companion card may use the bounded opening prompt to prefill
+    # its editable goal without exposing the rest of the transcript summary.
     payload["work_understanding"] = understanding
-    payload["intent_source_hash"] = understanding.get("intent_source_hash") if understanding else None
+    payload["intent_source_hash"] = (
+        understanding.get("intent_source_hash")
+        if include_session_understanding and understanding else None
+    )
     payload["ready"] = bool(
         event.get("status") == "confirmed"
         and not payload.get("viewed_at")
@@ -4343,7 +4359,7 @@ def build_delivery_reviews(*, limit: int = 20, receipt_id: str | None = None) ->
         reviews.append(_finalize_delivery_review(
             payload,
             event_record,
-            infer_objective=not selected_receipt_id,
+            infer_objective=True,
             include_session_understanding=not selected_receipt_id,
         ))
     ready = [row for row in reviews if row.get("ready")]
