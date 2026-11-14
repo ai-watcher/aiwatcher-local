@@ -791,6 +791,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var checkpointDeclineButton: NSButton!
     var checkpointEvidenceHash = ""
     var checkpointRequest = 0
+    var checkpointIdleToken = 0
+    var checkpointActivityMonitor: Any?
+    let checkpointIdleSeconds: Double = 30.0
 
     // 46 characters of 9pt subtitle measure ~210pt ("claude-code ·
     // aiwatcher-local · waited 12m 30s" is 208), and at 560 the subtitle
@@ -1392,9 +1395,49 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return lines.joined(separator: "\n")
     }
 
+    func stopCheckpointIdleMonitoring() {
+        checkpointIdleToken += 1
+        if let monitor = checkpointActivityMonitor {
+            NSEvent.removeMonitor(monitor)
+            checkpointActivityMonitor = nil
+        }
+    }
+
+    func resetCheckpointIdleTimer() {
+        checkpointIdleToken += 1
+        let token = checkpointIdleToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + checkpointIdleSeconds) {
+            guard token == self.checkpointIdleToken else { return }
+            guard self.checkpointPopover?.isShown == true else {
+                self.stopCheckpointIdleMonitoring()
+                return
+            }
+            self.stopCheckpointIdleMonitoring()
+            self.checkpointPopover?.performClose(nil)
+            self.setCollapsed(true)
+        }
+    }
+
+    func startCheckpointIdleMonitoring() {
+        stopCheckpointIdleMonitoring()
+        checkpointActivityMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]
+        ) { [weak self] event in
+            guard let self = self else { return event }
+            if self.checkpointPopover?.isShown == true {
+                self.resetCheckpointIdleTimer()
+            } else {
+                self.stopCheckpointIdleMonitoring()
+            }
+            return event
+        }
+        resetCheckpointIdleTimer()
+    }
+
     @objc func openCheckpointCard() {
         if checkpointPopover?.isShown == true {
             checkpointPopover?.performClose(nil)
+            stopCheckpointIdleMonitoring()
             return
         }
         autoCollapseToken += 1
@@ -1438,6 +1481,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = content
         checkpointPopover = popover
         popover.show(relativeTo: primaryButton.bounds, of: primaryButton, preferredEdge: .minY)
+        startCheckpointIdleMonitoring()
         loadCheckpointCard()
     }
 
@@ -1526,6 +1570,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openCheckpointDetails() {
         checkpointPopover?.performClose(nil)
+        stopCheckpointIdleMonitoring()
         openURL(primaryURL)
     }
 
@@ -1562,6 +1607,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     self.checkpointStatus.stringValue = payload?["message"] as? String ?? "Decision saved."
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                         self.checkpointPopover?.performClose(nil)
+                        self.stopCheckpointIdleMonitoring()
                         self.refreshState()
                     }
                 } else {
@@ -2182,6 +2228,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if collapsed {
             usagePopover?.performClose(nil)
             checkpointPopover?.performClose(nil)
+            stopCheckpointIdleMonitoring()
             autoCollapseDeadline = nil
         }
         let targetWidth = collapsed ? collapsedWidth : expandedWidth
@@ -5354,12 +5401,18 @@ def run_native_presence(
         "window": None,
         "request": 0,
         "evidence_hash": "",
+        "idle_token": 0,
+        "reset_idle": None,
     }
+    checkpoint_idle_ms = 30000
 
     def open_checkpoint_card() -> None:
         existing = checkpoint_state["window"]
         if existing is not None and existing.winfo_exists():
             existing.lift()
+            reset_idle = checkpoint_state.get("reset_idle")
+            if callable(reset_idle):
+                reset_idle()
             return
         panel = tk.Toplevel(root)
         panel.title("AIWatcher · Delivery checkpoint")
@@ -5368,6 +5421,33 @@ def run_native_presence(
         checkpoint_state["window"] = panel
         auto_collapse_token.set(auto_collapse_token.get() + 1)
         auto_collapse_deadline.set(0.0)
+
+        def close_checkpoint(*, collapse: bool = False) -> None:
+            checkpoint_state["idle_token"] = int(checkpoint_state["idle_token"]) + 1
+            checkpoint_state["reset_idle"] = None
+            if panel.winfo_exists():
+                panel.destroy()
+            if collapse:
+                set_collapsed(True)
+
+        def reset_checkpoint_idle(_event: object = None) -> None:
+            checkpoint_state["idle_token"] = int(checkpoint_state["idle_token"]) + 1
+            token = int(checkpoint_state["idle_token"])
+
+            def close_if_idle() -> None:
+                try:
+                    if token == int(checkpoint_state["idle_token"]) and panel.winfo_exists():
+                        close_checkpoint(collapse=True)
+                except tk.TclError:
+                    pass
+
+            root.after(checkpoint_idle_ms, close_if_idle)
+
+        checkpoint_state["reset_idle"] = reset_checkpoint_idle
+        for sequence in ("<Motion>", "<Button>", "<KeyPress>", "<MouseWheel>"):
+            panel.bind(sequence, reset_checkpoint_idle, add="+")
+        panel.protocol("WM_DELETE_WINDOW", close_checkpoint)
+        reset_checkpoint_idle()
         body = ttk.Frame(panel, padding=18)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="Review delivery checkpoint", font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
@@ -5477,7 +5557,7 @@ def run_native_presence(
 
         def open_details() -> None:
             webbrowser.open(primary_url_var.get() or url)
-            panel.destroy()
+            close_checkpoint()
 
         ttk.Button(footer, text="More details", command=open_details).pack(side="right")
 

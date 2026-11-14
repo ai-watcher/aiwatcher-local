@@ -781,6 +781,12 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('checkpointChecks = checkpointText(content.view, y: 286, height: 56', mac)
         self.assertIn('field.maximumNumberOfLines = max(1, Int(height / 16))', mac)
         self.assertIn('more in details', mac)
+        self.assertIn('let checkpointIdleSeconds: Double = 30.0', mac)
+        self.assertIn('NSEvent.addLocalMonitorForEvents(', mac)
+        self.assertIn('matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]', mac)
+        checkpoint_idle = mac.split("func resetCheckpointIdleTimer", 1)[1].split("\n    func ", 1)[0]
+        self.assertIn('self.checkpointPopover?.performClose(nil)', checkpoint_idle)
+        self.assertIn('self.setCollapsed(true)', checkpoint_idle)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("def open_checkpoint_card()", tk_source)
@@ -800,6 +806,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('def compact_line(', tk_source)
         self.assertIn('checkpoint_font.measure(candidate)', tk_source)
         self.assertIn('more in details', tk_source)
+        self.assertIn('checkpoint_idle_ms = 30000', tk_source)
+        self.assertIn('panel.bind(sequence, reset_checkpoint_idle, add="+")', tk_source)
+        self.assertIn('close_checkpoint(collapse=True)', tk_source)
 
     def test_the_marks_ring_says_running(self) -> None:
         # The ring speaks the dashboard favicon's vocabulary: orange for
