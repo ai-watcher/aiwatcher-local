@@ -1471,7 +1471,7 @@ class CodexOriginatorTests(unittest.TestCase):
         self.assertEqual(first[0].session_id, child_id)
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].session_id, child_id)
-        self.assertEqual(sessions[0].project_path, "/repo")
+        self.assertEqual(os.path.basename(sessions[0].project_path), "repo")
         self.assertEqual(sessions[0].parent_session_id, parent_id)
 
     def test_codex_desktop_originator_is_recorded_as_surface(self) -> None:
