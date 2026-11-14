@@ -452,8 +452,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertGreaterEqual(min(widths), 216, widths)
         # The width came out of the bar's own budget: the collapse button
         # sits 22pt in from the right edge, so the two move together.
-        self.assertIn("let expandedWidth: CGFloat = 706", mac)
-        self.assertIn("collapseButton.frame = NSRect(x: 684,", mac)
+        self.assertIn("let expandedWidth: CGFloat = 848", mac)
+        self.assertIn("collapseButton.frame = NSRect(x: 826,", mac)
 
     def test_the_title_fits_every_workflow_label(self) -> None:
         # The bar's title carries the preflight planner's workflow label on a
@@ -811,6 +811,40 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('checkpoint_idle_ms = 30000', tk_source)
         self.assertIn('panel.bind(sequence, reset_checkpoint_idle, add="+")', tk_source)
         self.assertIn('close_checkpoint(collapse=True)', tk_source)
+
+    def test_expanded_companion_offers_star_and_source_bound_restart(self) -> None:
+        self.assertEqual(
+            native_overlay.GITHUB_STAR_URL,
+            "https://github.com/ai-watcher/aiwatcher-local",
+        )
+
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('var starButton: NSButton!', mac)
+        self.assertIn('NSButton(title: "Star us", target: self, action: #selector(openGitHub))', mac)
+        self.assertIn('Data(base64Encoded: githubMarkPNG)', mac)
+        self.assertIn('starButton.frame = NSRect(x: 640, y: 15 + yOff, width: 84', mac)
+        self.assertIn('openURL(githubStarURL)', mac)
+        self.assertIn('var restartButton: NSButton!', mac)
+        self.assertIn('action: #selector(restartAIWatcher)', mac)
+        self.assertIn('restartButton.image = NSImage(systemSymbolName: "arrow.clockwise"', mac)
+        visibility = mac.split("func applyVisibility()", 1)[1]
+        collapsed = visibility.split("if collapsed {", 1)[1].split("return", 1)[0]
+        self.assertIn("starButton", collapsed)
+        self.assertIn("restartButton", collapsed)
+        self.assertIn('starButton.isHidden = false', mac)
+        self.assertIn('restartButton.isHidden = stateName == "offline"', mac)
+        self.assertIn('self.restartButton.isEnabled = false', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('tk.PhotoImage(data=GITHUB_MARK_PNG_BASE64)', tk_source)
+        self.assertIn('text="Star us"', tk_source)
+        self.assertIn('command=open_github', tk_source)
+        self.assertIn('webbrowser.open(GITHUB_STAR_URL)', tk_source)
+        self.assertIn('text="↻"', tk_source)
+        self.assertIn('command=request_restart', tk_source)
+        self.assertIn('primary_action_var.get() != "restart_aiwatcher"', tk_source)
+        self.assertIn('before=collapse_button', tk_source)
+        self.assertIn('expanded_width = 770', tk_source)
 
     def test_the_marks_ring_says_running(self) -> None:
         # The ring speaks the dashboard favicon's vocabulary: orange for

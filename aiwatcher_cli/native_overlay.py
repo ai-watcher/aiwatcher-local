@@ -26,6 +26,16 @@ import webbrowser
 from . import brand_mark
 
 
+GITHUB_STAR_URL = "https://github.com/ai-watcher/aiwatcher-local"
+# Small, dependency-free monochrome mark shared by Cocoa and Tk. Cocoa treats
+# it as a template image; Tk draws the light pixels directly on the dark bar.
+GITHUB_MARK_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAS0lEQVR4nGNgwALuPP/+"
+    "HxvGppYojUQZRKxmrIaQqhnDkIE3gOIwoEosEGsIXs0UG0CxF9AVYWMTZQCxfLy24zMA"
+    "qyHYJIgVowgAAAUAH6E4U39OAAAAAElFTkSuQmCC"
+)
+
+
 @dataclass(frozen=True)
 class OverlayConfig:
     signal_kind: str
@@ -562,6 +572,8 @@ let position = args.count > 3 ? args[3] : "bottom-right"
 let visibilityMode = args.count > 4 ? args[4] : "always"
 let intervalSeconds = args.count > 5 ? args[5] : "30"
 let restartRequestPath = args.count > 6 ? args[6] : ""
+let githubStarURL = "https://github.com/ai-watcher/aiwatcher-local"
+let githubMarkPNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAS0lEQVR4nGNgwALuPP/+HxvGppYojUQZRKxmrIaQqhnDkIE3gOIwoEosEGsIXs0UG0CxF9AVYWMTZQCxfLy24zMAqyHYJIgVowgAAAUAH6E4U39OAAAAAElFTkSuQmCC"
 
 func withoutTrailingSlash(_ value: String) -> String {
     var output = value
@@ -674,6 +686,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var askButton: NSButton!
     var scanButton: NSButton!
     var consoleButton: NSButton!
+    var starButton: NSButton!
+    var restartButton: NSButton!
     var collapseButton: NSButton!
     var expandButton: NSButton!
     var dragHandle: NSTextField!
@@ -801,7 +815,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // The extra 66 goes to the subtitle in every layout; everything to its
     // right shifts by the same 66.
     // Usage has its own slot; it never displaces a gate or queue action.
-    let expandedWidth: CGFloat = 706
+    let expandedWidth: CGFloat = 848
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
     let maxWaitingRows = 5
@@ -1140,8 +1154,33 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         consoleButton.toolTip = "Open AIWatcher Console"
         rootView.addSubview(consoleButton)
 
+        starButton = NSButton(title: "Star us", target: self, action: #selector(openGitHub))
+        starButton.frame = NSRect(x: 640, y: 15, width: 84, height: 28)
+        starButton.bezelStyle = .rounded
+        starButton.controlSize = .small
+        starButton.imagePosition = .imageLeading
+        starButton.toolTip = "Star AIWatcher Local on GitHub"
+        if let data = Data(base64Encoded: githubMarkPNG), let image = NSImage(data: data) {
+            image.size = NSSize(width: 14, height: 14)
+            image.isTemplate = true
+            starButton.image = image
+        }
+        rootView.addSubview(starButton)
+
+        restartButton = NSButton(title: "", target: self, action: #selector(restartAIWatcher))
+        restartButton.frame = NSRect(x: 728, y: 15, width: 32, height: 28)
+        restartButton.bezelStyle = .rounded
+        restartButton.controlSize = .small
+        restartButton.toolTip = "Restart dashboard and Companion from this installation"
+        if #available(macOS 11.0, *) {
+            restartButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Restart AIWatcher")
+        } else {
+            restartButton.title = "↻"
+        }
+        rootView.addSubview(restartButton)
+
         collapseButton = NSButton(title: "-", target: self, action: #selector(toggleCollapsed))
-        collapseButton.frame = NSRect(x: 604, y: 37, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 826, y: 37, width: 18, height: 18)
         collapseButton.bezelStyle = .rounded
         collapseButton.controlSize = .mini
         collapseButton.toolTip = "Minimize AIWatcher"
@@ -1823,6 +1862,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         scheduleAutoCollapse(after: 1.5)
     }
 
+    @objc func openGitHub() {
+        openURL(githubStarURL)
+        scheduleAutoCollapse(after: 1.5)
+    }
+
+    @objc func restartAIWatcher() {
+        requestRestart()
+    }
+
     @objc func scanNow() {
         titleLabel.stringValue = "Scanning"
         subtitleLabel.stringValue = "Checking local AI work..."
@@ -1880,6 +1928,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func requestRestart() {
         guard !restartRequestPath.isEmpty else { return }
         self.primaryButton.isEnabled = false
+        self.restartButton.isEnabled = false
         self.titleLabel.stringValue = "Restarting AIWatcher"
         self.subtitleLabel.stringValue = "Dashboard and Companion will reopen"
         self.updateAppearance()
@@ -1889,6 +1938,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             self.titleLabel.stringValue = "Restart could not start"
             self.subtitleLabel.stringValue = "Run aiwatcher restart"
             self.primaryButton.isEnabled = true
+            self.restartButton.isEnabled = true
             self.updateAppearance()
             return
         }
@@ -2315,7 +2365,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func applyVisibility() {
         if collapsed {
-            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, usageButton, collapseButton] {
+            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, starButton, restartButton, usageButton, collapseButton] {
                 view?.isHidden = true
             }
             for view in rowDots { view.isHidden = true }
@@ -2344,7 +2394,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         subtitleLabel.isHidden = false
         dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
         brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
-        collapseButton.frame = NSRect(x: 684, y: 37 + yOff, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 826, y: 37 + yOff, width: 18, height: 18)
         let attention = needsAttentionState()
         // Context review queues need both scopes: a row-level Watch button and
         // a Review all button for the full Context Health list.
@@ -2356,8 +2406,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         askButton.isHidden = attention || showChip || showPrimary
         scanButton.isHidden = attention || showPrimary
         consoleButton.isHidden = false
+        starButton.isHidden = false
+        restartButton.isHidden = stateName == "offline"
+        starButton.frame = NSRect(x: 640, y: 15 + yOff, width: 84, height: 28)
+        restartButton.frame = NSRect(x: 728, y: 15 + yOff, width: 32, height: 28)
         usageButton.isHidden = false
-        usageButton.frame = NSRect(x: 642, y: 10 + yOff, width: 58, height: 24)
+        usageButton.frame = NSRect(x: 764, y: 10 + yOff, width: 58, height: 24)
         collapseButton.isHidden = false
         expandButton.isHidden = true
         let showContinue = (
@@ -3830,7 +3884,7 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    expanded_width = 640
+    expanded_width = 770
     expanded_height = 58
     # 52, not 44: the count badge needs room inside the bubble -- see the
     # matching constant in the Swift bar.
@@ -4069,6 +4123,10 @@ def run_native_presence(
 
     def open_ask() -> None:
         webbrowser.open(f"{url.rstrip('/')}/?ask=1")
+        schedule_auto_collapse(1500)
+
+    def open_github() -> None:
+        webbrowser.open(GITHUB_STAR_URL)
         schedule_auto_collapse(1500)
 
     def split_lines(value: str) -> list[str]:
@@ -4452,14 +4510,20 @@ def run_native_presence(
             set_subtitle("Open UI for details")
         update_attention_style()
 
-    def open_primary() -> None:
+    def request_restart() -> None:
         nonlocal restart_requested
+        if restart_requested:
+            return
+        restart_requested = True
+        title_var.set("Restarting AIWatcher")
+        set_subtitle("Dashboard and Companion will reopen")
+        primary_button.state(["disabled"])
+        restart_button.state(["disabled"])
+        root.after(80, root.destroy)
+
+    def open_primary() -> None:
         if primary_action_var.get() == "restart_aiwatcher":
-            restart_requested = True
-            title_var.set("Restarting AIWatcher")
-            set_subtitle("Dashboard and Companion will reopen")
-            primary_button.state(["disabled"])
-            root.after(80, root.destroy)
+            request_restart()
             return
         if primary_action_var.get() == "open_delivery_card" and delivery_receipt_id_var.get().strip():
             open_checkpoint_card()
@@ -4771,6 +4835,7 @@ def run_native_presence(
     skip_packed = tk.BooleanVar(value=False)
     scan_packed = tk.BooleanVar(value=True)
     primary_packed = tk.BooleanVar(value=True)
+    restart_packed = tk.BooleanVar(value=True)
     rows_packed = tk.BooleanVar(value=False)
     rows_shown = tk.IntVar(value=0)
     meter_packed = tk.BooleanVar(value=False)
@@ -5149,6 +5214,7 @@ def run_native_presence(
             button.state(["disabled"] if offline else ["!disabled"])
         if not restart_requested:
             primary_button.state(["!disabled"])
+            restart_button.state(["!disabled"])
         attention_layout = has_primary_action() and not collapsed.get()
         # Context review queues need both scopes: a row-level Watch button and
         # a Review all button for the full Context Health list.
@@ -5156,6 +5222,13 @@ def run_native_presence(
             visible_waiting_rows() == 0
             or state_var.get() in {"control_review", "context_review", "delivery_review_ready"}
         )
+        should_show_restart = not collapsed.get() and primary_action_var.get() != "restart_aiwatcher"
+        if should_show_restart and not restart_packed.get():
+            restart_button.pack(side="left", padx=(4, 0), before=collapse_button)
+            restart_packed.set(True)
+        elif not should_show_restart and restart_packed.get():
+            restart_button.pack_forget()
+            restart_packed.set(False)
         # The missed-nudge chip borrows Plan/Ask's slot -- both remain a click
         # away in the Console, a recent signal is not.
         show_chip = bool(signal_chip_var.get()) and not attention_layout and not collapsed.get()
@@ -5793,7 +5866,28 @@ def run_native_presence(
     console_button.pack(side="left")
     usage_button = ttk.Button(frame, text="Usage", width=7, style="Presence.TButton", command=open_usage)
     usage_button.pack(side="left", padx=(4, 0))
-    ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
+    try:
+        github_icon = tk.PhotoImage(data=GITHUB_MARK_PNG_BASE64)
+    except tk.TclError:
+        github_icon = None
+    star_button = ttk.Button(
+        frame,
+        text="Star us",
+        image=github_icon,
+        compound="left",
+        width=8,
+        style="Presence.TButton",
+        command=open_github,
+    )
+    star_button.pack(side="left", padx=(4, 0))
+    restart_button = ttk.Button(
+        frame, text="↻", width=3, style="Presence.TButton", command=request_restart,
+    )
+    restart_button.pack(side="left", padx=(4, 0))
+    collapse_button = ttk.Button(
+        frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed,
+    )
+    collapse_button.pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
     row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label, ttk.Label]] = []

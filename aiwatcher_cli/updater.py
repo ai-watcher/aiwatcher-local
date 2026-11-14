@@ -23,6 +23,7 @@ GITHUB_REPO = "ai-watcher/aiwatcher-local"
 GITHUB_BRANCH = "main"
 PYPI_JSON_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_REPO}"
+LAUNCH_CWD_ENV = "AIWATCHER_LAUNCH_CWD"
 
 
 def installed_source_root() -> Path:
@@ -40,6 +41,7 @@ def install_kind() -> str:
 
 def install_identity() -> dict[str, object]:
     """Describe the running AIWatcher install without touching git or GitHub."""
+    process_cwd = os.environ.get(LAUNCH_CWD_ENV) or str(Path.cwd().resolve())
     return {
         "install_kind": install_kind(),
         "package_manager": package_manager(),
@@ -47,7 +49,7 @@ def install_identity() -> dict[str, object]:
         "version": __version__,
         "install_revision": package_install_revision(),
         "pid": os.getpid(),
-        "process_cwd": str(Path.cwd().resolve()),
+        "process_cwd": process_cwd,
     }
 
 

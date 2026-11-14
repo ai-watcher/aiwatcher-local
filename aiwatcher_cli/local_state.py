@@ -383,6 +383,42 @@ def state_path() -> Path:
     return home / "local-state.json"
 
 
+def _ui_server_path() -> Path:
+    path = state_path()
+    name = "ui-server.json" if path.name == "local-state.json" else f"{path.stem}-ui-server.json"
+    return path.with_name(name)
+
+
+def _write_ui_server(server: dict[str, Any]) -> None:
+    path = _ui_server_path()
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".ui-server-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(server, handle)
+            handle.write("\n")
+            temp_path = handle.name
+        os.replace(temp_path, path)
+        if os.name != "nt":
+            if not parent_existed:
+                os.chmod(path.parent, 0o700)
+            os.chmod(path, 0o600)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 def _empty_state() -> dict[str, Any]:
     return {
         "version": STATE_VERSION,
@@ -1349,41 +1385,60 @@ def record_ui_server(
     identity fields let `aiwatcher start` avoid reusing an older dashboard
     launched from a different install path.
     """
+    server = {
+        "host": host,
+        "port": port,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if install_kind:
+        server["install_kind"] = install_kind
+    if source_root:
+        server["source_root"] = source_root
+    if version:
+        server["version"] = version
+    if isinstance(pid, int) and pid > 0:
+        server["pid"] = pid
+    if cwd:
+        server["cwd"] = cwd
     try:
-        with _locked_state():
-            data = _load()
-            server = {
-                "host": host,
-                "port": port,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if install_kind:
-                server["install_kind"] = install_kind
-            if source_root:
-                server["source_root"] = source_root
-            if version:
-                server["version"] = version
-            if isinstance(pid, int) and pid > 0:
-                server["pid"] = pid
-            if cwd:
-                server["cwd"] = cwd
-            data["ui_server"] = server
-            _save(data)
+        _write_ui_server(server)
     except OSError:
         pass
 
 
 def get_ui_server() -> dict[str, Any] | None:
     try:
+        server = json.loads(_ui_server_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        server = None
+    if isinstance(server, dict) and server.get("port"):
+        return server
+
+    try:
         with _locked_state():
             data = _load()
     except OSError:
         return None
     server = data.get("ui_server")
-    return server if isinstance(server, dict) and server.get("port") else None
+    if not isinstance(server, dict) or not server.get("port"):
+        return None
+    try:
+        _write_ui_server(server)
+    except OSError:
+        pass
+    return server
 
 
-def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, notify: bool, overlay: bool) -> None:
+def record_watcher_heartbeat(
+    *,
+    pid: int,
+    mode: str,
+    interval_seconds: int,
+    notify: bool,
+    overlay: bool,
+    install_kind: str | None = None,
+    source_root: str | None = None,
+) -> None:
     """Record that `aiwatcher watch` is alive.
 
     This is intentionally just a heartbeat, not a daemon supervisor. The UI can
@@ -1393,7 +1448,7 @@ def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, noti
     try:
         with _locked_state():
             data = _load()
-            data["watcher_heartbeat"] = {
+            heartbeat = {
                 "pid": int(pid),
                 "mode": mode,
                 "interval_seconds": int(interval_seconds),
@@ -1401,6 +1456,11 @@ def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, noti
                 "overlay": bool(overlay),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+            if install_kind:
+                heartbeat["install_kind"] = str(install_kind)
+            if source_root:
+                heartbeat["source_root"] = str(source_root)
+            data["watcher_heartbeat"] = heartbeat
             _save(data)
     except OSError:
         pass
@@ -1474,6 +1534,8 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
         "mode": mode,
         "notify": bool(heartbeat.get("notify")),
         "overlay": bool(heartbeat.get("overlay")),
+        "install_kind": str(heartbeat.get("install_kind") or "") or None,
+        "source_root": str(heartbeat.get("source_root") or "") or None,
         "interval_seconds": interval_seconds or None,
         "freshness_seconds": freshness_seconds,
     }

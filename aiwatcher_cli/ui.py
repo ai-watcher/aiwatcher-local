@@ -10898,14 +10898,15 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             params = parse_qs(parsed.query)
             fetch = params.get("fetch", ["1"])[0] != "0"
+            process_cwd = str(install_identity().get("process_cwd") or Path.cwd().resolve())
             try:
                 payload = check_for_updates(fetch=fetch)
-                payload["process_cwd"] = str(Path.cwd().resolve())
+                payload["process_cwd"] = process_cwd
             except (OSError, subprocess.SubprocessError) as exc:
                 payload = {
                     "ok": False,
                     "message": f"Could not check for updates: {exc}",
-                    "process_cwd": str(Path.cwd().resolve()),
+                    "process_cwd": process_cwd,
                 }
             self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
@@ -11282,14 +11283,15 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/update-apply":
             fetch = not bool(payload.get("no_fetch"))
             restart = bool(payload.get("restart"))
+            process_cwd = str(install_identity().get("process_cwd") or Path.cwd().resolve())
             try:
                 result = apply_updates(fetch=fetch)
-                result["process_cwd"] = str(Path.cwd().resolve())
+                result["process_cwd"] = process_cwd
             except (OSError, subprocess.SubprocessError) as exc:
                 result = {
                     "ok": False,
                     "message": f"Could not apply update: {exc}",
-                    "process_cwd": str(Path.cwd().resolve()),
+                    "process_cwd": process_cwd,
                 }
             if result.get("ok") and result.get("applied") and restart:
                 # Only this process restarts. The Companion is a detached
@@ -12038,7 +12040,7 @@ def serve(
         source_root=str(identity.get("source_root") or ""),
         version=str(identity.get("version") or ""),
         pid=os.getpid(),
-        cwd=str(Path.cwd().resolve()),
+        cwd=str(identity.get("process_cwd") or Path.cwd().resolve()),
     )
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
     print("Private by default. No data leaves this machine unless you configure it. Press Ctrl+C to stop.")
