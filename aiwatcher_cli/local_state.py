@@ -2710,6 +2710,7 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "committed_at": str(receipt.get("committed_at") or "").strip()[:80] or None,
         "session_id": str(receipt.get("session_id") or "").strip()[:120] or None,
         "session_source": str(receipt.get("session_source") or "").strip()[:80] or None,
+        "session_tool": str(receipt.get("session_tool") or "").strip()[:80] or None,
         "source_id": str(receipt.get("source_id") or "").strip()[:160] or None,
         "receipt_available": bool(receipt.get("available")) if "available" in receipt else None,
         "cost_usd": _safe_float(receipt.get("cost_usd"), 0.0) if "cost_usd" in receipt else None,
@@ -2729,7 +2730,7 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         ), None)
         record = dict(existing or {})
         for key, value in incoming.items():
-            if key in {"session_id", "session_source", "source_id"} and existing and existing.get(key):
+            if key in {"session_id", "session_source", "session_tool", "source_id"} and existing and existing.get(key):
                 continue
             if value is not None:
                 record[key] = value
@@ -3068,6 +3069,8 @@ def _privacy_safe_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
                 "strength": item.get("strength"),
                 "provenance": item.get("provenance"),
                 "source_id": item.get("source_id"),
+                "session_source": _delivery_value(item.get("session_source"), 80),
+                "session_tool": _delivery_value(item.get("session_tool"), 80),
             }
             for item in contributions[:200] if isinstance(item, dict)
         ],

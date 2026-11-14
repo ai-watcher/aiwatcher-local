@@ -33,6 +33,11 @@ def _bounded(value: object, limit: int) -> str | None:
     return clean[:limit] or None
 
 
+def normalize_objective_text(value: object) -> str | None:
+    """Canonical objective form shared by approval and transient matching."""
+    return _bounded(value, 2_000)
+
+
 def _enum(value: object, allowed: set[str], fallback: str) -> str:
     clean = str(value or "").strip().lower()
     return clean if clean in allowed else fallback
@@ -70,7 +75,7 @@ class ObjectiveClaim:
     def __post_init__(self) -> None:
         object.__setattr__(self, "provenance", _enum(self.provenance, PROVENANCE_VALUES, "unavailable"))
         object.__setattr__(self, "confidence", _enum(self.confidence, CONFIDENCE_VALUES, "none"))
-        text = _bounded(self.text, 2_000)
+        text = normalize_objective_text(self.text)
         object.__setattr__(self, "text", text)
         source_hash = _bounded(self.source_hash, 128)
         if text and not source_hash:
@@ -219,6 +224,8 @@ class ContributionEdge:
     strength: str
     provenance: str
     source_id: str | None = None
+    session_source: str | None = None
+    session_tool: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _bounded(self.session_id, 120))
@@ -228,6 +235,8 @@ class ContributionEdge:
         object.__setattr__(self, "strength", _enum(self.strength, CONTRIBUTION_STRENGTHS, "unknown"))
         object.__setattr__(self, "provenance", _enum(self.provenance, PROVENANCE_VALUES, "unavailable"))
         object.__setattr__(self, "source_id", _bounded(self.source_id, 160))
+        object.__setattr__(self, "session_source", _bounded(self.session_source, 80))
+        object.__setattr__(self, "session_tool", _bounded(self.session_tool, 80))
         if not self.session_id:
             raise ValueError("contribution edge requires a session")
         if self.strength == "exact" and (not self.commit_shas or self.provenance != "observed"):

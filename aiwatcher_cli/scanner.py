@@ -15,10 +15,12 @@ import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .git_identity import GitIdentity, identities_for_sessions, identity_for_session
+from .delivery import normalize_objective_text
 from .local_state import recent_hook_events
 from .pricing import (
     CACHE_READ_MULTIPLIER,
@@ -94,6 +96,7 @@ CODEX_ROLLOUT_REQUEST_MAX_FILES = 2048
 CODEX_ROLLOUT_REQUEST_MAX_RECORDS = 100_000
 CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES = 4 * 1024 * 1024
 CURRENT_PROMPT_TAIL_BYTES = 16 * 1024 * 1024
+DELIVERY_GOAL_TAIL_BYTES = 64 * 1024 * 1024
 CODEX_LIFECYCLE_CACHE_MAX_ENTRIES = 4096
 _CODEX_LIFECYCLE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
 
@@ -898,6 +901,137 @@ def extract_opening_prompt(
     return codex_response_fallback[:max_chars] if codex_response_fallback else None
 
 
+def extract_delivery_prompt(
+    source_path: str | None,
+    *,
+    max_chars: int = 700,
+    observed_through: object = None,
+    observed_after: object = None,
+    objective_source_hash: str | None = None,
+) -> str | None:
+    if not source_path or not source_path.endswith(".jsonl"):
+        return None
+    try:
+        stat = Path(source_path).stat()
+    except OSError:
+        return None
+    return _extract_delivery_prompt_cached(
+        source_path,
+        max_chars,
+        str(observed_through) if observed_through is not None else None,
+        str(observed_after) if observed_after is not None else None,
+        objective_source_hash,
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+
+
+@lru_cache(maxsize=256)
+def _extract_delivery_prompt_cached(
+    source_path: str,
+    max_chars: int,
+    observed_through: str | None,
+    observed_after: str | None,
+    objective_source_hash: str | None,
+    _source_size: int,
+    _source_mtime_ns: int,
+) -> str | None:
+    """Return the segment goal bounded by adjacent delivery milestones.
+
+    The compact Companion path reads only a bounded recent tail. A matching
+    privacy-safe objective hash wins; otherwise the segment's first request is an
+    editable low-confidence prefill, never a claim of confirmed intent.
+    """
+    boundary = _parse_ts(observed_through)
+    if observed_through is not None and boundary is None:
+        return None
+    lower_boundary = _parse_ts(observed_after)
+    if observed_after is not None and lower_boundary is None:
+        return None
+
+    def within_boundary(row: dict[str, Any]) -> bool:
+        if boundary is None:
+            return True
+        stamp = _parse_ts(row.get("timestamp") or row.get("createdAt"))
+        return stamp is not None and stamp <= boundary
+
+    segment_goal: str | None = None
+    fallback_goal: str | None = None
+    segment_start_reached = lower_boundary is None and _source_size <= DELIVERY_GOAL_TAIL_BYTES
+    codex_rollout = _is_codex_rollout(source_path)
+    try:
+        for line in _reverse_recent_transcript_lines(source_path, DELIVERY_GOAL_TAIL_BYTES):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict) or not within_boundary(row):
+                continue
+            stamp = _parse_ts(row.get("timestamp") or row.get("createdAt"))
+            if lower_boundary is not None and stamp is not None and stamp <= lower_boundary:
+                segment_start_reached = True
+                break
+            if codex_rollout:
+                row_type = str(row.get("type") or "")
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                text = _codex_user_prompt_text(row_type, payload)
+                if not text:
+                    continue
+                canonical = normalize_objective_text(text)
+                if objective_source_hash and canonical and hashlib.sha256(canonical.encode("utf-8")).hexdigest() == objective_source_hash:
+                    return text[:max_chars]
+                if row_type == "response_item":
+                    fallback_goal = text
+                else:
+                    segment_goal = text
+                continue
+            if row.get("type") != "user" or row.get("isMeta"):
+                continue
+            message = row.get("message") if isinstance(row.get("message"), dict) else {}
+            text = _user_prompt_text(message.get("content"))
+            if not text:
+                continue
+            canonical = normalize_objective_text(text)
+            if objective_source_hash and canonical and hashlib.sha256(canonical.encode("utf-8")).hexdigest() == objective_source_hash:
+                return text[:max_chars]
+            segment_goal = text
+    except OSError:
+        return None
+    if not segment_start_reached:
+        return None
+    selected = segment_goal or fallback_goal
+    return selected[:max_chars] if selected else None
+
+
+def _reverse_recent_transcript_lines(
+    source_path: str, max_bytes: int, *, block_bytes: int = 64 * 1024,
+) -> Iterable[str]:
+    """Yield complete JSONL rows newest-first from a bounded file tail."""
+    try:
+        with Path(source_path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            start = max(0, end - max(0, max_bytes))
+            position = end
+            remainder = b""
+            while position > start:
+                take = min(block_bytes, position - start)
+                position -= take
+                handle.seek(position)
+                data = handle.read(take) + remainder
+                pieces = data.split(b"\n")
+                remainder = pieces[0]
+                for raw in reversed(pieces[1:]):
+                    if raw:
+                        yield raw.decode("utf-8", errors="replace")
+            if start == 0 and remainder:
+                yield remainder.decode("utf-8", errors="replace")
+    except OSError:
+        return
+
+
 def _decode_claude_project_path(encoded: str) -> str:
     windows_match = re.match(r"^-?([A-Za-z])--(.*)$", encoded)
     if windows_match:
@@ -1264,7 +1398,19 @@ def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> st
     text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
     if text.startswith(CODEX_INJECTED_PREFIXES):
         return None
-    return text or None
+    return _normalize_codex_user_prompt(text)
+
+
+def _normalize_codex_user_prompt(text: str) -> str | None:
+    """Keep the developer request, not Codex Desktop's ambient envelope."""
+    request = re.search(r"(?:^|\n)## My request:\s*\n(?P<request>[\s\S]*)\Z", text)
+    if request:
+        return request.group("request").strip() or None
+    cleaned = re.sub(
+        r"^\s*<in-app-browser-context\b[^>]*>[\s\S]*?</in-app-browser-context>\s*",
+        "", text, count=1,
+    )
+    return cleaned.strip() or None
 
 
 # User-role rows Codex writes itself at the start of a session: the environment
@@ -3042,7 +3188,10 @@ def _codex_role_metadata(path: Path, session_id: str) -> tuple[str | None, str |
     source = payload.get("source")
     subagent = source.get("subagent") if isinstance(source, dict) else None
     guardian = isinstance(subagent, dict) and subagent.get("other") == "guardian"
-    parent = payload.get("parent_thread_id")
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    parent = payload.get("parent_thread_id") or (
+        spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+    )
     parent = parent if isinstance(parent, str) and 0 < len(parent) <= 128 and parent != session_id else None
     return "approval_review" if guardian else None, "codex_session_meta", parent
 
@@ -3113,9 +3262,13 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         prior_entry = resume_sessions.get(str(path))
         prior = prior_entry[0] if prior_entry else None
         filename_id = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", path.stem, re.IGNORECASE)
+        filename_session_id = filename_id.group(1) if filename_id else None
+        if prior and filename_session_id and prior.session_id != filename_session_id:
+            prior = None
+            prior_entry = None
         # A bounded tail may not contain session_meta. Retain the stable thread
         # ID from its rollout filename so SQLite and JSONL don't count twice.
-        session_id = prior.session_id if prior else filename_id.group(1) if filename_id else path.stem
+        session_id = prior.session_id if prior else filename_session_id or path.stem
         role, role_source, parent_session_id = (
             (prior.session_role, prior.role_source, prior.parent_session_id)
             if prior and prior.role_source else _codex_role_metadata(path, session_id)
@@ -3181,15 +3334,20 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
                     row_type = row.get("type")
                     if row_type == "session_meta":
-                        session_id = str(payload.get("id") or payload.get("session_id") or session_id)
-                        recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
-                        project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
-                        if surface is None:
-                            originator = str(payload.get("originator") or "").lower()
-                            if "desktop" in originator:
-                                surface = "desktop"
-                            elif "cli" in originator or "tui" in originator:
-                                surface = "cli"
+                        metadata_session_id = str(payload.get("id") or payload.get("session_id") or "")
+                        # Codex may append the parent chat's session_meta to a
+                        # child rollout. The filename and opening metadata own
+                        # this file; a later injected record must not relabel it.
+                        if not filename_session_id or metadata_session_id == filename_session_id:
+                            session_id = metadata_session_id or session_id
+                            recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
+                            project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
+                            if surface is None:
+                                originator = str(payload.get("originator") or "").lower()
+                                if "desktop" in originator:
+                                    surface = "desktop"
+                                elif "cli" in originator or "tui" in originator:
+                                    surface = "cli"
                     elif row_type == "turn_context":
                         recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path

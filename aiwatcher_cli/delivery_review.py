@@ -183,7 +183,7 @@ def _exact_verifications(identity: Any, head: str) -> tuple[VerificationClaim, .
 
 def _contributions(identity: Any, commits: tuple[str, ...]) -> tuple[ContributionEdge, ...]:
     commit_set = set(commits)
-    by_session: dict[str, dict[str, Any]] = {}
+    by_session: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in recent_commit_receipts(
         repository_id=identity.repository_id,
         checkout_id=identity.checkout_id,
@@ -194,9 +194,12 @@ def _contributions(identity: Any, commits: tuple[str, ...]) -> tuple[Contributio
     ):
         full_sha = _commit(identity.checkout_path, str(row.get("sha") or ""))
         session_id = str(row.get("session_id") or "")
+        session_source = str(row.get("session_source") or "")
+        session_tool = str(row.get("session_tool") or "")
         if not full_sha or full_sha not in commit_set or not session_id:
             continue
-        bucket = by_session.setdefault(session_id, {"commits": [], "source_id": None})
+        key = (session_source, session_tool, session_id)
+        bucket = by_session.setdefault(key, {"commits": [], "source_id": None})
         bucket["commits"].append(full_sha)
         bucket["source_id"] = bucket["source_id"] or row.get("source_id")
     return tuple(
@@ -206,8 +209,10 @@ def _contributions(identity: Any, commits: tuple[str, ...]) -> tuple[Contributio
             strength="exact",
             provenance="observed",
             source_id=str(values["source_id"] or "") or None,
+            session_source=session_source or None,
+            session_tool=session_tool or None,
         )
-        for session_id, values in sorted(by_session.items())
+        for (session_source, session_tool, session_id), values in sorted(by_session.items())
     )
 
 

@@ -497,6 +497,7 @@ def _ingest_session_command_evidence(
                     "head": _git_text(identity.checkout_path, ["rev-parse", f"{observed.commit_sha}^{{commit}}"]),
                     "session_id": observed.session_id,
                     "session_source": "transcript_tool_result",
+                    "session_tool": session.tool if session is not None else None,
                     "source_id": observed.source_id,
                 })
             except (OSError, ValueError):

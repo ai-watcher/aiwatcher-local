@@ -103,6 +103,7 @@ from .local_state import (
     handoff_decision_count,
     recent_handoff_decisions,
     recent_interventions,
+    recent_commit_receipts,
     recent_delivery_events,
     recent_optimize_decisions,
     recent_work_receipts,
@@ -177,6 +178,7 @@ from .scanner import (
     LocalSession,
     discover_tools,
     display_model_name,
+    extract_delivery_prompt,
     extract_opening_prompt,
     model_usage_totals,
     populate_session_identities,
@@ -784,16 +786,105 @@ def _index_sessions_from_summary(summary: dict[str, object]) -> None:
         _index_sessions(rows)
 
 
-def _find_session_row(session_id: str, *, days: int = 30) -> LocalSession | None:
+def _session_source_tool(session_source: object) -> str | None:
+    source = str(session_source or "")
+    if source.startswith("codex_"):
+        return "codex-cli"
+    if source.startswith("claude_"):
+        return "claude-code"
+    return None
+
+
+def _strict_session_candidate(
+    row: LocalSession, session_id: str, session_source: object, session_tool: object = None,
+) -> bool:
+    expected_tool = str(session_tool or "").strip() or _session_source_tool(session_source)
+    if not expected_tool or row.tool != expected_tool or row.session_id != session_id:
+        return False
+    if expected_tool == "codex-cli":
+        path = PurePath(row.source_path) if row.source_path else None
+        return bool(path and path.stem.endswith(session_id))
+    return True
+
+
+def _contribution_session_source(contribution: dict[str, object]) -> str | None:
+    source = str(contribution.get("session_source") or "").strip()
+    if source:
+        return source
+    session_id = str(contribution.get("session_id") or "").strip()
+    commits = {str(value) for value in contribution.get("commit_shas") or [] if value}
+    if not session_id or not commits:
+        return None
+    sources = {
+        str(row.get("session_source") or "").strip()
+        for row in recent_commit_receipts(
+            session_id=session_id, include_legacy=False, include_unbound=False, limit=100,
+        )
+        if str(row.get("sha") or "") in commits and row.get("session_source")
+    }
+    return next(iter(sources)) if len(sources) == 1 else None
+
+
+def _contribution_session_tool(contribution: dict[str, object]) -> str | None:
+    tool = str(contribution.get("session_tool") or "").strip()
+    if tool:
+        return tool
+    session_id = str(contribution.get("session_id") or "").strip()
+    commits = {str(value) for value in contribution.get("commit_shas") or [] if value}
+    if not session_id or not commits:
+        return None
+    tools = {
+        str(row.get("session_tool") or "").strip() or _session_source_tool(row.get("session_source"))
+        for row in recent_commit_receipts(
+            session_id=session_id, include_legacy=False, include_unbound=False, limit=100,
+        )
+        if str(row.get("sha") or "") in commits
+    }
+    tools.discard(None)
+    tools.discard("")
+    return next(iter(tools)) if len(tools) == 1 else None
+
+
+def _previous_delivery_boundary(payload: dict[str, object]) -> str | None:
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    checkout_id = str(snapshot.get("checkout_id") or "")
+    current_head = str(snapshot.get("head_sha") or "")
+    current_at = _parse_iso_datetime(event.get("observed_at"))
+    if not checkout_id or current_at is None:
+        return None
+    prior = [
+        (_parse_iso_datetime(row.get("observed_at")), str(row.get("observed_at") or ""))
+        for row in recent_delivery_events(checkout_id=checkout_id, limit=100)
+        if row.get("status") == "confirmed"
+        and row.get("head_sha") != current_head
+        and (_parse_iso_datetime(row.get("observed_at")) or current_at) < current_at
+    ]
+    return max(prior, default=(None, None), key=lambda item: item[0] or MIN_DT)[1]
+
+
+def _find_session_row(
+    session_id: str, *, days: int = 30, session_source: object = None,
+    session_tool: object = None,
+) -> LocalSession | None:
+    strict = bool(session_source or session_tool)
+
+    def acceptable(row: LocalSession | None) -> LocalSession | None:
+        if row is None:
+            return None
+        if not strict or _strict_session_candidate(row, session_id, session_source, session_tool):
+            return row
+        return None
+
     with _SUMMARY_CACHE_LOCK:
-        row = _SESSION_INDEX.get(session_id)
+        row = acceptable(_SESSION_INDEX.get(session_id))
         if row:
             return row
         summaries = [cached[1] for cached in _SUMMARY_CACHE.values()]
     for summary in summaries:
         _index_sessions_from_summary(summary)
     with _SUMMARY_CACHE_LOCK:
-        row = _SESSION_INDEX.get(session_id)
+        row = acceptable(_SESSION_INDEX.get(session_id))
         if row:
             return row
     for candidate_days in (days, 1, 7, 30, 90):
@@ -801,11 +892,11 @@ def _find_session_row(session_id: str, *, days: int = 30) -> LocalSession | None
         if disk:
             _index_sessions_from_summary(disk)
             with _SUMMARY_CACHE_LOCK:
-                row = _SESSION_INDEX.get(session_id)
+                row = acceptable(_SESSION_INDEX.get(session_id))
                 if row:
                     return row
     for row in rows_for_window(days):
-        if row.session_id == session_id:
+        if row.session_id == session_id and acceptable(row):
             _index_sessions([row])
             return row
     return None
@@ -4208,7 +4299,13 @@ def _finalize_delivery_review(
             session_id = str(contribution.get("session_id") or "")
             if not session_id or session_id in seen_session_ids:
                 continue
-            session = _find_session_row(session_id)
+            session_source = _contribution_session_source(contribution)
+            session_tool = _contribution_session_tool(contribution)
+            if not session_source or not session_tool:
+                continue
+            session = _find_session_row(
+                session_id, session_source=session_source, session_tool=session_tool,
+            )
             if session is not None:
                 seen_session_ids.add(session_id)
                 linked_sessions.append(session)
@@ -4254,10 +4351,12 @@ def _finalize_delivery_review(
         if not prompt and not include_session_understanding:
             prompt = next((
                 value for session in intent_sessions
-                if (value := str(extract_opening_prompt(
+                if (value := str(extract_delivery_prompt(
                     session.source_path,
                     max_chars=700,
                     observed_through=event.get("observed_at"),
+                    observed_after=_previous_delivery_boundary(payload),
+                    objective_source_hash=str(objective.get("source_hash") or "") or None,
                 ) or "").strip())
             ), "")
         if prompt:

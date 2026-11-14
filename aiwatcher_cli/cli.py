@@ -4737,6 +4737,7 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             "upstream": upstream_result.stdout.strip() if upstream_result.returncode == 0 else None,
             "session_id": session_id,
             "session_source": session_source,
+            "session_tool": "codex-cli" if str(session_source or "").startswith("codex_") else None,
         }
 
         # Persist observed Git facts before optional cost enrichment. A ledger

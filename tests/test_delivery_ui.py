@@ -87,6 +87,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id,
             "session_id": "large-session",
+            "session_source": "claude_session_environment",
             "source_id": "compact-card",
         })
         receipt = build_work_receipt(
@@ -126,6 +127,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id,
             "session_id": "confirmed-goal-session",
+            "session_source": "claude_session_environment",
             "source_id": "confirmed-goal-card",
         })
         receipt = build_work_receipt(
@@ -152,6 +154,33 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(review["objective"]["text"], "Re-infer this editable delivery goal.")
         self.assertEqual(review["objective"]["provenance"], "inferred")
         self.assertFalse(review["approval_valid"])
+
+    def test_strict_session_lookup_rejects_wrong_tool_and_codex_transcript(self) -> None:
+        session_id = "01a0bf4c-1134-7903-b1a0-df6bf9b30bb5"
+        wrong_tool = LocalSession(
+            session_id=session_id, tool="claude-code", source_path=str(self.root / "session.jsonl"),
+        )
+        wrong_rollout = LocalSession(
+            session_id=session_id, tool="codex-cli",
+            source_path=str(self.root / "rollout-01a1c8ba-8e71-75f2-95f1-f1dde04bc809.jsonl"),
+        )
+        right_rollout = LocalSession(
+            session_id=session_id, tool="codex-cli",
+            source_path=str(self.root / f"rollout-{session_id}.jsonl"),
+        )
+
+        self.assertFalse(ui._strict_session_candidate(
+            wrong_tool, session_id, "codex_thread_environment",
+        ))
+        self.assertFalse(ui._strict_session_candidate(
+            wrong_rollout, session_id, "codex_thread_environment",
+        ))
+        self.assertTrue(ui._strict_session_candidate(
+            right_rollout, session_id, "codex_thread_environment",
+        ))
+        self.assertTrue(ui._strict_session_candidate(
+            right_rollout, session_id, "transcript_tool_result", "codex-cli",
+        ))
 
     def test_companion_decision_rejects_a_candidate_that_was_never_prompted(self) -> None:
         candidate = ui.build_explicit_delivery_review({
@@ -278,6 +307,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": session.session_id,
+            "session_source": "claude_session_environment",
             "source_id": "checkpoint-confirm",
         })
         receipt = build_work_receipt(
@@ -496,6 +526,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-1",
+            "session_source": "claude_session_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -543,6 +574,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "agent-child", "source_id": "commit-child",
+            "session_source": "codex_thread_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -586,6 +618,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-linked",
+            "session_source": "claude_session_environment",
         })
         (self.repo / "maintenance.txt").write_text("unrelated\n", encoding="utf-8")
         git(self.repo, "add", "maintenance.txt")
@@ -633,6 +666,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-intent",
+            "session_source": "claude_session_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -678,6 +712,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-window",
+            "session_source": "claude_session_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
