@@ -1362,7 +1362,8 @@ class SessionDeepLinkCliTests(unittest.TestCase):
         self.assertIsNone(cli._session_id_from_link("file:///tmp/session-abc"))
 
     def test_open_session_follows_recorded_ui_port_and_rewrites_loopback(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = tempfile.mkdtemp()
+        try:
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
                 local_state.record_ui_server("0.0.0.0", 9123)
@@ -1377,6 +1378,10 @@ class SessionDeepLinkCliTests(unittest.TestCase):
                     print_url=False,
                     no_open=False,
                 ))
+        finally:
+            # Windows can briefly retain a handle after the sidecar's atomic
+            # replace; cleanup timing must not decide this behavior test.
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
         self.assertEqual(result, 0)
         browser.assert_called_once_with("http://127.0.0.1:9123/?session=session-abc")
