@@ -651,7 +651,7 @@ class DashboardServeTests(unittest.TestCase):
             source_root="/repo/aiwatcher",
             version="0.1.0",
             pid=321,
-            cwd=str(cwd_path.resolve()),
+            cwd="/repo/work",
         )
 
     def test_restart_reuses_verified_dashboard_fallback_port(self) -> None:
