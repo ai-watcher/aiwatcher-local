@@ -4197,6 +4197,7 @@ def _finalize_delivery_review(
 ) -> dict[str, object]:
     """Attach transient objective, approval, and current-state facts to a review."""
     objective = payload.get("objective") if isinstance(payload.get("objective"), dict) else {}
+    approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
     contributions = payload.get("contributions") if isinstance(payload.get("contributions"), list) else []
     linked_sessions: list[LocalSession] = []
     seen_session_ids: set[str] = set()
@@ -4244,7 +4245,10 @@ def _finalize_delivery_review(
     if (
         infer_objective
         and not objective.get("text")
-        and objective.get("provenance") != "user_confirmed"
+        and not (
+            objective.get("provenance") == "user_confirmed"
+            and approval.get("status") == "approved"
+        )
     ):
         prompt = str((understanding or {}).get("opening_objective") or "").strip()
         if not prompt and not include_session_understanding:
@@ -4294,7 +4298,6 @@ def _finalize_delivery_review(
     payload["evidence_scope"] = evidence_scope
     evidence_hash = _delivery_review_evidence_hash(payload, scope=evidence_scope)
     payload["evidence_hash"] = evidence_hash
-    approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
     approval_scope = str(approval.get("evidence_scope") or "full")
     approval_evidence_hash = _delivery_review_evidence_hash(payload, scope=approval_scope)
     payload["approval_valid"] = bool(

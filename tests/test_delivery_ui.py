@@ -116,6 +116,43 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(review["work_understanding"]["commit_count"], 1)
         self.assertEqual(review["work_understanding"]["turn_count"], 0)
 
+    def test_unapproved_privacy_stripped_goal_is_reinferred_for_companion(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        local_state.record_commit_receipt({
+            "sha": head,
+            "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id,
+            "session_id": "confirmed-goal-session",
+            "source_id": "confirmed-goal-card",
+        })
+        receipt = build_work_receipt(
+            str(self.repo), objective_text="Previously confirmed private goal.",
+            event_kind="push", event_status="confirmed", event_source="test",
+            event_source_id="confirmed-goal-push", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        source = self.root / "confirmed-goal-session.jsonl"
+        source.write_text(json.dumps({
+            "uuid": "1", "type": "user", "sessionId": "confirmed-goal-session",
+            "timestamp": "2026-10-09T12:00:00Z",
+            "message": {"content": "Re-infer this editable delivery goal."},
+        }) + "\n", encoding="utf-8")
+        session = LocalSession(
+            session_id="confirmed-goal-session", tool="claude-code", source_path=str(source),
+        )
+
+        with patch.object(ui, "_find_session_row", return_value=session), patch.object(
+            ui, "_known_delegated_session_ids", return_value=set(),
+        ):
+            review = ui.build_delivery_reviews(limit=1, receipt_id=receipt.receipt_id)["reviews"][0]
+
+        self.assertEqual(review["objective"]["text"], "Re-infer this editable delivery goal.")
+        self.assertEqual(review["objective"]["provenance"], "inferred")
+        self.assertFalse(review["approval_valid"])
+
     def test_companion_decision_rejects_a_candidate_that_was_never_prompted(self) -> None:
         candidate = ui.build_explicit_delivery_review({
             "project_path": str(self.repo),
