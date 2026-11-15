@@ -63,7 +63,8 @@ Cleanly restart the dashboard UI and Companion together
 
 ```sh
 aiwatcher restart [--interval INTERVAL] [--open-ui]
-                  [--ui-host UI_HOST] [--ui-port UI_PORT]
+                  [--no-presence] [--ui-host UI_HOST]
+                  [--ui-port UI_PORT]
                   [--ui-port-attempts UI_PORT_ATTEMPTS]
                   [--presence-position {bottom-right,bottom-left,top-right,top-left}]
                   [--presence-visibility {always,ai-apps,nudges-only}]
@@ -79,6 +80,7 @@ aiwatcher restart --open-ui
 | --- | --- | --- | --- |
 | `--interval` | integer | `30` | Seconds between local Companion scans |
 | `--open-ui` | flag |  | Open the dashboard after restarting it |
+| `--no-presence` | flag |  | Restart the Companion without the floating presence control |
 | `--ui-host` | text | `127.0.0.1` | Dashboard loopback address to bind |
 | `--ui-port` | integer | `8765` | Preferred dashboard port |
 | `--ui-port-attempts` | integer | `20` | How many sequential dashboard ports to try |

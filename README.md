@@ -16,12 +16,23 @@ unless you explicitly configure optional AI Assist.
 
 ![AIWatcher Local home dashboard illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-home-light.png)
 
+> ### Give this to your AI coding agent
+>
+> ```text
+> Read https://github.com/ai-watcher/aiwatcher-local/blob/main/docs/AGENT_SETUP.md and set up AIWatcher Local for me. Confirm you are on my intended local host, show the exact plan, and ask once before installing or changing repository tracking or AI-tool hooks.
+> ```
+>
+> The agent setup guide gives Codex, Claude Code, Cursor, and other coding agents a
+> platform-aware install and verification flow. It keeps AIWatcher local by
+> default and asks before changing an AI tool's hook configuration.
+
 ## Contents
 
 - [What You Get](#what-you-get)
 - [How It Works](#how-it-works)
 - [First Look](#first-look)
 - [Why Developers Use It](#why-developers-use-it)
+- [Set Up With Your AI Agent](docs/AGENT_SETUP.md)
 - [Install and Start](#install-and-start)
 - [Already Installed](#already-installed)
 - [Connect Your AI Tools](#connect-your-ai-tools)

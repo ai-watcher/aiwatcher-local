@@ -3823,7 +3823,7 @@ def command_restart(args: argparse.Namespace) -> int:
 
     start_result = start_companion(
         interval_seconds=int(getattr(args, "interval", 30)),
-        presence=True,
+        presence=not getattr(args, "no_presence", False),
         presence_position=str(getattr(args, "presence_position", "bottom-right")),
         presence_visibility=str(getattr(args, "presence_visibility", "always")),
     )
@@ -10097,6 +10097,7 @@ def build_parser() -> argparse.ArgumentParser:
     restart = sub.add_parser("restart", help="Cleanly restart the dashboard UI and Companion together")
     restart.add_argument("--interval", type=int, default=30, help="Seconds between local Companion scans")
     restart.add_argument("--open-ui", action="store_true", help="Open the dashboard after restarting it")
+    restart.add_argument("--no-presence", action="store_true", help="Restart the Companion without the floating presence control")
     restart.add_argument("--ui-host", default="127.0.0.1", help="Dashboard loopback address to bind")
     restart.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT, help="Preferred dashboard port")
     restart.add_argument("--ui-port-attempts", type=int, default=20, help="How many sequential dashboard ports to try")

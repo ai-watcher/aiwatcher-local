@@ -217,6 +217,42 @@ class StartCommandCliTests(unittest.TestCase):
             presence_visibility="ai-apps",
         )
 
+    def test_restart_can_disable_native_presence_for_headless_hosts(self) -> None:
+        identity = {"install_kind": "source", "source_root": "/repo"}
+        with (
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "_running_dashboard_identity", return_value={**identity, "pid": 100}),
+            patch.object(cli, "_starting_dashboard_identity_at_url", return_value=None),
+            patch.object(
+                cli,
+                "_dashboard_identity_at_url",
+                return_value={**identity, "pid": 200, "verified": True},
+            ),
+            patch.object(cli, "stop_companion", return_value={"ok": True}),
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 4321}) as start_companion,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_restart(SimpleNamespace(
+                interval=30,
+                open_ui=False,
+                no_presence=True,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+                presence_position="bottom-right",
+                presence_visibility="always",
+                from_companion=False,
+            ))
+
+        self.assertEqual(result, 0)
+        start_companion.assert_called_once_with(
+            interval_seconds=30,
+            presence=False,
+            presence_position="bottom-right",
+            presence_visibility="always",
+        )
+
     def test_restart_rejects_non_loopback_dashboard_host(self) -> None:
         with (
             patch.object(cli, "_start_dashboard_server") as start_dashboard,
