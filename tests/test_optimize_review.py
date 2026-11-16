@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from aiwatcher_cli import ai_assist, ui
+from aiwatcher_cli.landed import LandingReport, UnlandedChange
 from aiwatcher_cli.optimize_review import session_review_identity, REVIEW_BATCH_SIZE
 from aiwatcher_cli.scanner import LocalSession
 
@@ -30,8 +31,24 @@ class OptimizeReviewTests(unittest.TestCase):
         return LocalSession(session_id=sid, tool="codex-cli", project_path="/owning-project", title=sid,
                             source_path=str(path), updated_at=self.now - timedelta(hours=hours), tokens_in=400_000)
 
-    def inventory(self, rows, receipts=()):
-        with patch.object(ui, "safe_runtime_processes", return_value=[]), patch.object(ui, "_agent_workspace_rows", return_value=[]), patch.object(ui, "recent_optimize_decisions", return_value=list(receipts)):
+    def landing_report(self, changes=1, project="/owning-project"):
+        """A stranded-work scan result, so these tests never shell out to git.
+
+        The detector itself is covered by tests/test_landed.py against purpose-built
+        repositories; what matters here is the review machinery around a candidate.
+        """
+        report = LandingReport(repo=project, main_ref="origin/main", branches_scanned=3, commits_examined=changes)
+        for index in range(changes):
+            report.changes.append(UnlandedChange(
+                sha=f"c0ffee{index:06d}", branch="fix/stranded-work", subject=f"stranded change {index}",
+                committed_at=self.now - timedelta(days=30), lines_added=100, lines_present=2,
+                files_measured=1, measurable=True, merged_into=("codex/parent",),
+            ))
+        return report
+
+    def inventory(self, rows, receipts=(), landing=None):
+        report = landing if landing is not None else LandingReport(repo="/owning-project", main_ref="origin/main")
+        with patch.object(ui, "safe_runtime_processes", return_value=[]), patch.object(ui, "_agent_workspace_rows", return_value=[]), patch.object(ui, "recent_optimize_decisions", return_value=list(receipts)), patch.object(ui, "unlanded_work_for_project", return_value=report):
             return ui.build_optimize_inventory(rows)
 
     def test_parent_and_checkout_are_distinct_and_final_text_is_private(self):
@@ -63,10 +80,9 @@ class OptimizeReviewTests(unittest.TestCase):
 
     def test_latest_activity_includes_recent_session_and_useful_is_not_completion(self):
         rows = [self.session("old-a"), self.session("old-b"), self.session("current", hours=0, final=False)]
-        item = self.inventory(rows)["top"]
+        item = self.inventory(rows, landing=self.landing_report())["top"]
         self.assertEqual(item["project_activity"]["session_id"], "current")
         self.assertIn("Recent activity", item["project_activity"]["status"])
-        self.assertEqual({r["session_id"] for r in item["sessions"]}, {"old-a", "old-b"})
         self.assertIn("latest user ask and final response", item["cleanup_prompt"])
         self.assertIn("confirmation question", item["cleanup_prompt"])
         self.assertIn("Immediately before any separately authorized", item["cleanup_prompt"])
@@ -129,9 +145,10 @@ class OptimizeReviewTests(unittest.TestCase):
         self.assertEqual(ui._scan_agent_workspace_root(root, set()), [])
 
     def test_large_group_is_a_bounded_explicit_review_sample(self):
-        item = self.inventory([self.session(f"s-{i}") for i in range(20)])["top"]
-        self.assertEqual(len(item["sessions"]), REVIEW_BATCH_SIZE)
-        self.assertEqual(item["omitted_session_count"], 20 - REVIEW_BATCH_SIZE)
+        rows = [self.session(f"s-{i}") for i in range(20)]
+        item = self.inventory(rows, landing=self.landing_report(changes=20))["top"]
+        self.assertEqual(len(item["changes"]), REVIEW_BATCH_SIZE)
+        self.assertEqual(item["omitted_change_count"], 20 - REVIEW_BATCH_SIZE)
         self.assertLess(len(item["cleanup_prompt"]), ai_assist.MAX_OPTIMIZE_CLEANUP_INPUT_CHARS)
         self.assertIn("Do not classify omitted sessions", item["cleanup_prompt"])
 
@@ -156,19 +173,19 @@ class OptimizeReviewTests(unittest.TestCase):
         with Path(revived.source_path).open("a") as f:
             f.write(json.dumps({"type": "event_msg", "timestamp": self.now.isoformat(), "payload": {"type": "task_started"}}) + "\n")
         rows = [revived, self.session("older-a"), self.session("older-b")]
-        item = self.inventory(rows)["top"]
+        item = self.inventory(rows, landing=self.landing_report())["top"]
         self.assertEqual(item["project_activity"]["session_id"], revived.session_id)
-        self.assertNotIn(revived.session_id, {row["session_id"] for row in item["sessions"]})
         self.assertEqual(item["project_activity"]["latest_session_evidence"]["last_turn_status"], "started")
 
     def test_receipt_quiets_only_unchanged_candidate_for_24_hours(self):
         rows = [self.session("one"), self.session("two")]
-        item = self.inventory(rows)["top"]
+        landing = self.landing_report()
+        item = self.inventory(rows, landing=landing)["top"]
         receipt = {"decision": "reviewed", "created_at": self.now.isoformat(), "evidence": {"candidate_id": item["id"], "evidence_hash": item["evidence_hash"]}}
-        self.assertEqual(self.inventory(rows, [receipt])["candidates"], [])
-        self.assertIsNotNone(self.inventory(rows + [self.session("new", hours=0)], [receipt])["top"])
+        self.assertEqual(self.inventory(rows, [receipt], landing=landing)["candidates"], [])
+        self.assertIsNotNone(self.inventory(rows + [self.session("new", hours=0)], [receipt], landing=self.landing_report(changes=2))["top"])
         receipt["created_at"] = (self.now - timedelta(hours=25)).isoformat()
-        self.assertIsNotNone(self.inventory(rows, [receipt])["top"])
+        self.assertIsNotNone(self.inventory(rows, [receipt], landing=landing)["top"])
 
     def test_model_object_schema_is_rejected_and_safe_suggestions_never_classify(self):
         config = {"mode": "cloud", "enabled_workflows": ["optimize_cleanup"]}

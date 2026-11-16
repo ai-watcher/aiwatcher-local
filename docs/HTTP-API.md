@@ -276,6 +276,16 @@ confirmation returns 400. Receipts record `cleanup_performed: false`, and quiet
 only the unchanged candidate for 24 hours. Legacy `marked_done` receipts remain
 readable; this endpoint does not archive, complete, delete or stop work.
 
+`/api/unlanded-resolution` settles one commit raised by the "Work not in main"
+card. Send `sha` (7-40 hex) and `decision`, either `"resolved"` (checked, it is
+fine) or `"relanded"` (a new pull request carries it); `branch` and `reason` are
+optional. `{"sha": ..., "undo": true}` removes the resolution again. Unlike
+`/api/optimize-decision`, this is permanent rather than a 24-hour quiet: the
+findings come from git history, which never ages out, and a sha never changes,
+so the receipt stays true. New work on the same branch arrives as a different
+sha and is raised on its own. It records a local decision only, and never
+touches a branch, commit or file.
+
 `/api/delivery-review` creates an explicit local candidate for one checkout. It
 accepts `project_path`, optional `session_id`, and optional transient
 `objective`; the persisted receipt retains the objective hash but not its text.
