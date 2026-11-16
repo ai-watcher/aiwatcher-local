@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import tempfile
 import unittest
 import json
@@ -15,6 +16,195 @@ from aiwatcher_cli.pricing import (
     CACHE_WRITE_5M_MULTIPLIER,
     lookup,
 )
+
+
+class OpeningPromptTests(unittest.TestCase):
+    def test_delivery_prompt_uses_segment_goal_between_milestones(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "rollout.jsonl")
+            rows = [
+                {
+                    "type": "event_msg", "timestamp": "2026-10-09T12:00:00Z",
+                    "payload": {"type": "user_message", "message": "Start the broad project."},
+                },
+                {
+                    "type": "event_msg", "timestamp": "2026-10-09T12:01:00Z",
+                    "payload": {"type": "user_message", "message": "Finish the delivery checkpoint."},
+                },
+                {
+                    "type": "event_msg", "timestamp": "2026-10-09T12:03:00Z",
+                    "payload": {"type": "user_message", "message": "Begin unrelated follow-up."},
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+            )
+
+            self.assertEqual(
+                scanner.extract_delivery_prompt(
+                    str(transcript), observed_through="2026-10-09T12:02:00Z",
+                    observed_after="2026-10-09T12:00:30Z",
+                ),
+                "Finish the delivery checkpoint.",
+            )
+
+    def test_delivery_prompt_fails_closed_when_segment_start_is_outside_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            scanner, "DELIVERY_GOAL_TAIL_BYTES", 256,
+        ):
+            transcript = Path(temp_dir, "session.jsonl")
+            rows = [
+                {
+                    "type": "user", "timestamp": "2026-10-09T12:00:00Z",
+                    "message": {"content": "True segment goal."},
+                },
+                {
+                    "type": "assistant", "timestamp": "2026-10-09T12:01:00Z",
+                    "message": {"content": "x" * 600},
+                },
+                {
+                    "type": "user", "timestamp": "2026-10-09T12:02:00Z",
+                    "message": {"content": "Later implementation detail."},
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+            )
+            scanner._extract_delivery_prompt_cached.cache_clear()
+
+            self.assertIsNone(scanner.extract_delivery_prompt(
+                str(transcript), observed_after="2026-10-09T11:59:00Z",
+                observed_through="2026-10-09T12:03:00Z",
+            ))
+
+    def test_delivery_prompt_fails_closed_without_boundary_or_file_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            scanner, "DELIVERY_GOAL_TAIL_BYTES", 256,
+        ):
+            transcript = Path(temp_dir, "session.jsonl")
+            transcript.write_text("\n".join((
+                json.dumps({
+                    "type": "user", "timestamp": "2026-10-09T12:00:00Z",
+                    "message": {"content": "True first goal."},
+                }),
+                json.dumps({
+                    "type": "assistant", "timestamp": "2026-10-09T12:01:00Z",
+                    "message": {"content": "x" * 600},
+                }),
+                json.dumps({
+                    "type": "user", "timestamp": "2026-10-09T12:02:00Z",
+                    "message": {"content": "Later detail."},
+                }),
+            )) + "\n", encoding="utf-8")
+            scanner._extract_delivery_prompt_cached.cache_clear()
+
+            self.assertIsNone(scanner.extract_delivery_prompt(
+                str(transcript), observed_through="2026-10-09T12:03:00Z",
+            ))
+
+    def test_delivery_prompt_prefers_matching_confirmed_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "session.jsonl")
+            rows = [
+                {
+                    "type": "user", "timestamp": "2026-10-09T12:00:00Z",
+                    "message": {"content": "Confirmed checkpoint goal."},
+                },
+                {
+                    "type": "user", "timestamp": "2026-10-09T12:01:00Z",
+                    "message": {"content": "Run one last check."},
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+            )
+
+            self.assertEqual(
+                scanner.extract_delivery_prompt(
+                    str(transcript),
+                    observed_through="2026-10-09T12:02:00Z",
+                    objective_source_hash=hashlib.sha256(
+                        b"Confirmed checkpoint goal.",
+                    ).hexdigest(),
+                ),
+                "Confirmed checkpoint goal.",
+            )
+
+    def test_delivery_prompt_hash_uses_objective_whitespace_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "session.jsonl")
+            transcript.write_text(json.dumps({
+                "type": "user", "timestamp": "2026-10-09T12:00:00Z",
+                "message": {"content": "Confirmed   checkpoint\n goal."},
+            }) + "\n", encoding="utf-8")
+
+            self.assertEqual(
+                scanner.extract_delivery_prompt(
+                    str(transcript),
+                    observed_through="2026-10-09T12:02:00Z",
+                    objective_source_hash=hashlib.sha256(
+                        b"Confirmed checkpoint goal.",
+                    ).hexdigest(),
+                ),
+                "Confirmed   checkpoint\n goal.",
+            )
+
+    def test_codex_opening_prompt_extracts_request_from_desktop_ambient_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "rollout.jsonl")
+            envelope = """<in-app-browser-context source="ambient-ui-state">
+Current URL: http://127.0.0.1:8765/?view=receipts
+</in-app-browser-context>
+
+## My request:
+Auto-infer the checkpoint goal and let me edit it.
+"""
+            transcript.write_text(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": envelope},
+            }) + "\n", encoding="utf-8")
+
+            self.assertEqual(
+                scanner.extract_opening_prompt(str(transcript)),
+                "Auto-infer the checkpoint goal and let me edit it.",
+            )
+
+    def test_codex_opening_prompt_prefers_typed_user_row_over_response_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "rollout.jsonl")
+            transcript.write_text("\n".join((
+                json.dumps({
+                    "type": "session_meta", "payload": {"id": "codex-1", "cwd": temp_dir},
+                }),
+                json.dumps({
+                    "type": "response_item", "payload": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "Injected context"}],
+                    },
+                }),
+                json.dumps({
+                    "type": "event_msg", "payload": {
+                        "type": "user_message", "message": "Implement the requested checkpoint.",
+                    },
+                }),
+            )) + "\n", encoding="utf-8")
+
+            self.assertEqual(
+                scanner.extract_opening_prompt(str(transcript)),
+                "Implement the requested checkpoint.",
+            )
+
+    def test_opening_prompt_after_delivery_boundary_is_not_inferred(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "session.jsonl")
+            transcript.write_text(json.dumps({
+                "type": "user", "timestamp": "2026-10-09T12:03:00Z",
+                "message": {"content": "Start a later unrelated task."},
+            }) + "\n", encoding="utf-8")
+
+            self.assertIsNone(scanner.extract_opening_prompt(
+                str(transcript), observed_through="2026-10-09T12:02:00Z",
+            ))
 
 
 class WindowActivityProbeTests(unittest.TestCase):
@@ -1226,6 +1416,64 @@ class ModelAttributionTests(unittest.TestCase):
 
 
 class CodexOriginatorTests(unittest.TestCase):
+    def test_injected_parent_metadata_does_not_relabel_child_rollout(self) -> None:
+        child_id = "01a1c8ba-8e71-75f2-95f1-f1dde04bc809"
+        parent_id = "01a0bf4c-1134-7903-b1a0-df6bf9b30bb5"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_dir = Path(temp_dir) / "sessions"
+            sessions_dir.mkdir(parents=True)
+            rollout = sessions_dir / f"rollout-2026-11-10T22-50-31-{child_id}.jsonl"
+            rows = [
+                {
+                    "type": "session_meta", "timestamp": "2026-11-11T03:50:31Z",
+                    "payload": {
+                        "id": child_id, "session_id": parent_id, "cwd": "/repo",
+                        "originator": "Codex Desktop",
+                        "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent_id}}},
+                    },
+                },
+                {
+                    "type": "turn_context", "timestamp": "2026-11-11T03:50:33Z",
+                    "payload": {"cwd": "/repo", "model": "gpt-5.5"},
+                },
+                {
+                    "type": "event_msg", "timestamp": "2026-11-11T03:50:34Z",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "total_tokens": 100, "input_tokens": 80, "output_tokens": 20,
+                            },
+                            "last_token_usage": {"input_tokens": 80, "output_tokens": 20},
+                        },
+                    },
+                },
+            ]
+            rollout.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+            )
+
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [sessions_dir]):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                scanner.CODEX_ROLLOUT_CACHE_SINCE = None
+                first, _events = scanner.scan_codex_rollouts()
+                with rollout.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "type": "session_meta", "timestamp": "2026-11-11T03:50:35Z",
+                        "payload": {
+                            "id": parent_id, "session_id": parent_id, "cwd": "/parent",
+                            "originator": "Codex Desktop", "source": "vscode",
+                        },
+                    }) + "\n")
+                os.utime(rollout, None)
+                sessions, _events = scanner.scan_codex_rollouts()
+
+        self.assertEqual(first[0].session_id, child_id)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].session_id, child_id)
+        self.assertEqual(os.path.basename(sessions[0].project_path), "repo")
+        self.assertEqual(sessions[0].parent_session_id, parent_id)
+
     def test_codex_desktop_originator_is_recorded_as_surface(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             sessions_dir = Path(temp_dir) / "sessions"

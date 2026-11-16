@@ -124,11 +124,21 @@ class LocalStateTests(unittest.TestCase):
                 local_state.record_work_receipt(receipt("one", "a" * 40))
                 first = local_state.mark_work_receipt_viewed("one")
                 second = local_state.mark_work_receipt_viewed("one")
+                decision = local_state.record_work_receipt_review_decision(
+                    "one", decision="declined", evidence_hash="e" * 64,
+                )
+                repeated = local_state.record_work_receipt_review_decision(
+                    "one", decision="confirmed", evidence_hash="f" * 64,
+                )
+                local_state.record_work_receipt(receipt("one", "a" * 40))
                 local_state.record_work_receipt(receipt("two", "b" * 40))
                 rows = local_state.recent_work_receipts()
 
         self.assertEqual(first["viewed_at"], second["viewed_at"])
         older = next(row for row in rows if row["receipt_id"] == "one")
+        self.assertEqual(decision["review_decision"]["status"], "declined")
+        self.assertEqual(repeated["review_decision"]["status"], "declined")
+        self.assertEqual(older["review_decision"]["evidence_hash"], "e" * 64)
         self.assertEqual(older["superseded_by"], "two")
         self.assertIsNotNone(older["superseded_at"])
 
@@ -1217,6 +1227,17 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(server["port"], 8799)
 
+    def test_ui_server_sidecar_does_not_need_the_large_state_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ui_server("127.0.0.1", 8765, pid=123)
+                with patch.object(local_state, "_locked_state", side_effect=OSError("busy")):
+                    server = local_state.get_ui_server()
+
+        self.assertEqual(server["port"], 8765)
+        self.assertEqual(server["pid"], 123)
+
     def test_get_ui_server_returns_none_when_never_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -1224,8 +1245,13 @@ class LocalStateTests(unittest.TestCase):
                 self.assertIsNone(local_state.get_ui_server())
 
     def test_get_ui_server_fails_soft_when_state_lock_is_unavailable(self) -> None:
-        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
-            self.assertIsNone(local_state.get_ui_server())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            ):
+                self.assertIsNone(local_state.get_ui_server())
 
     def test_record_watch_notification_round_trips_through_recent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1422,6 +1448,8 @@ class LocalStateTests(unittest.TestCase):
                     interval_seconds=60,
                     notify=True,
                     overlay=True,
+                    install_kind="source",
+                    source_root="/repo",
                 )
                 with patch.object(local_state, "pid_is_running", return_value=True):
                     after = local_state.get_watcher_status()
@@ -1433,6 +1461,8 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(after["mode"], "watch")
         self.assertTrue(after["notify"])
         self.assertTrue(after["overlay"])
+        self.assertEqual(after["install_kind"], "source")
+        self.assertEqual(after["source_root"], "/repo")
 
     def test_watcher_freshness_respects_recorded_interval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

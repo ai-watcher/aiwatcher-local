@@ -180,11 +180,14 @@ from .scanner import (
 )
 from .session_health import analyze_session_health
 from .session_presence import presence_for_session
-from .updater import apply_updates, check_for_updates, install_identity
+from .updater import LAUNCH_CWD_ENV, apply_updates, check_for_updates, install_identity
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
 DEFAULT_UI_PORT = 8765
+RESTART_HEALTH_TIMEOUT_SECONDS = 15.0
+RESTART_HEALTH_REQUEST_TIMEOUT_SECONDS = 2.0
+RESTART_HEALTH_POLL_SECONDS = 0.25
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 DEFAULT_DAILY_BUDGET_USD = 10.0
 DEFAULT_MONTHLY_BUDGET_USD = 100.0
@@ -3765,20 +3768,51 @@ def command_restart(args: argparse.Namespace) -> int:
     if not ui_url:
         return 2
     current_identity = install_identity()
-    for _ in range(50):
-        running_dashboard = _running_dashboard_identity()
+    health_deadline = time_module.monotonic() + RESTART_HEALTH_TIMEOUT_SECONDS
+    while True:
+        starting_dashboard = _starting_dashboard_identity_at_url(ui_url)
+        starting_pid = starting_dashboard.get("pid") if starting_dashboard else None
+        sidecar_replaced_previous = not isinstance(previous_pid, int) or (
+            isinstance(starting_pid, int) and starting_pid != previous_pid
+        )
+        if (
+            starting_dashboard
+            and sidecar_replaced_previous
+            and _same_install_identity(starting_dashboard, current_identity)
+        ):
+            running_dashboard = starting_dashboard
+        else:
+            running_dashboard = _dashboard_identity_at_url(
+                ui_url,
+                timeout=RESTART_HEALTH_REQUEST_TIMEOUT_SECONDS,
+            )
         replacement_pid = running_dashboard.get("pid") if running_dashboard else None
         replaced_previous = not isinstance(previous_pid, int) or (
             isinstance(replacement_pid, int) and replacement_pid != previous_pid
         )
         if (
-            local_action_server_available()
+            bool(
+                running_dashboard
+                and (running_dashboard.get("verified") or running_dashboard.get("starting"))
+            )
             and _same_install_identity(running_dashboard, current_identity)
             and replaced_previous
         ):
             break
-        time_module.sleep(0.1)
-    else:
+        if time_module.monotonic() >= health_deadline:
+            running_dashboard = None
+            break
+        time_module.sleep(RESTART_HEALTH_POLL_SECONDS)
+    if not running_dashboard:
+        if getattr(args, "from_companion", False):
+            restored, detail = _open_native_companion_presence(
+                _watch_ui_base_url(),
+                interval=int(getattr(args, "interval", 30)),
+                position=str(getattr(args, "presence_position", "bottom-right")),
+                visibility=str(getattr(args, "presence_visibility", "always")),
+            )
+            if not restored:
+                print(f"Companion entry point could not be restored: {detail}", file=sys.stderr)
         print("Dashboard did not become healthy; Companion was left running.", file=sys.stderr)
         return 2
 
@@ -3789,7 +3823,7 @@ def command_restart(args: argparse.Namespace) -> int:
 
     start_result = start_companion(
         interval_seconds=int(getattr(args, "interval", 30)),
-        presence=True,
+        presence=not getattr(args, "no_presence", False),
         presence_position=str(getattr(args, "presence_position", "bottom-right")),
         presence_visibility=str(getattr(args, "presence_visibility", "always")),
     )
@@ -3940,6 +3974,37 @@ def _read_dashboard_json(path: str, *, timeout: float = 0.6) -> dict[str, object
     return payload if isinstance(payload, dict) else None
 
 
+def _dashboard_identity_at_url(base_url: str, *, timeout: float = 0.6) -> dict[str, object] | None:
+    """Read replacement identity without reparsing the full local state file."""
+    normalized = base_url.rstrip("/")
+    health = _read_dashboard_json(f"{normalized}/api/health", timeout=timeout)
+    if not health or health.get("service") != "aiwatcher-local":
+        return None
+    identity = {
+        key: value
+        for key, value in health.items()
+        if key in {"install_kind", "source_root", "version", "pid", "process_cwd"}
+    }
+    identity["verified"] = True
+    identity["base_url"] = normalized
+    return identity
+
+
+def _starting_dashboard_identity_at_url(base_url: str) -> dict[str, object] | None:
+    """Accept an atomically recorded replacement while its first scan is busy."""
+    server = get_ui_server()
+    if not server or _ui_server_base_url(server).rstrip("/") != base_url.rstrip("/"):
+        return None
+    pid = server.get("pid")
+    if not isinstance(pid, int) or not _pid_is_running(pid):
+        return None
+    identity: dict[str, object] = dict(server)
+    identity["verified"] = False
+    identity["starting"] = True
+    identity["base_url"] = base_url.rstrip("/")
+    return identity
+
+
 def _running_dashboard_identity() -> dict[str, object] | None:
     server = get_ui_server()
     if not server:
@@ -3965,6 +4030,7 @@ def _running_dashboard_identity() -> dict[str, object] | None:
             identity["process_cwd"] = update.get("process_cwd") or identity.get("process_cwd")
     if not verified and not (identity.get("install_kind") and identity.get("source_root")):
         return None
+    identity["verified"] = verified
     identity["base_url"] = base_url
     return identity
 
@@ -4050,6 +4116,7 @@ def _start_dashboard_server(
         command.append("--restart")
     env = os.environ.copy()
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    env[LAUNCH_CWD_ENV] = env.get(LAUNCH_CWD_ENV) or os.getcwd()
     env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
     try:
         log_handle = log_path.open("a", encoding="utf-8")
@@ -4058,7 +4125,7 @@ def _start_dashboard_server(
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=log_handle,
-            cwd=os.getcwd(),
+            cwd=package_root,
             env=env,
             start_new_session=(os.name != "nt"),
             close_fds=(os.name != "nt"),
@@ -4297,6 +4364,7 @@ def _run_companion_heartbeat(interval_seconds: int) -> int:
     """
     interval = max(15, int(interval_seconds))
     next_delivery_sync = 0.0
+    identity = install_identity()
     try:
         while True:
             record_watcher_heartbeat(
@@ -4305,6 +4373,8 @@ def _run_companion_heartbeat(interval_seconds: int) -> int:
                 interval_seconds=interval,
                 notify=False,
                 overlay=True,
+                install_kind=str(identity.get("install_kind") or ""),
+                source_root=str(identity.get("source_root") or ""),
             )
             now = time_module.monotonic()
             if now >= next_delivery_sync:
@@ -4737,6 +4807,7 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             "upstream": upstream_result.stdout.strip() if upstream_result.returncode == 0 else None,
             "session_id": session_id,
             "session_source": session_source,
+            "session_tool": "codex-cli" if str(session_source or "").startswith("codex_") else None,
         }
 
         # Persist observed Git facts before optional cost enrichment. A ledger
@@ -10026,6 +10097,7 @@ def build_parser() -> argparse.ArgumentParser:
     restart = sub.add_parser("restart", help="Cleanly restart the dashboard UI and Companion together")
     restart.add_argument("--interval", type=int, default=30, help="Seconds between local Companion scans")
     restart.add_argument("--open-ui", action="store_true", help="Open the dashboard after restarting it")
+    restart.add_argument("--no-presence", action="store_true", help="Restart the Companion without the floating presence control")
     restart.add_argument("--ui-host", default="127.0.0.1", help="Dashboard loopback address to bind")
     restart.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT, help="Preferred dashboard port")
     restart.add_argument("--ui-port-attempts", type=int, default=20, help="How many sequential dashboard ports to try")

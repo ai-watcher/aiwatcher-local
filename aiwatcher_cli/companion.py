@@ -14,9 +14,24 @@ import time
 from typing import Any
 
 from .local_state import clear_watcher_heartbeat, get_ui_server, get_watcher_status, state_path
+from .updater import LAUNCH_CWD_ENV, install_identity
 
 
 AUTOSTART_LABEL = "com.aiwatcher.local.companion"
+
+
+def _same_install(current: dict[str, Any], expected: dict[str, object]) -> bool:
+    current_kind = str(current.get("install_kind") or "")
+    expected_kind = str(expected.get("install_kind") or "")
+    current_root = str(current.get("source_root") or "")
+    expected_root = str(expected.get("source_root") or "")
+    return bool(
+        current_kind
+        and current_kind == expected_kind
+        and current_root
+        and expected_root
+        and os.path.realpath(current_root) == os.path.realpath(expected_root)
+    )
 
 
 def companion_log_path() -> Path:
@@ -306,18 +321,33 @@ def start_companion(
     presence_visibility: str = "always",
 ) -> dict[str, Any]:
     current = get_watcher_status()
+    replaced_install = False
+    previous_pid: int | None = None
     if current.get("running"):
         if current.get("mode") == "companion":
-            return {"ok": True, "already_running": True, **current}
-        return {
-            "ok": False,
-            "already_running": False,
-            "message": (
-                f"A legacy ambient watch is already running (PID {current.get('pid')}). "
-                "Stop it before starting the companion so nudges are not duplicated."
-            ),
-            **current,
-        }
+            if _same_install(current, install_identity()):
+                return {"ok": True, "already_running": True, **current}
+            previous_pid = current.get("pid") if isinstance(current.get("pid"), int) else None
+            stopped = stop_companion()
+            if not stopped.get("ok"):
+                return {
+                    "ok": False,
+                    "already_running": False,
+                    "message": "The Companion from another installation could not be replaced.",
+                    **current,
+                }
+            replaced_install = True
+            current = {"running": False}
+        else:
+            return {
+                "ok": False,
+                "already_running": False,
+                "message": (
+                    f"A legacy ambient watch is already running (PID {current.get('pid')}). "
+                    "Stop it before starting the companion so nudges are not duplicated."
+                ),
+                **current,
+            }
 
     cleanup_orphan_companion_processes()
     log_path = companion_log_path()
@@ -329,6 +359,11 @@ def start_companion(
         presence_visibility=presence_visibility,
     )
     kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, **background_process_kwargs()}
+    package_root = str(Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    env[LAUNCH_CWD_ENV] = env.get(LAUNCH_CWD_ENV) or str(Path.cwd().resolve())
+    env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+    kwargs.update({"cwd": package_root, "env": env})
     try:
         with log_path.open("ab") as log:
             process = subprocess.Popen(command, stdout=log, stderr=log, **kwargs)
@@ -339,7 +374,14 @@ def start_companion(
         time.sleep(0.1)
         status = get_watcher_status()
         if status.get("running") and status.get("pid") == process.pid:
-            return {"ok": True, "already_running": False, **status, "log_path": str(log_path)}
+            return {
+                "ok": True,
+                "already_running": False,
+                **status,
+                "log_path": str(log_path),
+                "replaced_install": replaced_install,
+                "previous_pid": previous_pid,
+            }
         if process.poll() is not None:
             break
     return {
@@ -348,6 +390,8 @@ def start_companion(
         "pid": process.pid,
         "status": "starting" if process.poll() is None else "failed",
         "log_path": str(log_path),
+        "replaced_install": replaced_install,
+        "previous_pid": previous_pid,
     }
 
 

@@ -56,6 +56,147 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(listing["reviews"][0]["objective"]["text"], None)
         self.assertIn("feature.txt", listing["reviews"][0]["snapshot"]["changed_files"])
 
+    def test_one_receipt_can_be_loaded_without_hydrating_the_full_history(self) -> None:
+        first = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="first", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        second = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="second", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+
+        with patch.object(
+            ui, "hydrate_persisted_receipt", wraps=ui.hydrate_persisted_receipt,
+        ) as hydrate:
+            listing = ui.build_delivery_reviews(limit=1, receipt_id=first.receipt_id)
+
+        self.assertEqual([row["receipt_id"] for row in listing["reviews"]], [first.receipt_id])
+        self.assertEqual(hydrate.call_count, 1)
+        self.assertNotEqual(first.receipt_id, second.receipt_id)
+
+    def test_one_receipt_reads_only_opening_goal_not_full_transcript(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        local_state.record_commit_receipt({
+            "sha": head,
+            "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id,
+            "session_id": "large-session",
+            "session_source": "claude_session_environment",
+            "source_id": "compact-card",
+        })
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="fast-card", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+        source = self.root / "compact-session.jsonl"
+        source.write_text(json.dumps({
+            "uuid": "1", "type": "user", "sessionId": "large-session",
+            "timestamp": "2026-10-09T12:00:00Z",
+            "message": {"content": "Prefill this exact delivery goal."},
+        }) + "\n", encoding="utf-8")
+        session = LocalSession(
+            session_id="large-session", tool="claude-code", source_path=str(source),
+        )
+
+        with patch.object(ui, "_find_session_row", return_value=session), patch.object(
+            ui, "_known_delegated_session_ids", return_value=set(),
+        ), patch.object(
+            ui, "segment_session_by_prompt", side_effect=AssertionError("full transcript reconstruction"),
+        ):
+            review = ui.build_delivery_reviews(limit=1, receipt_id=receipt.receipt_id)["reviews"][0]
+
+        self.assertEqual(review["receipt_id"], receipt.receipt_id)
+        self.assertEqual(review["objective"]["text"], "Prefill this exact delivery goal.")
+        self.assertEqual(review["work_understanding"]["commit_count"], 1)
+        self.assertEqual(review["work_understanding"]["turn_count"], 0)
+
+    def test_unapproved_privacy_stripped_goal_is_reinferred_for_companion(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        local_state.record_commit_receipt({
+            "sha": head,
+            "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id,
+            "session_id": "confirmed-goal-session",
+            "session_source": "claude_session_environment",
+            "source_id": "confirmed-goal-card",
+        })
+        receipt = build_work_receipt(
+            str(self.repo), objective_text="Previously confirmed private goal.",
+            event_kind="push", event_status="confirmed", event_source="test",
+            event_source_id="confirmed-goal-push", remote="origin", remote_ref="feature",
+            sessions=[],
+        )
+        source = self.root / "confirmed-goal-session.jsonl"
+        source.write_text(json.dumps({
+            "uuid": "1", "type": "user", "sessionId": "confirmed-goal-session",
+            "timestamp": "2026-10-09T12:00:00Z",
+            "message": {"content": "Re-infer this editable delivery goal."},
+        }) + "\n", encoding="utf-8")
+        session = LocalSession(
+            session_id="confirmed-goal-session", tool="claude-code", source_path=str(source),
+        )
+
+        with patch.object(ui, "_find_session_row", return_value=session), patch.object(
+            ui, "_known_delegated_session_ids", return_value=set(),
+        ):
+            review = ui.build_delivery_reviews(limit=1, receipt_id=receipt.receipt_id)["reviews"][0]
+
+        self.assertEqual(review["objective"]["text"], "Re-infer this editable delivery goal.")
+        self.assertEqual(review["objective"]["provenance"], "inferred")
+        self.assertFalse(review["approval_valid"])
+
+    def test_strict_session_lookup_rejects_wrong_tool_and_codex_transcript(self) -> None:
+        session_id = "01a0bf4c-1134-7903-b1a0-df6bf9b30bb5"
+        wrong_tool = LocalSession(
+            session_id=session_id, tool="claude-code", source_path=str(self.root / "session.jsonl"),
+        )
+        wrong_rollout = LocalSession(
+            session_id=session_id, tool="codex-cli",
+            source_path=str(self.root / "rollout-01a1c8ba-8e71-75f2-95f1-f1dde04bc809.jsonl"),
+        )
+        right_rollout = LocalSession(
+            session_id=session_id, tool="codex-cli",
+            source_path=str(self.root / f"rollout-{session_id}.jsonl"),
+        )
+
+        self.assertFalse(ui._strict_session_candidate(
+            wrong_tool, session_id, "codex_thread_environment",
+        ))
+        self.assertFalse(ui._strict_session_candidate(
+            wrong_rollout, session_id, "codex_thread_environment",
+        ))
+        self.assertTrue(ui._strict_session_candidate(
+            right_rollout, session_id, "codex_thread_environment",
+        ))
+        self.assertTrue(ui._strict_session_candidate(
+            right_rollout, session_id, "transcript_tool_result", "codex-cli",
+        ))
+
+    def test_companion_decision_rejects_a_candidate_that_was_never_prompted(self) -> None:
+        candidate = ui.build_explicit_delivery_review({
+            "project_path": str(self.repo),
+            "objective": "Review this local candidate.",
+        })
+
+        result = ui.decide_companion_delivery_review({
+            "receipt_id": candidate["receipt_id"],
+            "evidence_hash": candidate["evidence_hash"],
+            "decision": "declined",
+        })
+
+        self.assertEqual(result["http_status"], 409)
+        self.assertIn("not awaiting", result["error"])
+
     def test_repeated_preview_is_stable_and_confirmed_delivery_replaces_it(self) -> None:
         first = ui.build_explicit_delivery_review({"project_path": str(self.repo)})
         second = ui.build_explicit_delivery_review({"project_path": str(self.repo)})
@@ -85,6 +226,134 @@ class DeliveryReviewApiTests(unittest.TestCase):
         listing = ui.build_delivery_reviews()
         self.assertEqual(listing["ready_count"], 0)
         self.assertIsNotNone(listing["reviews"][0]["viewed_at"])
+
+    def test_companion_decline_quiets_checkpoint_and_preserves_evidence(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-decline", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+        review = ui.build_delivery_reviews()["latest_ready"]
+
+        with patch.object(ui, "build_delivery_reviews", wraps=ui.build_delivery_reviews) as listing:
+            result = ui.decide_companion_delivery_review({
+                "receipt_id": receipt.receipt_id,
+                "evidence_hash": review["evidence_hash"],
+                "decision": "declined",
+            })
+
+        self.assertTrue(result["ok"])
+        listing.assert_called_once_with(limit=1, receipt_id=receipt.receipt_id)
+        self.assertEqual(result["decision"], "declined")
+        listing = ui.build_delivery_reviews()
+        self.assertEqual(listing["ready_count"], 0)
+        stored = local_state.recent_work_receipts()[0]
+        self.assertEqual(stored["review_decision"]["status"], "declined")
+        self.assertTrue(stored["viewed_at"])
+        repeated = ui.decide_companion_delivery_review({
+            "receipt_id": receipt.receipt_id,
+            "evidence_hash": review["evidence_hash"],
+            "objective": "A later conflicting decision.",
+            "decision": "confirmed",
+        })
+        self.assertEqual(repeated["http_status"], 409)
+
+    def test_companion_confirm_binds_goal_and_exact_evidence(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="push-confirm", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+        review = ui.build_delivery_reviews()["latest_ready"]
+
+        result = ui.decide_companion_delivery_review({
+            "receipt_id": receipt.receipt_id,
+            "evidence_hash": review["evidence_hash"],
+            "objective": "Ship the compact Companion checkpoint card.",
+            "decision": "confirmed",
+        })
+
+        self.assertTrue(result["ok"])
+        stored = next(
+            row for row in local_state.recent_work_receipts()
+            if row["receipt_id"] == receipt.receipt_id
+        )
+        self.assertEqual(stored["approval"]["status"], "approved")
+        self.assertEqual(stored["approval"]["evidence_scope"], "checkpoint")
+        self.assertEqual(stored["review_decision"]["status"], "confirmed")
+        self.assertNotIn("Ship the compact Companion checkpoint card.", json.dumps(stored))
+
+    def test_companion_prefills_only_editable_goal_from_linked_session(self) -> None:
+        identity = resolve_git_identity(str(self.repo))
+        head = git(self.repo, "rev-parse", "HEAD")
+        source = self.root / "linked-session.jsonl"
+        source.write_text("\n".join((
+            json.dumps({
+                "uuid": "1", "type": "user", "sessionId": "linked-session",
+                "timestamp": "2026-10-09T12:00:00Z",
+                "message": {"content": "Ship the compact Companion checkpoint card."},
+            }),
+            json.dumps({
+                "uuid": "2", "type": "user", "sessionId": "linked-session",
+                "timestamp": "2026-10-09T12:01:00Z",
+                "message": {"content": "Keep this follow-up transcript detail out of the compact card."},
+            }),
+        )) + "\n", encoding="utf-8")
+        session = LocalSession(
+            session_id="linked-session", tool="claude-code", source_path=str(source),
+        )
+        local_state.record_commit_receipt({
+            "sha": head, "checkout_path": identity.checkout_path,
+            "repository_id": identity.repository_id,
+            "repository_lineage_id": identity.repository_lineage_id,
+            "checkout_id": identity.checkout_id, "session_id": session.session_id,
+            "session_source": "claude_session_environment",
+            "source_id": "checkpoint-confirm",
+        })
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="checkpoint-confirm", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+        with patch.object(ui, "_find_session_row", return_value=session), patch.object(
+            ui, "_known_delegated_session_ids", return_value=set(),
+        ):
+            compact = ui.build_delivery_reviews(limit=1, receipt_id=receipt.receipt_id)["reviews"][0]
+
+        self.assertEqual(compact["objective"]["text"], "Ship the compact Companion checkpoint card.")
+        self.assertEqual(compact["objective"]["provenance"], "inferred")
+        self.assertEqual(compact["work_understanding"]["turn_count"], 0)
+        self.assertIsNone(compact["work_understanding"]["opening_objective"])
+        self.assertIsNone(compact["intent_source_hash"])
+
+        with patch.object(ui, "_find_session_row", return_value=session), patch.object(
+            ui, "_known_delegated_session_ids", return_value=set(),
+        ), patch.object(
+            ui, "build_explicit_delivery_review", side_effect=AssertionError("hidden enrichment"),
+        ), patch.object(
+            ui, "approve_delivery_review", side_effect=AssertionError("full approval"),
+        ):
+            result = ui.decide_companion_delivery_review({
+                "receipt_id": receipt.receipt_id,
+                "evidence_hash": compact["evidence_hash"],
+                "objective": compact["objective"]["text"],
+                "decision": "confirmed",
+            })
+
+        self.assertTrue(result["ok"])
+        stored = next(row for row in local_state.recent_work_receipts() if row["receipt_id"] == receipt.receipt_id)
+        self.assertEqual(stored["approval"]["evidence_scope"], "checkpoint")
+        with patch.object(ui, "_find_session_row", return_value=session), patch.object(
+            ui, "_known_delegated_session_ids", return_value=set(),
+        ):
+            detailed = ui.build_delivery_reviews()["reviews"][0]
+        self.assertIsNotNone(detailed["intent_source_hash"])
+        self.assertTrue(detailed["approval_valid"], json.dumps({
+            "approval": detailed.get("approval"),
+            "objective": detailed.get("objective"),
+            "current_state_matches": detailed.get("current_state_matches"),
+            "checkpoint_hash": ui._delivery_review_evidence_hash(detailed, scope="checkpoint"),
+        }, sort_keys=True))
 
     def test_objective_can_be_applied_transiently_to_confirmed_review(self) -> None:
         confirmed = build_work_receipt(
@@ -257,6 +526,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-1",
+            "session_source": "claude_session_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -304,6 +574,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "agent-child", "source_id": "commit-child",
+            "session_source": "codex_thread_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -347,6 +618,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-linked",
+            "session_source": "claude_session_environment",
         })
         (self.repo / "maintenance.txt").write_text("unrelated\n", encoding="utf-8")
         git(self.repo, "add", "maintenance.txt")
@@ -394,6 +666,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-intent",
+            "session_source": "claude_session_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -439,6 +712,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
             "repository_id": identity.repository_id,
             "repository_lineage_id": identity.repository_lineage_id,
             "checkout_id": identity.checkout_id, "session_id": "session-1", "source_id": "commit-window",
+            "session_source": "claude_session_environment",
         })
         build_work_receipt(
             str(self.repo), event_kind="push", event_status="confirmed",
@@ -468,6 +742,7 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertIn("/api/delivery-review", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-approve", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-review-viewed", ui.SAME_ORIGIN_ONLY_ROUTES)
+        self.assertIn("/api/companion-delivery-decision", ui.SAME_ORIGIN_ONLY_ROUTES)
         self.assertIn("/api/delivery-tracking", ui.SAME_ORIGIN_ONLY_ROUTES)
 
 

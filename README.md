@@ -16,11 +16,23 @@ unless you explicitly configure optional AI Assist.
 
 ![AIWatcher Local home dashboard illustration](https://raw.githubusercontent.com/ai-watcher/aiwatcher-local/8268c2b333bf0cca770134b2f9c78ee9122f4e1e/docs/readme-home-light.png)
 
+> ### Give this to your AI coding agent
+>
+> ```text
+> Read https://github.com/ai-watcher/aiwatcher-local/blob/main/docs/AGENT_SETUP.md and set up AIWatcher Local for me. Confirm you are on my intended local host, show the exact plan, and ask once before installing or changing repository tracking or AI-tool hooks.
+> ```
+>
+> The agent setup guide gives Codex, Claude Code, Cursor, and other coding agents a
+> platform-aware install and verification flow. It keeps AIWatcher local by
+> default and asks before changing an AI tool's hook configuration.
+
 ## Contents
 
 - [What You Get](#what-you-get)
+- [How It Works](#how-it-works)
 - [First Look](#first-look)
 - [Why Developers Use It](#why-developers-use-it)
+- [Set Up With Your AI Agent](docs/AGENT_SETUP.md)
 - [Install and Start](#install-and-start)
 - [Already Installed](#already-installed)
 - [Connect Your AI Tools](#connect-your-ai-tools)
@@ -46,6 +58,57 @@ AI coding work:
   confirmed push or pull request without guessing that local work was delivered.
 
 No signup is required, and the default install keeps data on your machine.
+
+## How It Works
+
+AIWatcher keeps collection, evidence, and review on the developer's machine.
+The Console and Companion read the same local evidence, while a small runtime
+record ensures only one dashboard and one Companion own the active install.
+
+```mermaid
+flowchart LR
+    subgraph Sources[Developer work]
+        Tools[Codex, Claude Code, Cursor]
+        Git[Git repositories and worktrees]
+    end
+
+    subgraph Capture[Local capture]
+        Scanner[Session scanner]
+        Integrations[Hooks, wrappers, and optional MCP]
+        Delivery[Run, commit, push, and PR receipts]
+    end
+
+    subgraph Evidence[Private local evidence]
+        State[Session index and evidence store]
+        Runtime[Singleton runtime ownership]
+    end
+
+    subgraph Experience[Developer experience]
+        Service[Companion heartbeat and signal service]
+        Companion[Native Companion]
+        Console[Loopback web Console]
+    end
+
+    Tools --> Scanner
+    Tools --> Integrations
+    Git --> Delivery
+    Scanner --> State
+    Integrations --> State
+    Delivery --> State
+    State --> Service
+    Runtime --> Service
+    Runtime --> Console
+    Service --> Companion
+    State --> Console
+    Companion -->|Open details| Console
+    Companion -->|Confirm or decline review| State
+    Companion -->|Restart active install| Runtime
+```
+
+The native Companion stays lightweight and close to the active AI tool. The
+Console provides deeper inspection. Restart always comes from the install that
+owns the active singleton; starting AIWatcher from a different install replaces
+that ownership instead of leaving duplicate background processes.
 
 ## First Look
 

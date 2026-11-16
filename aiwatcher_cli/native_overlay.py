@@ -26,6 +26,16 @@ import webbrowser
 from . import brand_mark
 
 
+GITHUB_STAR_URL = "https://github.com/ai-watcher/aiwatcher-local"
+# Small, dependency-free monochrome mark shared by Cocoa and Tk. Cocoa treats
+# it as a template image; Tk draws the light pixels directly on the dark bar.
+GITHUB_MARK_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAS0lEQVR4nGNgwALuPP/+"
+    "HxvGppYojUQZRKxmrIaQqhnDkIE3gOIwoEosEGsIXs0UG0CxF9AVYWMTZQCxfLy24zMA"
+    "qyHYJIgVowgAAAUAH6E4U39OAAAAAElFTkSuQmCC"
+)
+
+
 @dataclass(frozen=True)
 class OverlayConfig:
     signal_kind: str
@@ -562,6 +572,8 @@ let position = args.count > 3 ? args[3] : "bottom-right"
 let visibilityMode = args.count > 4 ? args[4] : "always"
 let intervalSeconds = args.count > 5 ? args[5] : "30"
 let restartRequestPath = args.count > 6 ? args[6] : ""
+let githubStarURL = "https://github.com/ai-watcher/aiwatcher-local"
+let githubMarkPNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAS0lEQVR4nGNgwALuPP/+HxvGppYojUQZRKxmrIaQqhnDkIE3gOIwoEosEGsIXs0UG0CxF9AVYWMTZQCxfLy24zMAqyHYJIgVowgAAAUAH6E4U39OAAAAAElFTkSuQmCC"
 
 func withoutTrailingSlash(_ value: String) -> String {
     var output = value
@@ -642,6 +654,13 @@ final class UsagePanelView: NSView {
     }
 }
 
+final class CheckpointPanelView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+}
+
 final class UsageMeter: NSView {
     var doubleValue: Double = 0 { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
@@ -667,6 +686,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var askButton: NSButton!
     var scanButton: NSButton!
     var consoleButton: NSButton!
+    var starButton: NSButton!
+    var restartButton: NSButton!
     var collapseButton: NSButton!
     var expandButton: NSButton!
     var dragHandle: NSTextField!
@@ -773,6 +794,20 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var usageSessionID = ""
     var usageSessionURL = ""
     var usageRequest = 0
+    var checkpointPopover: NSPopover?
+    var checkpointGoal: NSTextField!
+    var checkpointChanged: NSTextField!
+    var checkpointChecks: NSTextField!
+    var checkpointStats: NSTextField!
+    var checkpointUncertain: NSTextField!
+    var checkpointStatus: NSTextField!
+    var checkpointConfirmButton: NSButton!
+    var checkpointDeclineButton: NSButton!
+    var checkpointEvidenceHash = ""
+    var checkpointRequest = 0
+    var checkpointIdleToken = 0
+    var checkpointActivityMonitor: Any?
+    let checkpointIdleSeconds: Double = 30.0
 
     // 46 characters of 9pt subtitle measure ~210pt ("claude-code ·
     // aiwatcher-local · waited 12m 30s" is 208), and at 560 the subtitle
@@ -780,7 +815,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // The extra 66 goes to the subtitle in every layout; everything to its
     // right shifts by the same 66.
     // Usage has its own slot; it never displaces a gate or queue action.
-    let expandedWidth: CGFloat = 706
+    let expandedWidth: CGFloat = 848
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
     let maxWaitingRows = 5
@@ -1119,8 +1154,33 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         consoleButton.toolTip = "Open AIWatcher Console"
         rootView.addSubview(consoleButton)
 
+        starButton = NSButton(title: "Star us", target: self, action: #selector(openGitHub))
+        starButton.frame = NSRect(x: 640, y: 15, width: 84, height: 28)
+        starButton.bezelStyle = .rounded
+        starButton.controlSize = .small
+        starButton.imagePosition = .imageLeading
+        starButton.toolTip = "Star AIWatcher Local on GitHub"
+        if let data = Data(base64Encoded: githubMarkPNG), let image = NSImage(data: data) {
+            image.size = NSSize(width: 14, height: 14)
+            image.isTemplate = true
+            starButton.image = image
+        }
+        rootView.addSubview(starButton)
+
+        restartButton = NSButton(title: "", target: self, action: #selector(restartAIWatcher))
+        restartButton.frame = NSRect(x: 728, y: 15, width: 32, height: 28)
+        restartButton.bezelStyle = .rounded
+        restartButton.controlSize = .small
+        restartButton.toolTip = "Restart dashboard and Companion from this installation"
+        if #available(macOS 11.0, *) {
+            restartButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Restart AIWatcher")
+        } else {
+            restartButton.title = "↻"
+        }
+        rootView.addSubview(restartButton)
+
         collapseButton = NSButton(title: "-", target: self, action: #selector(toggleCollapsed))
-        collapseButton.frame = NSRect(x: 604, y: 37, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 826, y: 37, width: 18, height: 18)
         collapseButton.bezelStyle = .rounded
         collapseButton.controlSize = .mini
         collapseButton.toolTip = "Minimize AIWatcher"
@@ -1320,6 +1380,289 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return field
     }
 
+    func checkpointText(
+        _ parent: NSView, y: CGFloat, height: CGFloat = 22,
+        size: CGFloat = 12, bold: Bool = false
+    ) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.frame = NSRect(x: 20, y: y, width: 460, height: height)
+        field.font = NSFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        field.textColor = NSColor.labelColor
+        field.maximumNumberOfLines = max(1, Int(height / 16))
+        field.lineBreakMode = .byTruncatingTail
+        parent.addSubview(field)
+        return field
+    }
+
+    func checkpointSection(_ parent: NSView, title: String, y: CGFloat) {
+        let label = NSTextField(labelWithString: title.uppercased())
+        label.frame = NSRect(x: 20, y: y, width: 460, height: 16)
+        label.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = NSColor.secondaryLabelColor
+        parent.addSubview(label)
+    }
+
+    func checkpointLine(_ value: String, maxWidth: CGFloat = 430) -> String {
+        let prefix = "• "
+        let font = NSFont.systemFont(ofSize: 12)
+        func measuredWidth(_ text: String) -> CGFloat {
+            (text as NSString).size(withAttributes: [.font: font]).width
+        }
+        if measuredWidth(prefix + value) <= maxWidth { return prefix + value }
+        let characters = Array(value)
+        var low = 0
+        var high = characters.count
+        while low < high {
+            let middle = (low + high + 1) / 2
+            let candidate = prefix + String(characters.prefix(middle)) + "…"
+            if measuredWidth(candidate) <= maxWidth {
+                low = middle
+            } else {
+                high = middle - 1
+            }
+        }
+        return prefix + String(characters.prefix(low)) + "…"
+    }
+
+    func checkpointLines(_ values: [String], limit: Int = 2) -> String {
+        var lines = values.prefix(limit).map { value -> String in
+            checkpointLine(value)
+        }
+        if values.count > limit {
+            lines.append("• +\(values.count - limit) more in details")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    func stopCheckpointIdleMonitoring() {
+        checkpointIdleToken += 1
+        if let monitor = checkpointActivityMonitor {
+            NSEvent.removeMonitor(monitor)
+            checkpointActivityMonitor = nil
+        }
+    }
+
+    func resetCheckpointIdleTimer() {
+        checkpointIdleToken += 1
+        let token = checkpointIdleToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + checkpointIdleSeconds) {
+            guard token == self.checkpointIdleToken else { return }
+            guard self.checkpointPopover?.isShown == true else {
+                self.stopCheckpointIdleMonitoring()
+                return
+            }
+            self.stopCheckpointIdleMonitoring()
+            self.checkpointPopover?.performClose(nil)
+            self.setCollapsed(true)
+        }
+    }
+
+    func startCheckpointIdleMonitoring() {
+        stopCheckpointIdleMonitoring()
+        checkpointActivityMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]
+        ) { [weak self] event in
+            guard let self = self else { return event }
+            if self.checkpointPopover?.isShown == true {
+                self.resetCheckpointIdleTimer()
+            } else {
+                self.stopCheckpointIdleMonitoring()
+            }
+            return event
+        }
+        resetCheckpointIdleTimer()
+    }
+
+    @objc func openCheckpointCard() {
+        if checkpointPopover?.isShown == true {
+            checkpointPopover?.performClose(nil)
+            stopCheckpointIdleMonitoring()
+            return
+        }
+        autoCollapseToken += 1
+        autoCollapseDeadline = nil
+        let content = NSViewController()
+        content.view = CheckpointPanelView(frame: NSRect(x: 0, y: 0, width: 500, height: 600))
+        let heading = checkpointText(content.view, y: 562, height: 26, size: 18, bold: true)
+        heading.stringValue = "Review delivery checkpoint"
+        let intro = checkpointText(content.view, y: 530, height: 28, size: 11)
+        intro.stringValue = "Confirm what was delivered without leaving your AI tool. Details remain local."
+        checkpointSection(content.view, title: "Goal", y: 504)
+        checkpointGoal = NSTextField(frame: NSRect(x: 20, y: 468, width: 460, height: 28))
+        checkpointGoal.placeholderString = "Goal unavailable - enter it to confirm"
+        checkpointGoal.font = NSFont.systemFont(ofSize: 12)
+        content.view.addSubview(checkpointGoal)
+        checkpointSection(content.view, title: "Changed", y: 440)
+        checkpointChanged = checkpointText(content.view, y: 372, height: 62, size: 12)
+        checkpointSection(content.view, title: "Checks", y: 346)
+        checkpointChecks = checkpointText(content.view, y: 286, height: 56, size: 12)
+        checkpointSection(content.view, title: "Workflow", y: 260)
+        checkpointStats = checkpointText(content.view, y: 226, height: 30, size: 12)
+        checkpointSection(content.view, title: "Still uncertain", y: 200)
+        checkpointUncertain = checkpointText(content.view, y: 116, height: 80, size: 11)
+        checkpointStatus = checkpointText(content.view, y: 78, height: 32, size: 11)
+        checkpointStatus.textColor = NSColor.secondaryLabelColor
+        checkpointConfirmButton = NSButton(title: "Confirm", target: self, action: #selector(confirmCheckpoint))
+        checkpointConfirmButton.frame = NSRect(x: 16, y: 24, width: 108, height: 30)
+        checkpointConfirmButton.bezelStyle = .rounded
+        checkpointConfirmButton.keyEquivalent = "\r"
+        content.view.addSubview(checkpointConfirmButton)
+        checkpointDeclineButton = NSButton(title: "Decline", target: self, action: #selector(declineCheckpoint))
+        checkpointDeclineButton.frame = NSRect(x: 130, y: 24, width: 100, height: 30)
+        checkpointDeclineButton.bezelStyle = .rounded
+        content.view.addSubview(checkpointDeclineButton)
+        let details = NSButton(title: "More details", target: self, action: #selector(openCheckpointDetails))
+        details.frame = NSRect(x: 348, y: 24, width: 136, height: 30)
+        details.bezelStyle = .rounded
+        content.view.addSubview(details)
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = content
+        checkpointPopover = popover
+        popover.show(relativeTo: primaryButton.bounds, of: primaryButton, preferredEdge: .minY)
+        startCheckpointIdleMonitoring()
+        loadCheckpointCard()
+    }
+
+    func loadCheckpointCard() {
+        checkpointRequest += 1
+        let requestID = checkpointRequest
+        checkpointEvidenceHash = ""
+        checkpointGoal.stringValue = ""
+        checkpointChanged.stringValue = "Loading delivered changes..."
+        checkpointChecks.stringValue = ""
+        checkpointStats.stringValue = ""
+        checkpointUncertain.stringValue = ""
+        checkpointStatus.stringValue = "Reading exact local evidence..."
+        checkpointConfirmButton.isEnabled = false
+        checkpointDeclineButton.isEnabled = false
+        let encodedReceiptID = deliveryReceiptID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let endpoint = URL(
+            string: dashboardBaseURL + "/api/delivery-reviews?limit=1&receipt_id=" + encodedReceiptID
+        ) else { return }
+        var request = URLRequest(url: endpoint)
+        request.timeoutInterval = 8
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            var payload: [String: Any]? = nil
+            if let data = data { payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
+            DispatchQueue.main.async {
+                guard self.checkpointRequest == requestID, self.checkpointPopover?.isShown == true else { return }
+                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                      let rows = payload?["reviews"] as? [[String: Any]],
+                      let review = rows.first(where: { ($0["receipt_id"] as? String) == self.deliveryReceiptID }) else {
+                    self.checkpointChanged.stringValue = "Checkpoint evidence is unavailable."
+                    self.checkpointStatus.stringValue = "Open More details to refresh the delivery review."
+                    return
+                }
+                let snapshot = review["snapshot"] as? [String: Any] ?? [:]
+                let objective = review["objective"] as? [String: Any] ?? [:]
+                let understanding = review["work_understanding"] as? [String: Any] ?? [:]
+                let commits = understanding["commits"] as? [[String: Any]] ?? []
+                let subjects = commits.compactMap { row -> String? in
+                    let value = row["subject"] as? String ?? ""
+                    return value.isEmpty ? nil : value
+                }
+                if subjects.isEmpty {
+                    let commitCount = (snapshot["commit_shas"] as? [String] ?? []).count
+                    let fileCount = snapshot["changed_file_count"] as? Int ?? 0
+                    let added = snapshot["lines_added"] as? Int ?? 0
+                    let removed = snapshot["lines_removed"] as? Int ?? 0
+                    self.checkpointChanged.stringValue = "\(commitCount) commit\(commitCount == 1 ? "" : "s") · \(fileCount) files · +\(added)/-\(removed)"
+                } else {
+                    self.checkpointChanged.stringValue = self.checkpointLines(subjects)
+                }
+                let checks = (review["verifications"] as? [[String: Any]] ?? []).filter {
+                    ($0["exact_state"] as? Bool ?? false)
+                }
+                self.checkpointChecks.stringValue = checks.isEmpty
+                    ? "No check is bound to this exact Git state."
+                    : self.checkpointLines(checks.map {
+                        "\($0["runner"] as? String ?? "Check"): \($0["status"] as? String ?? "unknown") (\($0["scope"] as? String ?? "unknown"))"
+                    })
+                let workflow = review["workflow"] as? [String: Any] ?? [:]
+                let sessions = workflow["session_count"] as? Int ?? 0
+                self.checkpointStats.stringValue = sessions > 0
+                    ? "\(workflow["user_turns"] as? Int ?? 0) turns · \(workflow["model_calls"] as? Int ?? 0) model calls · \(workflow["tool_calls"] as? Int ?? 0) tool calls"
+                    : "Session activity unavailable for this checkpoint."
+                let attention = review["attention"] as? [String] ?? []
+                self.checkpointUncertain.stringValue = attention.isEmpty
+                    ? "No unresolved evidence gaps were recorded."
+                    : self.checkpointLines(attention)
+                self.checkpointGoal.stringValue = objective["text"] as? String ?? ""
+                let objectiveProvenance = objective["provenance"] as? String ?? "unavailable"
+                self.checkpointEvidenceHash = review["evidence_hash"] as? String ?? ""
+                self.checkpointConfirmButton.isEnabled = !self.checkpointEvidenceHash.isEmpty
+                self.checkpointDeclineButton.isEnabled = !self.checkpointEvidenceHash.isEmpty
+                if self.checkpointGoal.stringValue.isEmpty {
+                    self.checkpointStatus.stringValue = "Goal could not be inferred. Enter it to confirm; Decline keeps the evidence."
+                } else if objectiveProvenance == "inferred" {
+                    self.checkpointStatus.stringValue = "Goal inferred from the linked session. Edit if needed, then confirm."
+                } else {
+                    self.checkpointStatus.stringValue = "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
+                }
+            }
+        }.resume()
+    }
+
+    @objc func confirmCheckpoint() {
+        submitCheckpointDecision("confirmed")
+    }
+
+    @objc func declineCheckpoint() {
+        submitCheckpointDecision("declined")
+    }
+
+    @objc func openCheckpointDetails() {
+        checkpointPopover?.performClose(nil)
+        stopCheckpointIdleMonitoring()
+        openURL(primaryURL)
+    }
+
+    func submitCheckpointDecision(_ decision: String) {
+        let objective = checkpointGoal.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if decision == "confirmed" && objective.isEmpty {
+            checkpointStatus.stringValue = "Enter the intended goal before confirming."
+            return
+        }
+        guard !deliveryReceiptID.isEmpty, !checkpointEvidenceHash.isEmpty,
+              let endpoint = URL(string: dashboardBaseURL + "/api/companion-delivery-decision") else {
+            checkpointStatus.stringValue = "Checkpoint evidence changed. Refresh the card."
+            return
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "receipt_id": deliveryReceiptID,
+            "evidence_hash": checkpointEvidenceHash,
+            "objective": objective,
+            "decision": decision,
+        ])
+        checkpointConfirmButton.isEnabled = false
+        checkpointDeclineButton.isEnabled = false
+        checkpointStatus.stringValue = decision == "confirmed" ? "Confirming exact evidence..." : "Saving your decision..."
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            var payload: [String: Any]? = nil
+            if let data = data { payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
+            DispatchQueue.main.async {
+                let ok = (response as? HTTPURLResponse)?.statusCode == 200 && (payload?["ok"] as? Bool ?? false)
+                if ok {
+                    self.checkpointStatus.stringValue = payload?["message"] as? String ?? "Decision saved."
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        self.checkpointPopover?.performClose(nil)
+                        self.stopCheckpointIdleMonitoring()
+                        self.refreshState()
+                    }
+                } else {
+                    self.checkpointConfirmButton.isEnabled = true
+                    self.checkpointDeclineButton.isEnabled = true
+                    self.checkpointStatus.stringValue = payload?["error"] as? String ?? "Could not save this decision."
+                }
+            }
+        }.resume()
+    }
+
     @objc func openUsage() {
         if usagePopover?.isShown == true {
             usagePopover?.performClose(nil)
@@ -1421,11 +1764,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.usageIdentity.toolTip = selected["project_path"] as? String
                 let context = selected["context"] as? [String: Any] ?? [:]
                 let available = context["available"] as? Bool ?? false
-                self.usageContext.stringValue = available ? (selected["context_label"] as? String ?? "") : "Context unavailable"
+                self.usageContext.stringValue = selected["context_label"] as? String ?? "Usage unavailable"
                 self.usageContext.font = NSFont.systemFont(ofSize: available ? 20 : 24, weight: .semibold)
                 self.usageMeter.isHidden = !available
                 self.usageMeter.doubleValue = min(max((context["pct_of_turn_limit"] as? NSNumber)?.doubleValue ?? 0, 0), 100)
-                self.usageNote.stringValue = available ? (selected["context_note"] as? String ?? "") : (selected["context_label"] as? String ?? "")
+                self.usageNote.stringValue = selected["context_note"] as? String ?? ""
                 self.usageTotals.stringValue = selected["usage_label"] as? String ?? ""
                 self.usageInput.stringValue = selected["input_label"] as? String ?? ""
                 self.usageCache.stringValue = selected["cache_label"] as? String ?? ""
@@ -1519,6 +1862,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         scheduleAutoCollapse(after: 1.5)
     }
 
+    @objc func openGitHub() {
+        openURL(githubStarURL)
+        scheduleAutoCollapse(after: 1.5)
+    }
+
+    @objc func restartAIWatcher() {
+        requestRestart()
+    }
+
     @objc func scanNow() {
         titleLabel.stringValue = "Scanning"
         subtitleLabel.stringValue = "Checking local AI work..."
@@ -1563,6 +1915,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             requestRuntimeReturn(sessionID: primarySessionID, fallbackURL: primaryURL)
             return
         }
+        if primaryAction == "open_delivery_card" && !deliveryReceiptID.isEmpty {
+            openCheckpointCard()
+            return
+        }
         if primaryAction == "open_prompt_gate" {
             scheduleAutoCollapse(after: 1.5)
         }
@@ -1572,6 +1928,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func requestRestart() {
         guard !restartRequestPath.isEmpty else { return }
         self.primaryButton.isEnabled = false
+        self.restartButton.isEnabled = false
         self.titleLabel.stringValue = "Restarting AIWatcher"
         self.subtitleLabel.stringValue = "Dashboard and Companion will reopen"
         self.updateAppearance()
@@ -1581,6 +1938,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             self.titleLabel.stringValue = "Restart could not start"
             self.subtitleLabel.stringValue = "Run aiwatcher restart"
             self.primaryButton.isEnabled = true
+            self.restartButton.isEnabled = true
             self.updateAppearance()
             return
         }
@@ -1924,6 +2282,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapsed = value
         if collapsed {
             usagePopover?.performClose(nil)
+            checkpointPopover?.performClose(nil)
+            stopCheckpointIdleMonitoring()
             autoCollapseDeadline = nil
         }
         let targetWidth = collapsed ? collapsedWidth : expandedWidth
@@ -2005,7 +2365,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func applyVisibility() {
         if collapsed {
-            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, usageButton, collapseButton] {
+            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, starButton, restartButton, usageButton, collapseButton] {
                 view?.isHidden = true
             }
             for view in rowDots { view.isHidden = true }
@@ -2034,18 +2394,24 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         subtitleLabel.isHidden = false
         dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
         brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
-        collapseButton.frame = NSRect(x: 684, y: 37 + yOff, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 826, y: 37 + yOff, width: 18, height: 18)
         let attention = needsAttentionState()
         // Context review queues need both scopes: a row-level Watch button and
         // a Review all button for the full Context Health list.
-        let showPrimary = hasPrimaryAction() && (rowsShown == 0 || ["control_review", "context_review"].contains(stateName))
+        let showPrimary = hasPrimaryAction() && (
+            rowsShown == 0 || ["control_review", "context_review", "delivery_review_ready"].contains(stateName)
+        )
         let showChip = !signalChipText.isEmpty && !attention && !showPrimary
         planButton.isHidden = attention || showChip || showPrimary
         askButton.isHidden = attention || showChip || showPrimary
         scanButton.isHidden = attention || showPrimary
         consoleButton.isHidden = false
+        starButton.isHidden = false
+        restartButton.isHidden = stateName == "offline"
+        starButton.frame = NSRect(x: 640, y: 15 + yOff, width: 84, height: 28)
+        restartButton.frame = NSRect(x: 728, y: 15 + yOff, width: 32, height: 28)
         usageButton.isHidden = false
-        usageButton.frame = NSRect(x: 642, y: 10 + yOff, width: 58, height: 24)
+        usageButton.frame = NSRect(x: 764, y: 10 + yOff, width: 58, height: 24)
         collapseButton.isHidden = false
         expandButton.isHidden = true
         let showContinue = (
@@ -2063,7 +2429,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             signalButton.isHidden = true
             titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 236, height: 17)
             subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 236, height: 16)
-            primaryButton.frame = NSRect(x: 306, y: 15 + yOff, width: 100, height: 28)
+            primaryButton.frame = NSRect(
+                x: 306, y: 15 + yOff,
+                width: stateName == "delivery_review_ready" ? 122 : 100,
+                height: 28
+            )
             if showContinue {
                 continueButton.frame = NSRect(x: 412, y: 15 + yOff, width: 70, height: 28)
                 if showSkip {
@@ -2307,6 +2677,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         applyWindowSize()
         applyVisibility()
         let needsAttention = needsAttentionState()
+        let checkpointReview = stateName == "delivery_review_ready"
         let dark = NSColor(calibratedRed: 0.035, green: 0.052, blue: 0.078, alpha: 0.94).cgColor
         let orangeColor = pulseOn
             ? NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 0.96)
@@ -2322,8 +2693,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.layer?.borderColor = needsAttention
             ? NSColor(calibratedRed: 1.00, green: 0.63, blue: 0.24, alpha: 0.95).cgColor
             : NSColor(calibratedRed: 0.34, green: 0.52, blue: 0.74, alpha: 0.72).cgColor
-        primaryButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
-        primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
+        let checkpointColor = pulseOn
+            ? NSColor(calibratedRed: 0.16, green: 0.48, blue: 0.96, alpha: 1)
+            : NSColor(calibratedRed: 0.05, green: 0.28, blue: 0.68, alpha: 1)
+        primaryButton.layer?.backgroundColor = needsAttention
+            ? orangeColor.cgColor
+            : (checkpointReview ? checkpointColor.cgColor : NSColor.clear.cgColor)
+        primaryButton.contentTintColor = (needsAttention || checkpointReview) ? NSColor.white : NSColor.controlTextColor
         // The blue ring is the mark's state channel, speaking the dashboard
         // favicon's vocabulary: orange when something needs you, mint while a
         // session is actively working (#43d9a3, the favicon's healthy-live
@@ -2374,7 +2750,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func schedulePulse(after delay: Double = 0.8) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            let animate = self.window.isVisible && self.isHardGate() && !reduceMotion && self.motionMode != "quiet"
+            let animateCheckpoint = self.stateName == "delivery_review_ready" && !self.collapsed
+            let animate = self.window.isVisible
+                && (self.isHardGate() || animateCheckpoint)
+                && !reduceMotion && self.motionMode != "quiet"
             if animate {
                 self.pulseOn.toggle()
                 self.updateAppearance()
@@ -2472,6 +2851,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             }
             if !grouped.isEmpty { waiting = grouped }
         }
+        if incomingState == "delivery_review_ready" {
+            waiting = waiting.filter { ($0["kind"] as? String) != "delivery_confirmed" }
+        }
         sectionLabels = waiting.prefix(maxWaitingRows).map { row in
             (row["_section_label"] as? String) ?? ""
         }
@@ -2531,7 +2913,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 // A compact nudge is something to do, so it earns the calm
                 // blue count on the collapsed bubble the review states get;
                 // finished work never does.
-                if ["control_review", "context_review", "compact_recommended"].contains(incomingState) {
+                if ["control_review", "context_review", "compact_recommended", "delivery_review_ready"].contains(incomingState) {
                     self.waitingCount = 0
                     self.finishedCount = 0
                     self.reviewCount = count
@@ -2586,7 +2968,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let tip = self.detailText.isEmpty ? nil : self.detailText
         self.titleLabel.toolTip = tip
         self.subtitleLabel.toolTip = tip
-        self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
+        self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(18))
         self.primaryAction = json["primary_action"] as? String ?? "open_url"
         self.primarySessionID = json["primary_session_id"] as? String ?? ""
         self.compactCommand = json["compact_command"] as? String ?? ""
@@ -2610,7 +2992,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // and the bubble alone could only say "something". Once per gate --
         // a user who collapses it again is not fought, and the rim and badge
         // keep saying it.
-        if isHardGate() && !wasHardGate && collapsed {
+        let newCheckpoint = incomingState == "delivery_review_ready"
+            && !self.deliveryReceiptID.isEmpty
+            && self.deliveryReceiptID != previousDeliveryReceiptID
+        if (isHardGate() && !wasHardGate || newCheckpoint) && collapsed {
             setCollapsed(false)
         } else {
             self.updateAppearance()
@@ -2624,7 +3009,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func scheduleAutoCollapse(after delay: Double) {
-        if collapsed || usagePopover?.isShown == true {
+        if collapsed || usagePopover?.isShown == true || checkpointPopover?.isShown == true {
             return
         }
         let deadline = Date().addingTimeInterval(delay)
@@ -2642,6 +3027,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 // missed. Clearing the deadline lets the next refresh
                 // schedule again once the gate resolves.
                 if self.isHardGate() {
+                    return
+                }
+                if self.checkpointPopover?.isShown == true {
                     return
                 }
                 self.setCollapsed(true)
@@ -3496,7 +3884,7 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    expanded_width = 640
+    expanded_width = 770
     expanded_height = 58
     # 52, not 44: the count badge needs room inside the bubble -- see the
     # matching constant in the Swift bar.
@@ -3578,6 +3966,18 @@ def run_native_presence(
         "PresenceAttention.TButton",
         background=[("disabled", "#141c28"), ("pressed", "#b84816"), ("active", "#f07a3a")],
         foreground=[("disabled", "#f3d8c8")],
+    )
+    style.configure(
+        "PresenceReview.TButton",
+        padding=(8, 4),
+        background="#0052F5",
+        foreground="#ffffff",
+        **{key: value for key, value in button_base.items() if key not in {"background", "foreground"}},
+    )
+    style.map(
+        "PresenceReview.TButton",
+        background=[("disabled", "#141c28"), ("pressed", "#003fbf"), ("active", "#2671ff")],
+        foreground=[("disabled", "#8da5c8")],
     )
     style.configure("PresenceMini.TButton", padding=(5, 3), **button_base)
     style.map("PresenceMini.TButton", **button_states)
@@ -3723,6 +4123,10 @@ def run_native_presence(
 
     def open_ask() -> None:
         webbrowser.open(f"{url.rstrip('/')}/?ask=1")
+        schedule_auto_collapse(1500)
+
+    def open_github() -> None:
+        webbrowser.open(GITHUB_STAR_URL)
         schedule_auto_collapse(1500)
 
     def split_lines(value: str) -> list[str]:
@@ -3923,6 +4327,13 @@ def run_native_presence(
                     grouped_rows.append({**source, "_section_label": label if section_index == 0 else ""})
         if grouped_rows:
             waiting_sessions = grouped_rows
+        if incoming_state == "delivery_review_ready" and isinstance(waiting_sessions, list):
+            # The checkpoint card is the delivery interaction. Repeating the
+            # same event as a row turns the Companion into a status dump.
+            waiting_sessions = [
+                row for row in waiting_sessions
+                if not isinstance(row, dict) or str(row.get("kind") or "") != "delivery_confirmed"
+            ]
         if isinstance(waiting_sessions, list):
             for row in waiting_sessions[:max_waiting_rows]:
                 if not isinstance(row, dict):
@@ -3979,7 +4390,7 @@ def run_native_presence(
                 badge_count = int(badge.get("count") or 0)
             except (TypeError, ValueError):
                 badge_count = 0
-            if incoming_state in {"control_review", "context_review", "compact_recommended"}:
+            if incoming_state in {"control_review", "context_review", "compact_recommended", "delivery_review_ready"}:
                 waiting_count_var.set(0)
                 finished_count_var.set(0)
                 review_count_var.set(badge_count)
@@ -4043,7 +4454,8 @@ def run_native_presence(
         if incoming_state in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
             title_var.set(review_title())
             set_subtitle(review_subtitle())
-        primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
+        primary_label_var.set(str(payload.get("primary_label") or "Watch")[:18])
+        primary_button.configure(width=16 if incoming_state == "delivery_review_ready" else 11)
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
         compact_command_var.set(str(payload.get("compact_command") or ""))
@@ -4075,7 +4487,10 @@ def run_native_presence(
             continue_expected_tokens_var.set(0)
         # Entering a hard gate opens the bar itself, once per gate: the
         # reason and the Review button are what say why the prompt hangs.
-        if incoming_state in {"prompt_gate", "command_gate"} and not was_hard_gate and collapsed.get():
+        if (
+            (incoming_state in {"prompt_gate", "command_gate"} and not was_hard_gate)
+            or delivered
+        ) and collapsed.get():
             set_collapsed(False)
 
     def scan_now() -> None:
@@ -4095,14 +4510,23 @@ def run_native_presence(
             set_subtitle("Open UI for details")
         update_attention_style()
 
-    def open_primary() -> None:
+    def request_restart() -> None:
         nonlocal restart_requested
+        if restart_requested:
+            return
+        restart_requested = True
+        title_var.set("Restarting AIWatcher")
+        set_subtitle("Dashboard and Companion will reopen")
+        primary_button.state(["disabled"])
+        restart_button.state(["disabled"])
+        root.after(80, root.destroy)
+
+    def open_primary() -> None:
         if primary_action_var.get() == "restart_aiwatcher":
-            restart_requested = True
-            title_var.set("Restarting AIWatcher")
-            set_subtitle("Dashboard and Companion will reopen")
-            primary_button.state(["disabled"])
-            root.after(80, root.destroy)
+            request_restart()
+            return
+        if primary_action_var.get() == "open_delivery_card" and delivery_receipt_id_var.get().strip():
+            open_checkpoint_card()
             return
         if state_var.get() == "proof_pending":
             request = urllib.request.Request(f"{url.rstrip('/')}/api/handoff-receipts-viewed", method="POST")
@@ -4411,6 +4835,7 @@ def run_native_presence(
     skip_packed = tk.BooleanVar(value=False)
     scan_packed = tk.BooleanVar(value=True)
     primary_packed = tk.BooleanVar(value=True)
+    restart_packed = tk.BooleanVar(value=True)
     rows_packed = tk.BooleanVar(value=False)
     rows_shown = tk.IntVar(value=0)
     meter_packed = tk.BooleanVar(value=False)
@@ -4624,7 +5049,10 @@ def run_native_presence(
             pass
 
     def schedule_auto_collapse(delay_ms: int = 6000) -> None:
-        if collapsed.get():
+        checkpoint_window = checkpoint_state.get("window")
+        if collapsed.get() or (
+            checkpoint_window is not None and checkpoint_window.winfo_exists()
+        ):
             return
         deadline = time.monotonic() + (delay_ms / 1000.0)
         existing_deadline = float(auto_collapse_deadline.get() or 0.0)
@@ -4642,6 +5070,9 @@ def run_native_presence(
                     # deadline lets the next refresh schedule again once it
                     # resolves.
                     if state_var.get() in {"prompt_gate", "command_gate"}:
+                        return
+                    checkpoint_window = checkpoint_state.get("window")
+                    if checkpoint_window is not None and checkpoint_window.winfo_exists():
                         return
                     set_collapsed(True)
             except tk.TclError:
@@ -4664,7 +5095,9 @@ def run_native_presence(
         # A hard gate holds the user's own prompt until they act; softer
         # attention blocks nothing. Mirrors the Swift bar's isHardGate.
         hard_gate = state_var.get() in {"prompt_gate", "command_gate"}
+        checkpoint_review = state_var.get() == "delivery_review_ready"
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"
+        review_bg = "#2671ff" if pulse_var.get() else "#0052F5"
         # Collapsed, the bubble stays white in every state; attention is
         # carried by an orange rim on the bubble's edge and the mark's blue
         # ring turning orange, the same job it does in the dashboard favicon
@@ -4679,7 +5112,14 @@ def run_native_presence(
         # user, so this style is only ever on screen while it does: it is
         # always the orange chip, pulsing between the two oranges.
         style.configure("PresenceAttention.TButton", background=attention_bg, foreground="#ffffff")
-        primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+        style.configure("PresenceReview.TButton", background=review_bg, foreground="#ffffff")
+        primary_button.configure(
+            style=(
+                "PresenceAttention.TButton" if needs_attention
+                else "PresenceReview.TButton" if checkpoint_review
+                else "Presence.TButton"
+            )
+        )
         # The blue ring is the mark's state channel, speaking the dashboard
         # favicon's vocabulary: orange when something needs you, mint while a
         # session is actively working (#43d9a3, the favicon's healthy-live
@@ -4774,12 +5214,21 @@ def run_native_presence(
             button.state(["disabled"] if offline else ["!disabled"])
         if not restart_requested:
             primary_button.state(["!disabled"])
+            restart_button.state(["!disabled"])
         attention_layout = has_primary_action() and not collapsed.get()
         # Context review queues need both scopes: a row-level Watch button and
         # a Review all button for the full Context Health list.
         should_show_primary = attention_layout and (
-            visible_waiting_rows() == 0 or state_var.get() in {"control_review", "context_review"}
+            visible_waiting_rows() == 0
+            or state_var.get() in {"control_review", "context_review", "delivery_review_ready"}
         )
+        should_show_restart = not collapsed.get() and primary_action_var.get() != "restart_aiwatcher"
+        if should_show_restart and not restart_packed.get():
+            restart_button.pack(side="left", padx=(4, 0), before=collapse_button)
+            restart_packed.set(True)
+        elif not should_show_restart and restart_packed.get():
+            restart_button.pack_forget()
+            restart_packed.set(False)
         # The missed-nudge chip borrows Plan/Ask's slot -- both remain a click
         # away in the Console, a recent signal is not.
         show_chip = bool(signal_chip_var.get()) and not attention_layout and not collapsed.get()
@@ -4907,12 +5356,21 @@ def run_native_presence(
     def pulse_attention() -> None:
         reduce_motion = reduce_motion_active()
         visible_surface = should_show_window()
+        checkpoint_button = state_var.get() == "delivery_review_ready" and not collapsed.get()
         animate_surface = (
             not reduce_motion
             and motion_mode_var.get() != "quiet"
-            and collapsed.get()
             and visible_surface
-            and (int(working_count_var.get() or 0) > 0 or state_var.get() in {"prompt_gate", "command_gate"})
+            and (
+                checkpoint_button
+                or (
+                    collapsed.get()
+                    and (
+                        int(working_count_var.get() or 0) > 0
+                        or state_var.get() in {"prompt_gate", "command_gate"}
+                    )
+                )
+            )
         )
         if animate_surface:
             pulse_var.set(not pulse_var.get())
@@ -5017,6 +5475,279 @@ def run_native_presence(
 
     usage_state: dict[str, object] = {"window": None, "session_id": "", "request": 0}
 
+    checkpoint_state: dict[str, object] = {
+        "window": None,
+        "request": 0,
+        "evidence_hash": "",
+        "idle_token": 0,
+        "reset_idle": None,
+    }
+    checkpoint_idle_ms = 30000
+
+    def open_checkpoint_card() -> None:
+        existing = checkpoint_state["window"]
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            reset_idle = checkpoint_state.get("reset_idle")
+            if callable(reset_idle):
+                reset_idle()
+            return
+        panel = tk.Toplevel(root)
+        panel.title("AIWatcher · Delivery checkpoint")
+        panel.geometry("560x620")
+        panel.attributes("-topmost", True)
+        checkpoint_state["window"] = panel
+        auto_collapse_token.set(auto_collapse_token.get() + 1)
+        auto_collapse_deadline.set(0.0)
+
+        def close_checkpoint(*, collapse: bool = False) -> None:
+            checkpoint_state["idle_token"] = int(checkpoint_state["idle_token"]) + 1
+            checkpoint_state["reset_idle"] = None
+            if panel.winfo_exists():
+                panel.destroy()
+            if collapse:
+                set_collapsed(True)
+
+        def reset_checkpoint_idle(_event: object = None) -> None:
+            checkpoint_state["idle_token"] = int(checkpoint_state["idle_token"]) + 1
+            token = int(checkpoint_state["idle_token"])
+
+            def close_if_idle() -> None:
+                try:
+                    if token == int(checkpoint_state["idle_token"]) and panel.winfo_exists():
+                        close_checkpoint(collapse=True)
+                except tk.TclError:
+                    pass
+
+            root.after(checkpoint_idle_ms, close_if_idle)
+
+        checkpoint_state["reset_idle"] = reset_checkpoint_idle
+        for sequence in ("<Motion>", "<Button>", "<KeyPress>", "<MouseWheel>"):
+            panel.bind(sequence, reset_checkpoint_idle, add="+")
+        panel.protocol("WM_DELETE_WINDOW", close_checkpoint)
+        reset_checkpoint_idle()
+        body = ttk.Frame(panel, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Review delivery checkpoint", font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
+        ttk.Label(
+            body,
+            text="Confirm what was delivered without leaving your AI tool. Details remain local.",
+            wraplength=520,
+        ).pack(anchor="w", pady=(4, 14))
+
+        goal_var = tk.StringVar(value="")
+        changed_var = tk.StringVar(value="Loading delivered changes...")
+        checks_var = tk.StringVar(value="")
+        stats_var = tk.StringVar(value="")
+        uncertain_var = tk.StringVar(value="")
+        status_var = tk.StringVar(value="Reading exact local evidence...")
+
+        def section(title: str, variable: tk.StringVar, *, entry: bool = False) -> object:
+            ttk.Label(body, text=title.upper(), font=("TkDefaultFont", 9, "bold")).pack(anchor="w", pady=(8, 3))
+            if entry:
+                widget = ttk.Entry(body, textvariable=variable)
+                widget.pack(fill="x")
+                return widget
+            ttk.Label(body, textvariable=variable, wraplength=520, justify="left").pack(anchor="w", fill="x")
+            return None
+
+        goal_entry = section("Goal", goal_var, entry=True)
+        section("Changed", changed_var)
+        section("Checks", checks_var)
+        section("Workflow", stats_var)
+        section("Still uncertain", uncertain_var)
+        ttk.Label(body, textvariable=status_var, wraplength=520, justify="left").pack(
+            side="bottom", anchor="w", fill="x", pady=(8, 0),
+        )
+        footer = ttk.Frame(body)
+        footer.pack(side="bottom", fill="x", pady=(18, 0))
+
+        def close_after_success(message: str) -> None:
+            status_var.set(message)
+            root.after(800, panel.destroy)
+            root.after(900, refresh_state)
+
+        def submit(decision: str) -> None:
+            objective = goal_var.get().strip()
+            if decision == "confirmed" and not objective:
+                status_var.set("Enter the intended goal before confirming.")
+                goal_entry.focus_set()
+                return
+            evidence_hash = str(checkpoint_state.get("evidence_hash") or "")
+            receipt_id = delivery_receipt_id_var.get().strip()
+            if not evidence_hash or not receipt_id:
+                status_var.set("Checkpoint evidence changed. Refresh the card.")
+                return
+            confirm_button.state(["disabled"])
+            decline_button.state(["disabled"])
+            status_var.set("Confirming exact evidence..." if decision == "confirmed" else "Saving your decision...")
+            request = urllib.request.Request(
+                f"{url.rstrip('/')}/api/companion-delivery-decision",
+                data=json.dumps({
+                    "receipt_id": receipt_id,
+                    "evidence_hash": evidence_hash,
+                    "objective": objective,
+                    "decision": decision,
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            result: dict[str, object] = {}
+
+            def send() -> None:
+                try:
+                    with urllib.request.urlopen(request, timeout=8) as response:
+                        result["payload"] = json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    try:
+                        result["payload"] = json.loads(exc.read().decode("utf-8"))
+                    except (OSError, ValueError):
+                        result["error"] = True
+                except (OSError, ValueError):
+                    result["error"] = True
+                finally:
+                    result["done"] = True
+
+            def settle_decision() -> None:
+                if not panel.winfo_exists():
+                    return
+                if not result.get("done"):
+                    root.after(60, settle_decision)
+                    return
+                payload = result.get("payload")
+                if isinstance(payload, dict) and payload.get("ok"):
+                    close_after_success(str(payload.get("message") or "Decision saved."))
+                    return
+                confirm_button.state(["!disabled"])
+                decline_button.state(["!disabled"])
+                status_var.set(
+                    str(payload.get("error") or "Could not save this decision.")
+                    if isinstance(payload, dict) else "Could not save this decision."
+                )
+
+            threading.Thread(target=send, daemon=True).start()
+            root.after(60, settle_decision)
+
+        confirm_button = ttk.Button(footer, text="Confirm", command=lambda: submit("confirmed"))
+        confirm_button.pack(side="left")
+        decline_button = ttk.Button(footer, text="Decline", command=lambda: submit("declined"))
+        decline_button.pack(side="left", padx=(8, 0))
+
+        def open_details() -> None:
+            webbrowser.open(primary_url_var.get() or url)
+            close_checkpoint()
+
+        ttk.Button(footer, text="More details", command=open_details).pack(side="right")
+
+        checkpoint_state["request"] = int(checkpoint_state["request"]) + 1
+        request_id = checkpoint_state["request"]
+        confirm_button.state(["disabled"])
+        decline_button.state(["disabled"])
+        result: dict[str, object] = {}
+
+        def fetch() -> None:
+            try:
+                receipt_id = urllib.parse.quote(delivery_receipt_id_var.get().strip(), safe="")
+                endpoint = f"{url.rstrip('/')}/api/delivery-reviews?limit=1&receipt_id={receipt_id}"
+                with urllib.request.urlopen(endpoint, timeout=8) as response:
+                    result["payload"] = json.loads(response.read().decode("utf-8"))
+            except (OSError, ValueError):
+                result["error"] = True
+            finally:
+                result["done"] = True
+
+        def settle_card() -> None:
+            if not panel.winfo_exists() or request_id != checkpoint_state["request"]:
+                return
+            if not result.get("done"):
+                root.after(60, settle_card)
+                return
+            payload = result.get("payload")
+            rows = payload.get("reviews") if isinstance(payload, dict) else []
+            review = next((
+                row for row in rows
+                if isinstance(row, dict) and row.get("receipt_id") == delivery_receipt_id_var.get()
+            ), None) if isinstance(rows, list) else None
+            if not isinstance(review, dict):
+                changed_var.set("Checkpoint evidence is unavailable.")
+                status_var.set("Open More details to refresh the delivery review.")
+                return
+            snapshot = review.get("snapshot") if isinstance(review.get("snapshot"), dict) else {}
+            objective = review.get("objective") if isinstance(review.get("objective"), dict) else {}
+            understanding = review.get("work_understanding") if isinstance(review.get("work_understanding"), dict) else {}
+            checkpoint_font = tkfont.nametofont("TkDefaultFont")
+
+            def compact_line(value: str, *, max_pixels: int = 480) -> str:
+                prefix = "• "
+                if checkpoint_font.measure(prefix + value) <= max_pixels:
+                    return prefix + value
+                low, high = 0, len(value)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    candidate = prefix + value[:middle] + "…"
+                    if checkpoint_font.measure(candidate) <= max_pixels:
+                        low = middle
+                    else:
+                        high = middle - 1
+                return prefix + value[:low] + "…"
+
+            def compact_lines(values: list[str], *, limit: int = 2) -> str:
+                lines = [compact_line(value) for value in values[:limit]]
+                if len(values) > limit:
+                    lines.append(f"• +{len(values) - limit} more in details")
+                return "\n".join(lines)
+
+            commits = understanding.get("commits") if isinstance(understanding.get("commits"), list) else []
+            subjects = [
+                str(row.get("subject")) for row in commits
+                if isinstance(row, dict) and str(row.get("subject") or "").strip()
+            ]
+            if subjects:
+                changed_var.set(compact_lines(subjects))
+            else:
+                commit_count = len(snapshot.get("commit_shas") or [])
+                changed_var.set(
+                    f"{commit_count} commit{'s' if commit_count != 1 else ''} · "
+                    f"{int(snapshot.get('changed_file_count') or 0)} files · "
+                    f"+{int(snapshot.get('lines_added') or 0)}/-{int(snapshot.get('lines_removed') or 0)}"
+                )
+            checks = [
+                row for row in (review.get("verifications") or [])
+                if isinstance(row, dict) and row.get("exact_state")
+            ]
+            checks_var.set(
+                compact_lines([
+                    f"{row.get('runner') or 'Check'}: {row.get('status') or 'unknown'} ({row.get('scope') or 'unknown'})"
+                    for row in checks
+                ]) if checks else "No check is bound to this exact Git state."
+            )
+            workflow = review.get("workflow") if isinstance(review.get("workflow"), dict) else {}
+            stats_var.set(
+                f"{int(workflow.get('user_turns') or 0)} turns · "
+                f"{int(workflow.get('model_calls') or 0)} model calls · "
+                f"{int(workflow.get('tool_calls') or 0)} tool calls"
+                if int(workflow.get("session_count") or 0) > 0
+                else "Session activity unavailable for this checkpoint."
+            )
+            attention = [str(item) for item in (review.get("attention") or []) if str(item)]
+            uncertain_var.set(
+                compact_lines(attention)
+                if attention else "No unresolved evidence gaps were recorded."
+            )
+            goal_var.set(str(objective.get("text") or ""))
+            checkpoint_state["evidence_hash"] = str(review.get("evidence_hash") or "")
+            confirm_button.state(["!disabled"] if checkpoint_state["evidence_hash"] else ["disabled"])
+            decline_button.state(["!disabled"] if checkpoint_state["evidence_hash"] else ["disabled"])
+            if not goal_var.get().strip():
+                status_var.set("Goal could not be inferred. Enter it to confirm; Decline keeps the evidence.")
+            elif str(objective.get("provenance") or "") == "inferred":
+                status_var.set("Goal inferred from the linked session. Edit if needed, then confirm.")
+            else:
+                status_var.set("Confirm accepts this exact goal and evidence. Decline keeps the evidence.")
+
+        threading.Thread(target=fetch, daemon=True).start()
+        root.after(60, settle_card)
+
     def open_usage() -> None:
         existing = usage_state["window"]
         if existing is not None and existing.winfo_exists():
@@ -5097,11 +5828,11 @@ def run_native_presence(
                 context = selected.get("context") or {}
                 available = context.get("available")
                 text_vars["identity"].set(f"{selected['model']} · {selected['state']}\nSession {sid}")
-                text_vars["context"].set(str(selected["context_label"]) if available else "Context unavailable")
+                text_vars["context"].set(str(selected["context_label"]))
                 if available:
                     meter["value"] = min(100, max(0, context.get("pct_of_turn_limit") or 0))
                     meter.pack(fill="x", pady=8)
-                text_vars["note"].set(str(selected["context_note"] if available else selected["context_label"]))
+                text_vars["note"].set(str(selected["context_note"]))
                 for key, value in (("totals", "usage_label"), ("input", "input_label"), ("cache", "cache_label"), ("cost", "cost_label"), ("boundary", "breakdown_note")):
                     text_vars[key].set(str(selected[value]))
                 text_vars["updated"].set(f"Last activity: {selected.get('updated_at') or 'unknown'}\nTotals through: {selected.get('totals_updated_at') or 'unknown'}\n{payload['total_recent_sessions']} recent sessions · picker limited to 20")
@@ -5135,7 +5866,28 @@ def run_native_presence(
     console_button.pack(side="left")
     usage_button = ttk.Button(frame, text="Usage", width=7, style="Presence.TButton", command=open_usage)
     usage_button.pack(side="left", padx=(4, 0))
-    ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
+    try:
+        github_icon = tk.PhotoImage(data=GITHUB_MARK_PNG_BASE64)
+    except tk.TclError:
+        github_icon = None
+    star_button = ttk.Button(
+        frame,
+        text="Star us",
+        image=github_icon,
+        compound="left",
+        width=8,
+        style="Presence.TButton",
+        command=open_github,
+    )
+    star_button.pack(side="left", padx=(4, 0))
+    restart_button = ttk.Button(
+        frame, text="↻", width=3, style="Presence.TButton", command=request_restart,
+    )
+    restart_button.pack(side="left", padx=(4, 0))
+    collapse_button = ttk.Button(
+        frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed,
+    )
+    collapse_button.pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
     row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label, ttk.Label]] = []

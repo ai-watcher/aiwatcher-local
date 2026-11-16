@@ -1095,7 +1095,6 @@ let currentData = null;
 let deliveryReviewsCache = [];
 let deliveryReviewsLoading = false;
 let deliveryReviewTransient = null;
-let deliveryReviewPendingView = false;
 let deliveryReviewPrivacy = '';
 let deliveryReviewCoverage = '';
 // The dropdown defaulted to whichever option came first in the markup, which
@@ -5317,9 +5316,8 @@ async function approveDeliveryReview(receiptId) {
   }
 }
 
-async function loadDeliveryReviews(options = {}) {
+async function loadDeliveryReviews() {
   if (deliveryReviewsLoading) {
-    if (options.markViewed) deliveryReviewPendingView = true;
     return;
   }
   deliveryReviewsLoading = true;
@@ -5339,14 +5337,6 @@ async function loadDeliveryReviews(options = {}) {
     renderDeliveryReviewTile(data.latest_ready);
     const requested = new URLSearchParams(location.search).get('delivery');
     if (requested) focusDeliveryReview(requested);
-    const markViewed = options.markViewed || deliveryReviewPendingView;
-    deliveryReviewPendingView = false;
-    if (markViewed) {
-      const visible = requested
-        ? deliveryReviewsCache.filter(row => row.receipt_id === requested && row.ready)
-        : deliveryReviewsCache.filter(row => row.ready);
-      await Promise.all(visible.map(row => markDeliveryReviewViewed(row.receipt_id)));
-    }
   } catch (error) {
     renderDeliveryReviewTile(null);
     const section = document.getElementById('deliveryReviews');
@@ -5411,7 +5401,6 @@ function openDeliveryReview(receiptId) {
   history.pushState({ view: 'receipts' }, '', url);
   showView('receipts', false);
   focusDeliveryReview(receiptId);
-  markDeliveryReviewViewed(receiptId);
 }
 /* Prove's claim, and the coverage behind it.
  *
@@ -6235,7 +6224,7 @@ function showView(view, updateUrl = true) {
   if (view === 'receipts' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') {
     markFreshStartReceiptsViewed();
-    loadDeliveryReviews({ markViewed: true });
+    loadDeliveryReviews();
   }
 }
 function showSettingsPanel(panel) {

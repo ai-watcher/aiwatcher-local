@@ -322,6 +322,24 @@
       align-items: start;
     }
     header, .runtime-strip { grid-column: 1 / -1; }
+    .product-footer {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: center;
+      padding-top: var(--sp-2);
+      border-top: 1px solid var(--line);
+    }
+    .github-star-link {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--sp-2);
+      color: var(--muted);
+      font-size: var(--fs-2);
+      font-weight: var(--fw-med);
+      text-decoration: none;
+    }
+    .github-star-link:hover, .github-star-link:focus-visible { color: var(--text); }
+    .github-star-link svg { width: 16px; height: 16px; flex: 0 0 auto; }
     /* The nav was already sticky; the header was not, so the date range and
        Refresh data scrolled out of reach on long views -- worst on the Changes
        ledger, where getting back to the picker meant scrolling to the top. The

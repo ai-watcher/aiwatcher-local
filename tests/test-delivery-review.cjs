@@ -151,7 +151,7 @@ test('checkout review renders its transient objective while a background load is
   assert.equal(nodes.deliveryReviewCreateButton.disabled, false);
 });
 
-test('loading Prove marks confirmed ready evidence but not candidates', async () => {
+test('loading Prove does not resolve a pending checkpoint decision', async () => {
   const confirmed = review('confirmed');
   const candidate = review('candidate');
   const marked = [];
@@ -168,11 +168,30 @@ test('loading Prove marks confirmed ready evidence but not candidates', async ()
     markDeliveryReviewViewed: async id => marked.push(id),
     document: { getElementById: id => nodes[id] || null },
   });
-  vm.runInContext("let deliveryReviewsLoading = false; let deliveryReviewTransient = null; let deliveryReviewsCache = []; let deliveryReviewPendingView = false; let deliveryReviewPrivacy = ''; let deliveryReviewCoverage = '';", ctx);
+  vm.runInContext("let deliveryReviewsLoading = false; let deliveryReviewTransient = null; let deliveryReviewsCache = []; let deliveryReviewPrivacy = ''; let deliveryReviewCoverage = '';", ctx);
   vm.runInContext(extract('renderDeliveryReviews'), ctx);
   vm.runInContext(extract('loadDeliveryReviews'), ctx);
-  await ctx.loadDeliveryReviews({ markViewed: true });
-  assert.deepEqual(marked, ['receipt-confirmed']);
+  await ctx.loadDeliveryReviews();
+  assert.deepEqual(marked, []);
+});
+
+test('opening delivery details does not count as confirm or decline', () => {
+  let shown = '';
+  let focused = '';
+  let marked = false;
+  const ctx = vm.createContext({
+    URL,
+    location: { href: 'http://127.0.0.1:8765/?view=home' },
+    history: { pushState() {} },
+    showView: view => { shown = view; },
+    focusDeliveryReview: id => { focused = id; },
+    markDeliveryReviewViewed: () => { marked = true; },
+  });
+  vm.runInContext(extract('openDeliveryReview'), ctx);
+  ctx.openDeliveryReview('receipt-confirmed');
+  assert.equal(shown, 'receipts');
+  assert.equal(focused, 'receipt-confirmed');
+  assert.equal(marked, false);
 });
 
 test('a late background response cannot drop a newly created transient review', async () => {
@@ -191,7 +210,7 @@ test('a late background response cannot drop a newly created transient review', 
     renderDeliveryReviewTile() {}, focusDeliveryReview() {}, markDeliveryReviewViewed: async () => {},
     document: { getElementById: id => nodes[id] || null },
   });
-  vm.runInContext("let deliveryReviewsLoading = false; let deliveryReviewTransient = null; let deliveryReviewsCache = []; let deliveryReviewPendingView = false; let deliveryReviewPrivacy = ''; let deliveryReviewCoverage = '';", ctx);
+  vm.runInContext("let deliveryReviewsLoading = false; let deliveryReviewTransient = null; let deliveryReviewsCache = []; let deliveryReviewPrivacy = ''; let deliveryReviewCoverage = '';", ctx);
   ctx.transient = transient;
   vm.runInContext('deliveryReviewTransient = transient', ctx);
   vm.runInContext(extract('renderDeliveryReviews'), ctx);
@@ -209,7 +228,7 @@ test('the real page and responsive stylesheet include the complete delivery surf
   assert.match(js, /Objective \(kept only for this preview\)/);
   assert.match(js, /event\.status !== 'confirmed'/);
   assert.match(js, /objective\.setSelectionRange\(selectionStart, selectionEnd\)/);
-  assert.match(js, /deliveryReviewPendingView = true/);
+  assert.doesNotMatch(extract('openDeliveryReview'), /markDeliveryReviewViewed/);
   assert.match(js, /targetTop - headerBottom - 12/);
 });
 

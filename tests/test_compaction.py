@@ -386,6 +386,43 @@ class CodexRolloutTests(unittest.TestCase):
         self.assertTrue(result.priced)
         self.assertGreater(result.dead_usd_per_turn or 0, 0)
 
+    def test_latest_context_uses_the_model_that_preceded_the_token_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = Path(tmp, "rollout.jsonl")
+            rollout.write_text("\n".join((
+                self._row(self.COMMIT_AT, "turn_context", {"model": "gpt-old"}),
+                self._token_count(self.COMMIT_AT + timedelta(seconds=1), 123_000, 123_000),
+                self._row(self.COMMIT_AT + timedelta(seconds=2), "turn_context", {"model": "gpt-new"}),
+            )) + "\n", encoding="utf-8")
+            result = compaction.codex_latest_context(str(rollout))
+
+        self.assertEqual(result["latest_context"], 123_000)
+        self.assertEqual(result["model"], "gpt-old")
+
+    def test_latest_context_skips_partial_and_malformed_tail_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = Path(tmp, "rollout.jsonl")
+            valid = "\n".join((
+                self._row(self.COMMIT_AT, "turn_context", {"model": "gpt-tail"}),
+                "{malformed",
+                self._token_count(self.COMMIT_AT + timedelta(seconds=1), 88_000, 88_000),
+            )) + "\n"
+            rollout.write_bytes((b"x" * 256) + b"\n" + valid.encode("utf-8"))
+            result = compaction.codex_latest_context(str(rollout), tail_bytes=len(valid) + 16)
+
+        self.assertEqual(result["latest_context"], 88_000)
+        self.assertEqual(result["model"], "gpt-tail")
+
+    def test_boundary_stats_ignore_valid_json_rows_that_are_not_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._rollout(tmp)
+            rollout = Path(session.source_path)
+            rollout.write_text("1\n" + rollout.read_text(encoding="utf-8"), encoding="utf-8")
+            result = compaction.codex_boundary_stats(str(rollout))
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["latest_context"], 310_000)
+
     def test_a_codex_shed_since_the_commit_is_seen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = compaction.assess(self._rollout(tmp, shed=True))

@@ -133,11 +133,12 @@ class WebAssetsTest(unittest.TestCase):
                 self.assertNotIn(pattern, ui.HTML)
                 self.assertNotIn(pattern, ui.OVERLAY_HTML)
 
-    def test_outbound_urls_are_the_known_two(self):
+    def test_outbound_urls_are_explicitly_allowed(self):
         # Anything new here is a deliberate decision about the trust boundary and
         # should have to be made in this test as well as in the markup.
         allowed = {
             "https://www.getaiwatcher.com",   # marketing link, user-initiated
+            "https://github.com/ai-watcher/aiwatcher-local",  # Star link, user-initiated
             "http://www.w3.org/2000/svg",     # XML namespace, never fetched
         }
         found = set(re.findall(r'https?://[^\s"\'`<>)]+', ui.HTML))
@@ -1967,6 +1968,13 @@ class BrandMarkTest(unittest.TestCase):
         # The markup default carries it too, or the first paint is half a mark
         # for every dark-themed browser until the first refresh.
         self.assertIn("prefers-color-scheme", self.html)
+
+    def test_footer_links_to_the_open_source_repository(self):
+        self.assertIn('class="product-footer"', self.html)
+        self.assertIn('class="github-star-link"', self.html)
+        self.assertIn('href="https://github.com/ai-watcher/aiwatcher-local"', self.html)
+        self.assertIn('aria-label="Star AIWatcher Local on GitHub"', self.html)
+        self.assertIn(".github-star-link {", self.css)
 
     def test_the_resting_favicon_is_the_brand_blue(self):
         # idle used to be a grey dot. At rest the mark is simply the mark.

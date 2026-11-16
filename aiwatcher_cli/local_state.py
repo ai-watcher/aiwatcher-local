@@ -383,6 +383,42 @@ def state_path() -> Path:
     return home / "local-state.json"
 
 
+def _ui_server_path() -> Path:
+    path = state_path()
+    name = "ui-server.json" if path.name == "local-state.json" else f"{path.stem}-ui-server.json"
+    return path.with_name(name)
+
+
+def _write_ui_server(server: dict[str, Any]) -> None:
+    path = _ui_server_path()
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".ui-server-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(server, handle)
+            handle.write("\n")
+            temp_path = handle.name
+        os.replace(temp_path, path)
+        if os.name != "nt":
+            if not parent_existed:
+                os.chmod(path.parent, 0o700)
+            os.chmod(path, 0o600)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 def _empty_state() -> dict[str, Any]:
     return {
         "version": STATE_VERSION,
@@ -1349,41 +1385,60 @@ def record_ui_server(
     identity fields let `aiwatcher start` avoid reusing an older dashboard
     launched from a different install path.
     """
+    server = {
+        "host": host,
+        "port": port,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if install_kind:
+        server["install_kind"] = install_kind
+    if source_root:
+        server["source_root"] = source_root
+    if version:
+        server["version"] = version
+    if isinstance(pid, int) and pid > 0:
+        server["pid"] = pid
+    if cwd:
+        server["cwd"] = cwd
     try:
-        with _locked_state():
-            data = _load()
-            server = {
-                "host": host,
-                "port": port,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if install_kind:
-                server["install_kind"] = install_kind
-            if source_root:
-                server["source_root"] = source_root
-            if version:
-                server["version"] = version
-            if isinstance(pid, int) and pid > 0:
-                server["pid"] = pid
-            if cwd:
-                server["cwd"] = cwd
-            data["ui_server"] = server
-            _save(data)
+        _write_ui_server(server)
     except OSError:
         pass
 
 
 def get_ui_server() -> dict[str, Any] | None:
     try:
+        server = json.loads(_ui_server_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        server = None
+    if isinstance(server, dict) and server.get("port"):
+        return server
+
+    try:
         with _locked_state():
             data = _load()
     except OSError:
         return None
     server = data.get("ui_server")
-    return server if isinstance(server, dict) and server.get("port") else None
+    if not isinstance(server, dict) or not server.get("port"):
+        return None
+    try:
+        _write_ui_server(server)
+    except OSError:
+        pass
+    return server
 
 
-def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, notify: bool, overlay: bool) -> None:
+def record_watcher_heartbeat(
+    *,
+    pid: int,
+    mode: str,
+    interval_seconds: int,
+    notify: bool,
+    overlay: bool,
+    install_kind: str | None = None,
+    source_root: str | None = None,
+) -> None:
     """Record that `aiwatcher watch` is alive.
 
     This is intentionally just a heartbeat, not a daemon supervisor. The UI can
@@ -1393,7 +1448,7 @@ def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, noti
     try:
         with _locked_state():
             data = _load()
-            data["watcher_heartbeat"] = {
+            heartbeat = {
                 "pid": int(pid),
                 "mode": mode,
                 "interval_seconds": int(interval_seconds),
@@ -1401,6 +1456,11 @@ def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, noti
                 "overlay": bool(overlay),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+            if install_kind:
+                heartbeat["install_kind"] = str(install_kind)
+            if source_root:
+                heartbeat["source_root"] = str(source_root)
+            data["watcher_heartbeat"] = heartbeat
             _save(data)
     except OSError:
         pass
@@ -1474,6 +1534,8 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
         "mode": mode,
         "notify": bool(heartbeat.get("notify")),
         "overlay": bool(heartbeat.get("overlay")),
+        "install_kind": str(heartbeat.get("install_kind") or "") or None,
+        "source_root": str(heartbeat.get("source_root") or "") or None,
         "interval_seconds": interval_seconds or None,
         "freshness_seconds": freshness_seconds,
     }
@@ -2710,6 +2772,7 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "committed_at": str(receipt.get("committed_at") or "").strip()[:80] or None,
         "session_id": str(receipt.get("session_id") or "").strip()[:120] or None,
         "session_source": str(receipt.get("session_source") or "").strip()[:80] or None,
+        "session_tool": str(receipt.get("session_tool") or "").strip()[:80] or None,
         "source_id": str(receipt.get("source_id") or "").strip()[:160] or None,
         "receipt_available": bool(receipt.get("available")) if "available" in receipt else None,
         "cost_usd": _safe_float(receipt.get("cost_usd"), 0.0) if "cost_usd" in receipt else None,
@@ -2729,7 +2792,7 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         ), None)
         record = dict(existing or {})
         for key, value in incoming.items():
-            if key in {"session_id", "session_source", "source_id"} and existing and existing.get(key):
+            if key in {"session_id", "session_source", "session_tool", "source_id"} and existing and existing.get(key):
                 continue
             if value is not None:
                 record[key] = value
@@ -3068,6 +3131,8 @@ def _privacy_safe_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
                 "strength": item.get("strength"),
                 "provenance": item.get("provenance"),
                 "source_id": item.get("source_id"),
+                "session_source": _delivery_value(item.get("session_source"), 80),
+                "session_tool": _delivery_value(item.get("session_tool"), 80),
             }
             for item in contributions[:200] if isinstance(item, dict)
         ],
@@ -3104,7 +3169,10 @@ def record_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
             if isinstance(row, dict) and row.get("receipt_id") == receipt_id
         ), None)
         if existing:
-            for key in ("viewed_at", "superseded_by", "superseded_at", "approval"):
+            for key in (
+                "viewed_at", "superseded_by", "superseded_at", "approval",
+                "review_decision",
+            ):
                 if existing.get(key):
                     record[key] = existing[key]
         new_event = record.get("event") if isinstance(record.get("event"), dict) else {}
@@ -3171,19 +3239,62 @@ def mark_work_receipt_viewed(receipt_id: str) -> dict[str, Any] | None:
     return None
 
 
+def record_work_receipt_review_decision(
+    receipt_id: str,
+    *,
+    decision: str,
+    evidence_hash: str,
+    action_channel: str = "companion",
+) -> dict[str, Any] | None:
+    """Record the user's checkpoint decision without retaining prompt text."""
+    receipt_id = receipt_id.strip()[:160]
+    decision = decision.strip().lower()
+    evidence_hash = evidence_hash.strip().lower()
+    action_channel = action_channel.strip()[:80] or "companion"
+    if not receipt_id:
+        raise ValueError("receipt_id is required")
+    if decision not in {"confirmed", "declined"}:
+        raise ValueError("decision must be confirmed or declined")
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
+        raise ValueError("a valid evidence_hash is required")
+    now = datetime.now(timezone.utc).isoformat()
+    with _locked_state():
+        data = _load()
+        for row in reversed(data.get("work_receipts", [])):
+            if not isinstance(row, dict) or row.get("receipt_id") != receipt_id:
+                continue
+            if isinstance(row.get("review_decision"), dict):
+                return dict(row)
+            row["review_decision"] = {
+                "status": decision,
+                "evidence_hash": evidence_hash,
+                "decided_at": now,
+                "action_channel": action_channel,
+            }
+            if not row.get("viewed_at"):
+                row["viewed_at"] = now
+            _save(data)
+            return dict(row)
+    return None
+
+
 def approve_work_receipt(
     receipt_id: str, *, evidence_hash: str, objective_hash: str,
+    evidence_scope: str = "full",
 ) -> dict[str, Any] | None:
     """Record explicit approval without retaining objective or source text."""
     receipt_id = receipt_id.strip()[:160]
     evidence_hash = evidence_hash.strip().lower()
     objective_hash = objective_hash.strip().lower()
+    evidence_scope = evidence_scope.strip().lower()
     if not receipt_id:
         raise ValueError("receipt_id is required")
     if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
         raise ValueError("a valid evidence_hash is required")
     if not re.fullmatch(r"[0-9a-f]{64}", objective_hash):
         raise ValueError("a valid objective hash is required")
+    if evidence_scope not in {"full", "checkpoint"}:
+        raise ValueError("evidence_scope must be full or checkpoint")
     now = datetime.now(timezone.utc).isoformat()
     with _locked_state():
         data = _load()
@@ -3207,6 +3318,7 @@ def approve_work_receipt(
                 "status": "approved",
                 "evidence_hash": evidence_hash,
                 "objective_hash": objective_hash,
+                "evidence_scope": evidence_scope,
                 "approved_at": now,
             }
             _save(data)

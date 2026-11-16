@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import unittest
@@ -131,16 +132,57 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertIn("Scan Now", status["detail"])
 
     def test_existing_companion_is_reused(self) -> None:
-        with patch.object(
-            companion,
-            "get_watcher_status",
-            return_value={"running": True, "mode": "companion", "pid": 123},
-        ) as get_status:
+        identity = {"install_kind": "source", "source_root": "/repo"}
+        with (
+            patch.object(
+                companion,
+                "get_watcher_status",
+                return_value={"running": True, "mode": "companion", "pid": 123, **identity},
+            ) as get_status,
+            patch.object(companion, "install_identity", return_value=identity),
+        ):
             result = companion.start_companion(interval_seconds=3600)
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["already_running"])
         get_status.assert_called_once_with()
+
+    def test_companion_from_another_install_is_replaced(self) -> None:
+        process = Mock(pid=321)
+        process.poll.return_value = None
+        current_identity = {"install_kind": "source", "source_root": "/new-repo"}
+        old_status = {
+            "running": True,
+            "mode": "companion",
+            "pid": 123,
+            "install_kind": "source",
+            "source_root": "/old-repo",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {companion.LAUNCH_CWD_ENV: "/original/workspace"}),
+                patch.object(companion, "install_identity", return_value=current_identity),
+                patch.object(
+                    companion,
+                    "get_watcher_status",
+                    side_effect=[old_status, {"running": True, "mode": "companion", "pid": 321}],
+                ),
+                patch.object(companion, "stop_companion", return_value={"ok": True}) as stop,
+                patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
+                patch.object(companion.subprocess, "Popen", return_value=process) as popen,
+                patch.object(companion, "cleanup_orphan_companion_processes", return_value=[]),
+                patch.object(companion.time, "sleep"),
+            ):
+                result = companion.start_companion(interval_seconds=30)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["replaced_install"])
+        self.assertEqual(result["previous_pid"], 123)
+        stop.assert_called_once_with()
+        launch = popen.call_args.kwargs
+        self.assertEqual(launch["cwd"], str(Path(companion.__file__).resolve().parent.parent))
+        self.assertEqual(launch["env"][companion.LAUNCH_CWD_ENV], "/original/workspace")
+        self.assertTrue(launch["env"]["PYTHONPATH"].startswith(launch["cwd"]))
 
     def test_legacy_watch_must_stop_before_companion_starts(self) -> None:
         with patch.object(
@@ -388,14 +430,25 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         return {
             "receipt_id": "receipt-1",
             "event": {"status": status, "kind": "push"},
-            "snapshot": {"branch": "feature", "commit_shas": ["a" * 40, "b" * 40]},
+            "snapshot": {
+                "branch": "feature", "commit_shas": ["a" * 40, "b" * 40],
+                "changed_file_count": 4, "lines_added": 67, "lines_removed": 0,
+            },
+            "verifications": [{
+                "runner": "python -m unittest", "status": "passed",
+                "scope": "targeted", "exact_state": True,
+            }],
         }
 
     def test_confirmed_delivery_review_owns_an_advisory_companion_state(self):
         state = self._state(self._summary(), delivery_receipts=[self._delivery_receipt()])
         self.assertEqual(state["state"], "delivery_review_ready")
-        self.assertEqual(state["label"], "Delivery review ready")
+        self.assertEqual(state["label"], "Checkpoint ready")
         self.assertIn("2 commits", state["subtitle"])
+        self.assertEqual(state["primary_label"], "Review checkpoint")
+        self.assertEqual(state["primary_action"], "open_delivery_card")
+        self.assertEqual(state["checkpoint_preview"]["changed_file_count"], 4)
+        self.assertEqual(state["checkpoint_preview"]["check_count"], 1)
         self.assertIn("receipt-1", state["primary_url"])
         self.assertTrue(state["delivery_confirmed"])
         self.assertEqual(state["confidence"], "confirmed_delivery")

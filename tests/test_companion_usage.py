@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import json
+import os
+import tempfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -71,7 +73,32 @@ class CompanionUsageTests(unittest.TestCase):
         selected = ui.build_companion_usage("session-0")["selected"]
         self.assertFalse(selected["context"]["available"])
         self.assertNotIn("pct_of_turn_limit", selected["context"])
+        self.assertEqual(selected["context"]["latest_turn_tokens"], 966_000)
+        self.assertEqual(selected["context_label"], "966.0k latest-turn input")
+        self.assertIn("No percentage is shown", selected["context_note"])
         self.assertEqual(selected["input_tokens"], 3_000_000)
+
+    def test_codex_usage_reads_a_bounded_tail_instead_of_folding_the_rollout(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as handle:
+            path = handle.name
+            handle.write(json.dumps({
+                "type": "turn_context", "payload": {"model": "gpt-test"},
+            }) + "\n")
+            handle.write(json.dumps({
+                "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {
+                        "last_token_usage": {"input_tokens": 123_456},
+                    },
+                },
+            }) + "\n")
+        self.addCleanup(lambda: os.unlink(path))
+        self.sessions[0].tool = "codex-cli"
+        self.sessions[0].model = "gpt-test"
+        self.sessions[0].source_path = path
+        with patch.object(ui.compaction, "codex_boundary_stats", side_effect=AssertionError("full fold")):
+            selected = ui.build_companion_usage("session-0")["selected"]
+        self.assertEqual(selected["context"]["latest_turn_tokens"], 123_456)
+        self.assertEqual(selected["context_label"], "123.5k latest-turn input")
 
     def test_cumulative_source_does_not_become_context(self):
         self.stack.enter_context(patch.object(ui, "has_cumulative_totals", return_value=True))
