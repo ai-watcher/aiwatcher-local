@@ -1739,8 +1739,8 @@ function renderUpdateStatus(update) {
       : '';
   const action = data.can_apply
     ? data.install_kind === 'source'
-      ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
-      : `<p>Apply will run <code>${esc(data.command_text || 'the package upgrade command')}</code> and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>`
+      ? '<p>Apply will fast-forward this clean checkout, then restart the dashboard and Companion together.</p>'
+      : `<p>Apply will run <code>${esc(data.command_text || 'the package upgrade command')}</code>, then restart the dashboard and Companion together.</p>`
     : data.on_branch === false
       ? `<p>Updates apply on <code>${esc(data.branch || 'main')}</code>. Check it out to apply from here; your branch is left alone.</p>`
       : data.update_available
@@ -1813,7 +1813,7 @@ async function applyUpdates(button, options = {}) {
       button.textContent = original || 'Apply update';
     }
     if (data.restart_requested) {
-      window.setTimeout(() => window.location.reload(), 2500);
+      waitForDashboardRestart(data.previous_dashboard_pid);
     }
     return data;
   } catch (error) {
@@ -1826,6 +1826,25 @@ async function applyUpdates(button, options = {}) {
   } finally {
     if (button) button.disabled = false;
   }
+}
+async function waitForDashboardRestart(previousPid) {
+  const prior = Number(previousPid || 0);
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise(resolve => window.setTimeout(resolve, 500));
+    try {
+      const response = await fetch('/api/health', { cache: 'no-store' });
+      if (!response.ok) continue;
+      const health = await response.json();
+      if (health.service === 'aiwatcher-local' && (!prior || Number(health.pid || 0) !== prior)) {
+        window.location.reload();
+        return true;
+      }
+    } catch (error) {
+      // The brief connection gap is expected while the replacement binds.
+    }
+  }
+  showToast('AIWatcher is still restarting. Refresh this page in a moment.', 'error');
+  return false;
 }
 function openUpdatePanel(data) {
   const target = document.getElementById('updateStatus');
@@ -5252,7 +5271,7 @@ function deliveryReviewCard(review) {
   const objectiveClaim = review.objective || {};
   const objectiveText = objectiveClaim.text || review.objective_label || 'Objective unavailable';
   const objective = objectiveClaim.provenance === 'inferred'
-    ? `${objectiveText} (inferred from linked session; confirm before sharing)`
+    ? `${objectiveText} (${objectiveClaim.inference_basis === 'commit_subject' ? 'drafted from commit subject' : 'inferred from linked session'}; confirm before sharing)`
     : objectiveText;
   const objectiveAvailable = Boolean(objectiveClaim.text);
   const approved = review.approval_valid === true;

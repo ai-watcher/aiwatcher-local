@@ -491,7 +491,11 @@ def format_work_receipt(receipt: WorkReceipt | dict[str, Any]) -> str:
     lines = ["AIWatcher Delivery Review", ""]
     objective_text = str(objective.get("text") or "Unknown; confirm before sharing.")
     if objective.get("provenance") == "inferred" and objective.get("text"):
-        objective_text += "\nInferred from a linked session; confirm before sharing."
+        objective_text += (
+            "\nDrafted from an observed commit subject; edit and confirm before sharing."
+            if objective.get("inference_basis") == "commit_subject"
+            else "\nInferred from a linked session; confirm before sharing."
+        )
     lines.extend(("Objective", objective_text, ""))
     if understanding:
         lines.append("Intent and evidence")

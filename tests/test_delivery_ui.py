@@ -155,6 +155,26 @@ class DeliveryReviewApiTests(unittest.TestCase):
         self.assertEqual(review["objective"]["provenance"], "inferred")
         self.assertFalse(review["approval_valid"])
 
+    def test_missing_linked_session_uses_editable_commit_subject_goal(self) -> None:
+        (self.repo / "review.py").write_text("ready = True\n", encoding="utf-8")
+        git(self.repo, "add", "review.py")
+        git(self.repo, "commit", "-m", "Add editable delivery goal inference")
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="push", event_status="confirmed",
+            event_source="test", event_source_id="commit-goal", remote="origin",
+            remote_ref="feature", sessions=[],
+        )
+
+        review = ui.build_delivery_reviews(
+            limit=1, receipt_id=receipt.receipt_id,
+        )["reviews"][0]
+
+        self.assertEqual(review["objective"]["text"], "Add editable delivery goal inference")
+        self.assertEqual(review["objective"]["provenance"], "inferred")
+        self.assertEqual(review["objective"]["inference_basis"], "commit_subject")
+        self.assertIn("editable", review["objective_label"].lower())
+        self.assertIn("Drafted from an observed commit subject", review["summary_text"])
+
     def test_strict_session_lookup_rejects_wrong_tool_and_codex_transcript(self) -> None:
         session_id = "01a0bf4c-1134-7903-b1a0-df6bf9b30bb5"
         wrong_tool = LocalSession(
