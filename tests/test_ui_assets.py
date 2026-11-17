@@ -139,6 +139,8 @@ class WebAssetsTest(unittest.TestCase):
         allowed = {
             "https://www.getaiwatcher.com",   # marketing link, user-initiated
             "https://github.com/ai-watcher/aiwatcher-local",  # Star link, user-initiated
+            "https://github.com/ai-watcher/aiwatcher-local/blob/main/README.md",  # user guide
+            "https://github.com/ai-watcher/aiwatcher-local/issues",  # support link
             "http://www.w3.org/2000/svg",     # XML namespace, never fetched
         }
         found = set(re.findall(r'https?://[^\s"\'`<>)]+', ui.HTML))
@@ -1971,10 +1973,16 @@ class BrandMarkTest(unittest.TestCase):
 
     def test_footer_links_to_the_open_source_repository(self):
         self.assertIn('class="product-footer"', self.html)
+        self.assertIn('class="product-footer-actions" aria-label="AIWatcher project links"', self.html)
+        self.assertIn('Help AIWatcher Local grow', self.html)
+        self.assertIn('Star AIWatcher on GitHub', self.html)
+        self.assertIn('href="https://github.com/ai-watcher/aiwatcher-local/blob/main/README.md"', self.html)
+        self.assertIn('href="https://github.com/ai-watcher/aiwatcher-local/issues"', self.html)
         self.assertIn('class="github-star-link"', self.html)
         self.assertIn('href="https://github.com/ai-watcher/aiwatcher-local"', self.html)
         self.assertIn('aria-label="Star AIWatcher Local on GitHub"', self.html)
         self.assertIn(".github-star-link {", self.css)
+        self.assertIn(".product-footer-actions {", self.css)
 
     def test_the_resting_favicon_is_the_brand_blue(self):
         # idle used to be a grey dot. At rest the mark is simply the mark.

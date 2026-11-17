@@ -325,21 +325,50 @@
     .product-footer {
       grid-column: 1 / -1;
       display: flex;
-      justify-content: center;
-      padding-top: var(--sp-2);
-      border-top: 1px solid var(--line);
-    }
-    .github-star-link {
-      display: inline-flex;
       align-items: center;
-      gap: var(--sp-2);
-      color: var(--muted);
+      justify-content: space-between;
+      gap: var(--sp-5);
+      margin-top: var(--sp-2);
+      padding: 20px 22px;
+      border: 1px solid var(--line-strong);
+      border-left: 4px solid var(--brand-blue);
+      border-radius: var(--r-2);
+      background: var(--surface-raised);
+      box-shadow: 0 10px 28px rgba(var(--shadow-rgb), .12);
+    }
+    .product-footer-copy { display: grid; gap: var(--sp-1); max-width: 620px; }
+    .product-footer-copy strong { color: var(--text-bright); font-size: var(--fs-4); }
+    .product-footer-copy p { font-size: var(--fs-2); }
+    .product-footer-kicker { color: var(--blue); font-size: var(--fs-2); font-weight: var(--fw-bold); }
+    .product-footer-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-4); }
+    .product-footer-link {
+      color: var(--text-quiet);
       font-size: var(--fs-2);
       font-weight: var(--fw-med);
       text-decoration: none;
+      white-space: nowrap;
     }
-    .github-star-link:hover, .github-star-link:focus-visible { color: var(--text); }
-    .github-star-link svg { width: 16px; height: 16px; flex: 0 0 auto; }
+    .product-footer-link:hover, .product-footer-link:focus-visible { color: var(--text); text-decoration: underline; }
+    .github-star-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--sp-2);
+      min-height: 42px;
+      padding: 0 var(--sp-4);
+      border: 1px solid var(--btn-line);
+      border-radius: var(--r-2);
+      background: var(--btn-bg);
+      color: var(--on-accent);
+      font-size: var(--fs-3);
+      font-weight: var(--fw-bold);
+      text-decoration: none;
+      white-space: nowrap;
+      box-shadow: 0 8px 20px rgba(var(--blue-mid-rgb), .22);
+    }
+    .github-star-link:hover { background: var(--btn-bg-hover); border-color: var(--btn-line-hover); }
+    .github-star-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+    .github-star-link svg { width: 18px; height: 18px; flex: 0 0 auto; }
     /* The nav was already sticky; the header was not, so the date range and
        Refresh data scrolled out of reach on long views -- worst on the Changes
        ledger, where getting back to the picker meant scrolling to the top. The
@@ -2399,6 +2428,8 @@
     @media (max-width: 860px) {
       main { display: block; padding: 18px; }
       header { flex-direction: column; }
+      .product-footer { align-items: flex-start; flex-direction: column; margin-top: 18px; }
+      .product-footer-actions { width: 100%; justify-content: flex-start; }
       .product-nav { position: static; display: flex; width: 100%; max-width: 100%; overflow-x: auto; margin: 0 0 18px; }
       .nav-tab { white-space: nowrap; }
       .actions { width: 100%; }
@@ -2422,6 +2453,9 @@
     @media (max-width: 560px) {
       main { padding: 14px 12px 36px; }
       .brand-copy p, .link-button { display: none; }
+      .product-footer { padding: var(--sp-4); }
+      .product-footer-actions { align-items: stretch; flex-wrap: wrap; gap: var(--sp-3) var(--sp-4); }
+      .github-star-link { flex: 1 0 100%; width: 100%; }
       .kpis { grid-template-columns: 1fr; }
       .metric-card { min-height: 104px; }
       .mini-grid, .runtime-review-grid, .session-hero-grid, .outcome-options, .privacy-grid { grid-template-columns: 1fr; }
