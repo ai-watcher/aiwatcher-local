@@ -757,6 +757,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var activityTone = ""
     var deliveryConfirmed = false
     var deliveryReceiptID = ""
+    var deliveryCheckpointPreview: [String: Any] = [:]
     var detailText = ""
     var pressureAvailable = false
     var pressurePct = 0
@@ -803,11 +804,16 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var checkpointStatus: NSTextField!
     var checkpointConfirmButton: NSButton!
     var checkpointDeclineButton: NSButton!
+    var checkpointRetryButton: NSButton!
     var checkpointEvidenceHash = ""
+    var checkpointReceiptID = ""
+    var checkpointDetailsURL = ""
+    var checkpointReviewCache: [String: [String: Any]] = [:]
     var checkpointRequest = 0
     var checkpointIdleToken = 0
     var checkpointActivityMonitor: Any?
-    let checkpointIdleSeconds: Double = 30.0
+    var outsideClickMonitor: Any?
+    let checkpointIdleSeconds: Double = 15.0
 
     // 46 characters of 9pt subtitle measure ~210pt ("claude-code ·
     // aiwatcher-local · waited 12m 30s" is 208), and at 560 the subtitle
@@ -1365,6 +1371,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
         setCollapsed(true)
         window.orderFrontRegardless()
+        startOutsideClickMonitoring()
         updateAppearance()
         schedulePulse()
         scheduleExpression()
@@ -1442,6 +1449,26 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func startOutsideClickMonitoring() {
+        if outsideClickMonitor != nil { return }
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, !self.collapsed else { return }
+                let pointer = NSEvent.mouseLocation
+                let insideAIWatcher = NSApp.windows.contains {
+                    $0.isVisible && $0.frame.contains(pointer)
+                }
+                guard !insideAIWatcher else { return }
+                self.usagePopover?.performClose(nil)
+                self.checkpointPopover?.performClose(nil)
+                self.stopCheckpointIdleMonitoring()
+                self.setCollapsed(true)
+            }
+        }
+    }
+
     func resetCheckpointIdleTimer() {
         checkpointIdleToken += 1
         let token = checkpointIdleToken
@@ -1489,7 +1516,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         intro.stringValue = "Confirm what was delivered without leaving your AI tool. Details remain local."
         checkpointSection(content.view, title: "Goal", y: 504)
         checkpointGoal = NSTextField(frame: NSRect(x: 20, y: 468, width: 460, height: 28))
-        checkpointGoal.placeholderString = "Goal unavailable - enter it to confirm"
+        checkpointGoal.placeholderString = "Loading an editable goal draft..."
         checkpointGoal.font = NSFont.systemFont(ofSize: 12)
         content.view.addSubview(checkpointGoal)
         checkpointSection(content.view, title: "Changed", y: 440)
@@ -1511,6 +1538,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         checkpointDeclineButton.frame = NSRect(x: 130, y: 24, width: 100, height: 30)
         checkpointDeclineButton.bezelStyle = .rounded
         content.view.addSubview(checkpointDeclineButton)
+        checkpointRetryButton = NSButton(title: "Retry", target: self, action: #selector(loadCheckpointCard))
+        checkpointRetryButton.frame = NSRect(x: 236, y: 24, width: 84, height: 30)
+        checkpointRetryButton.bezelStyle = .rounded
+        checkpointRetryButton.isHidden = true
+        content.view.addSubview(checkpointRetryButton)
         let details = NSButton(title: "More details", target: self, action: #selector(openCheckpointDetails))
         details.frame = NSRect(x: 348, y: 24, width: 136, height: 30)
         details.bezelStyle = .rounded
@@ -1519,90 +1551,164 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentViewController = content
         checkpointPopover = popover
+        checkpointReceiptID = deliveryReceiptID
+        checkpointDetailsURL = primaryURL
         popover.show(relativeTo: primaryButton.bounds, of: primaryButton, preferredEdge: .minY)
         startCheckpointIdleMonitoring()
+        applyCheckpointPreview(deliveryCheckpointPreview)
+        if let cached = checkpointReviewCache[checkpointReceiptID] {
+            renderCheckpointReview(cached, cached: true)
+        }
         loadCheckpointCard()
     }
 
-    func loadCheckpointCard() {
-        checkpointRequest += 1
-        let requestID = checkpointRequest
+    func applyCheckpointPreview(_ preview: [String: Any]) {
         checkpointEvidenceHash = ""
-        checkpointGoal.stringValue = ""
-        checkpointChanged.stringValue = "Loading delivered changes..."
-        checkpointChecks.stringValue = ""
-        checkpointStats.stringValue = ""
-        checkpointUncertain.stringValue = ""
-        checkpointStatus.stringValue = "Reading exact local evidence..."
         checkpointConfirmButton.isEnabled = false
         checkpointDeclineButton.isEnabled = false
-        let encodedReceiptID = deliveryReceiptID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if preview.isEmpty {
+            checkpointChanged.stringValue = "Loading the local checkpoint summary..."
+            checkpointChecks.stringValue = ""
+            checkpointStats.stringValue = ""
+            checkpointUncertain.stringValue = ""
+            checkpointStatus.stringValue = "Reading local delivery evidence..."
+            return
+        }
+        let commitCount = preview["commit_count"] as? Int ?? 0
+        let fileCount = preview["changed_file_count"] as? Int ?? 0
+        let added = preview["lines_added"] as? Int ?? 0
+        let removed = preview["lines_removed"] as? Int ?? 0
+        checkpointChanged.stringValue = "\(commitCount) commit\(commitCount == 1 ? "" : "s") · \(fileCount) files · +\(added)/-\(removed)"
+        let checks = preview["checks"] as? [[String: Any]] ?? []
+        checkpointChecks.stringValue = checks.isEmpty
+            ? "No exact-state check is recorded in the cached receipt."
+            : checkpointLines(checks.map {
+                "\($0["runner"] as? String ?? "Check"): \($0["status"] as? String ?? "unknown") (\($0["scope"] as? String ?? "unknown"))"
+            })
+        let workflow = preview["workflow"] as? [String: Any] ?? [:]
+        checkpointStats.stringValue = (workflow["session_count"] as? Int ?? 0) > 0
+            ? "\(workflow["user_turns"] as? Int ?? 0) turns · \(workflow["model_calls"] as? Int ?? 0) model calls · \(workflow["tool_calls"] as? Int ?? 0) tool calls"
+            : "Session activity is not linked in the cached receipt."
+        let attention = preview["attention"] as? [String] ?? []
+        checkpointUncertain.stringValue = attention.isEmpty
+            ? "No unresolved gap is recorded in the cached receipt."
+            : checkpointLines(attention)
+        let previewGoal = preview["goal"] as? String ?? ""
+        if checkpointGoal.stringValue.isEmpty && !previewGoal.isEmpty {
+            checkpointGoal.stringValue = previewGoal
+        }
+        checkpointStatus.stringValue = "Cached local facts are ready. Refreshing editable goal and commit details..."
+    }
+
+    func renderCheckpointReview(_ review: [String: Any], cached: Bool) {
+        let snapshot = review["snapshot"] as? [String: Any] ?? [:]
+        let objective = review["objective"] as? [String: Any] ?? [:]
+        let understanding = review["work_understanding"] as? [String: Any] ?? [:]
+        let commits = understanding["commits"] as? [[String: Any]] ?? []
+        let subjects = commits.compactMap { row -> String? in
+            let value = row["subject"] as? String ?? ""
+            return value.isEmpty ? nil : value
+        }
+        if subjects.isEmpty {
+            let commitCount = (snapshot["commit_shas"] as? [String] ?? []).count
+            let fileCount = snapshot["changed_file_count"] as? Int ?? 0
+            let added = snapshot["lines_added"] as? Int ?? 0
+            let removed = snapshot["lines_removed"] as? Int ?? 0
+            checkpointChanged.stringValue = "\(commitCount) commit\(commitCount == 1 ? "" : "s") · \(fileCount) files · +\(added)/-\(removed)"
+        } else {
+            checkpointChanged.stringValue = checkpointLines(subjects)
+        }
+        let checks = (review["verifications"] as? [[String: Any]] ?? []).filter {
+            ($0["exact_state"] as? Bool ?? false)
+        }
+        checkpointChecks.stringValue = checks.isEmpty
+            ? "No check is bound to this exact Git state."
+            : checkpointLines(checks.map {
+                "\($0["runner"] as? String ?? "Check"): \($0["status"] as? String ?? "unknown") (\($0["scope"] as? String ?? "unknown"))"
+            })
+        let workflow = review["workflow"] as? [String: Any] ?? [:]
+        checkpointStats.stringValue = (workflow["session_count"] as? Int ?? 0) > 0
+            ? "\(workflow["user_turns"] as? Int ?? 0) turns · \(workflow["model_calls"] as? Int ?? 0) model calls · \(workflow["tool_calls"] as? Int ?? 0) tool calls"
+            : "Session activity unavailable for this checkpoint."
+        let attention = review["attention"] as? [String] ?? []
+        checkpointUncertain.stringValue = attention.isEmpty
+            ? "No unresolved evidence gaps were recorded."
+            : checkpointLines(attention)
+        checkpointGoal.stringValue = objective["text"] as? String ?? ""
+        let objectiveProvenance = objective["provenance"] as? String ?? "unavailable"
+        checkpointEvidenceHash = cached ? "" : (review["evidence_hash"] as? String ?? "")
+        checkpointConfirmButton.isEnabled = !checkpointEvidenceHash.isEmpty
+        checkpointDeclineButton.isEnabled = !checkpointEvidenceHash.isEmpty
+        checkpointRetryButton.isHidden = true
+        if cached {
+            checkpointStatus.stringValue = "Showing cached local details while exact evidence refreshes..."
+        } else if checkpointGoal.stringValue.isEmpty {
+            checkpointStatus.stringValue = "Goal could not be inferred. Enter it to confirm; Decline keeps the evidence."
+        } else if objectiveProvenance == "inferred" {
+            let basis = objective["inference_basis"] as? String ?? "linked_session"
+            checkpointStatus.stringValue = basis == "commit_subject"
+                ? "Goal draft inferred from a commit subject. Edit if needed, then confirm."
+                : "Goal inferred from the linked session. Edit if needed, then confirm."
+        } else {
+            checkpointStatus.stringValue = "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
+        }
+    }
+
+    func showCheckpointLoadFailure(_ reason: String) {
+        checkpointEvidenceHash = ""
+        checkpointConfirmButton.isEnabled = false
+        checkpointDeclineButton.isEnabled = false
+        checkpointRetryButton.isHidden = false
+        if checkpointChanged.stringValue.isEmpty {
+            checkpointChanged.stringValue = "The local checkpoint summary could not be read."
+        }
+        checkpointStatus.stringValue = "\(reason) Cached facts remain visible. Retry or open More details."
+    }
+
+    @objc func loadCheckpointCard() {
+        checkpointRequest += 1
+        let requestID = checkpointRequest
+        let receiptID = checkpointReceiptID
+        checkpointEvidenceHash = ""
+        checkpointConfirmButton.isEnabled = false
+        checkpointDeclineButton.isEnabled = false
+        checkpointRetryButton.isHidden = true
+        checkpointStatus.stringValue = "Refreshing exact local evidence..."
+        guard !receiptID.isEmpty else {
+            showCheckpointLoadFailure("This checkpoint no longer has a receipt ID.")
+            return
+        }
+        let encodedReceiptID = receiptID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let endpoint = URL(
             string: dashboardBaseURL + "/api/delivery-reviews?limit=1&receipt_id=" + encodedReceiptID
-        ) else { return }
+        ) else {
+            showCheckpointLoadFailure("The local review address is invalid.")
+            return
+        }
         var request = URLRequest(url: endpoint)
-        request.timeoutInterval = 8
-        URLSession.shared.dataTask(with: request) { data, response, _ in
+        request.timeoutInterval = 3
+        URLSession.shared.dataTask(with: request) { data, response, error in
             var payload: [String: Any]? = nil
             if let data = data { payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
             DispatchQueue.main.async {
                 guard self.checkpointRequest == requestID, self.checkpointPopover?.isShown == true else { return }
-                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                let status = (response as? HTTPURLResponse)?.statusCode
+                guard error == nil, status == 200,
                       let rows = payload?["reviews"] as? [[String: Any]],
-                      let review = rows.first(where: { ($0["receipt_id"] as? String) == self.deliveryReceiptID }) else {
-                    self.checkpointChanged.stringValue = "Checkpoint evidence is unavailable."
-                    self.checkpointStatus.stringValue = "Open More details to refresh the delivery review."
+                      let review = rows.first(where: { ($0["receipt_id"] as? String) == receiptID }) else {
+                    let reason: String
+                    if (error as? URLError)?.code == .timedOut {
+                        reason = "Detailed evidence took longer than 3 seconds."
+                    } else if let status = status {
+                        reason = "The local dashboard returned HTTP \(status)."
+                    } else {
+                        reason = "The local dashboard did not return this receipt."
+                    }
+                    self.showCheckpointLoadFailure(reason)
                     return
                 }
-                let snapshot = review["snapshot"] as? [String: Any] ?? [:]
-                let objective = review["objective"] as? [String: Any] ?? [:]
-                let understanding = review["work_understanding"] as? [String: Any] ?? [:]
-                let commits = understanding["commits"] as? [[String: Any]] ?? []
-                let subjects = commits.compactMap { row -> String? in
-                    let value = row["subject"] as? String ?? ""
-                    return value.isEmpty ? nil : value
-                }
-                if subjects.isEmpty {
-                    let commitCount = (snapshot["commit_shas"] as? [String] ?? []).count
-                    let fileCount = snapshot["changed_file_count"] as? Int ?? 0
-                    let added = snapshot["lines_added"] as? Int ?? 0
-                    let removed = snapshot["lines_removed"] as? Int ?? 0
-                    self.checkpointChanged.stringValue = "\(commitCount) commit\(commitCount == 1 ? "" : "s") · \(fileCount) files · +\(added)/-\(removed)"
-                } else {
-                    self.checkpointChanged.stringValue = self.checkpointLines(subjects)
-                }
-                let checks = (review["verifications"] as? [[String: Any]] ?? []).filter {
-                    ($0["exact_state"] as? Bool ?? false)
-                }
-                self.checkpointChecks.stringValue = checks.isEmpty
-                    ? "No check is bound to this exact Git state."
-                    : self.checkpointLines(checks.map {
-                        "\($0["runner"] as? String ?? "Check"): \($0["status"] as? String ?? "unknown") (\($0["scope"] as? String ?? "unknown"))"
-                    })
-                let workflow = review["workflow"] as? [String: Any] ?? [:]
-                let sessions = workflow["session_count"] as? Int ?? 0
-                self.checkpointStats.stringValue = sessions > 0
-                    ? "\(workflow["user_turns"] as? Int ?? 0) turns · \(workflow["model_calls"] as? Int ?? 0) model calls · \(workflow["tool_calls"] as? Int ?? 0) tool calls"
-                    : "Session activity unavailable for this checkpoint."
-                let attention = review["attention"] as? [String] ?? []
-                self.checkpointUncertain.stringValue = attention.isEmpty
-                    ? "No unresolved evidence gaps were recorded."
-                    : self.checkpointLines(attention)
-                self.checkpointGoal.stringValue = objective["text"] as? String ?? ""
-                let objectiveProvenance = objective["provenance"] as? String ?? "unavailable"
-                self.checkpointEvidenceHash = review["evidence_hash"] as? String ?? ""
-                self.checkpointConfirmButton.isEnabled = !self.checkpointEvidenceHash.isEmpty
-                self.checkpointDeclineButton.isEnabled = !self.checkpointEvidenceHash.isEmpty
-                if self.checkpointGoal.stringValue.isEmpty {
-                    self.checkpointStatus.stringValue = "Goal could not be inferred. Enter it to confirm; Decline keeps the evidence."
-                } else if objectiveProvenance == "inferred" {
-                    let basis = objective["inference_basis"] as? String ?? "linked_session"
-                    self.checkpointStatus.stringValue = basis == "commit_subject"
-                        ? "Goal draft inferred from a commit subject. Edit if needed, then confirm."
-                        : "Goal inferred from the linked session. Edit if needed, then confirm."
-                } else {
-                    self.checkpointStatus.stringValue = "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
-                }
+                self.checkpointReviewCache[receiptID] = review
+                self.renderCheckpointReview(review, cached: false)
             }
         }.resume()
     }
@@ -1618,7 +1724,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     @objc func openCheckpointDetails() {
         checkpointPopover?.performClose(nil)
         stopCheckpointIdleMonitoring()
-        openURL(primaryURL)
+        openURL(checkpointDetailsURL.isEmpty ? primaryURL : checkpointDetailsURL)
     }
 
     func submitCheckpointDecision(_ decision: String) {
@@ -1627,7 +1733,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             checkpointStatus.stringValue = "Enter the intended goal before confirming."
             return
         }
-        guard !deliveryReceiptID.isEmpty, !checkpointEvidenceHash.isEmpty,
+        guard !checkpointReceiptID.isEmpty, !checkpointEvidenceHash.isEmpty,
               let endpoint = URL(string: dashboardBaseURL + "/api/companion-delivery-decision") else {
             checkpointStatus.stringValue = "Checkpoint evidence changed. Refresh the card."
             return
@@ -1637,7 +1743,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "receipt_id": deliveryReceiptID,
+            "receipt_id": checkpointReceiptID,
             "evidence_hash": checkpointEvidenceHash,
             "objective": objective,
             "decision": decision,
@@ -2272,7 +2378,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     @objc func toggleCollapsed() {
         setCollapsed(!collapsed)
         if !collapsed {
-            scheduleAutoCollapse(after: 10.0)
+            scheduleAutoCollapse(after: 6.0)
         }
     }
 
@@ -2795,7 +2901,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.probeFailures = 0
                 self.lastProbeOK = Date()
                 self.applyState(json)
-                self.scheduleAutoCollapse(after: self.hasPrimaryAction() ? 10.0 : 4.0)
+                self.scheduleAutoCollapse(after: self.hasPrimaryAction() ? 6.0 : 3.0)
                 self.scheduleRefresh(after: self.hasPrimaryAction() ? 2.0 : 3.0)
             }
         }.resume()
@@ -2905,6 +3011,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.activityTone = json["tone"] as? String ?? ""
         self.deliveryConfirmed = json["delivery_confirmed"] as? Bool ?? false
         self.deliveryReceiptID = json["delivery_receipt_id"] as? String ?? ""
+        self.deliveryCheckpointPreview = json["checkpoint_preview"] as? [String: Any] ?? [:]
         let presence = json["presence"] as? [String: Any]
         self.workingCount = presence?["working"] as? Int ?? 0
         let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
@@ -4037,6 +4144,7 @@ def run_native_presence(
     activity_tone_var = tk.StringVar(value="")
     delivery_confirmed_var = tk.BooleanVar(value=False)
     delivery_receipt_id_var = tk.StringVar(value="")
+    delivery_checkpoint_preview: dict[str, object] = {}
     orbit_angle_var = tk.IntVar(value=0)
     # The running arc's canvas id, so its angle can be nudged on its own frame
     # clock without re-running update_attention_style's full redraw. Cleared
@@ -4362,6 +4470,9 @@ def run_native_presence(
         activity_tone_var.set(str(payload.get("tone") or ""))
         delivery_confirmed_var.set(bool(payload.get("delivery_confirmed")))
         delivery_receipt_id_var.set(str(payload.get("delivery_receipt_id") or ""))
+        delivery_checkpoint_preview.clear()
+        if isinstance(payload.get("checkpoint_preview"), dict):
+            delivery_checkpoint_preview.update(payload["checkpoint_preview"])
         presence = payload.get("presence")
         try:
             presence_waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
@@ -4866,7 +4977,7 @@ def run_native_presence(
     def toggle_collapsed() -> None:
         set_collapsed(not collapsed.get())
         if not collapsed.get():
-            schedule_auto_collapse(10000)
+            schedule_auto_collapse(6000)
 
     def has_primary_action() -> bool:
         # session_finished earns the primary (Review) and the compact layout;
@@ -5465,7 +5576,7 @@ def run_native_presence(
                     else:
                         apply_connecting_state()
                 update_attention_style()
-                schedule_auto_collapse(10000 if has_primary_action() else 4000)
+                schedule_auto_collapse(6000 if has_primary_action() else 3000)
             except tk.TclError:
                 pass
             try:
@@ -5482,10 +5593,12 @@ def run_native_presence(
         "window": None,
         "request": 0,
         "evidence_hash": "",
+        "receipt_id": "",
+        "cache": {},
         "idle_token": 0,
         "reset_idle": None,
     }
-    checkpoint_idle_ms = 30000
+    checkpoint_idle_ms = 15000
 
     def open_checkpoint_card() -> None:
         existing = checkpoint_state["window"]
@@ -5500,6 +5613,9 @@ def run_native_presence(
         panel.geometry("560x620")
         panel.attributes("-topmost", True)
         checkpoint_state["window"] = panel
+        receipt_id = delivery_receipt_id_var.get().strip()
+        details_url = primary_url_var.get() or url
+        checkpoint_state["receipt_id"] = receipt_id
         auto_collapse_token.set(auto_collapse_token.get() + 1)
         auto_collapse_deadline.set(0.0)
 
@@ -5577,7 +5693,6 @@ def run_native_presence(
                 goal_entry.focus_set()
                 return
             evidence_hash = str(checkpoint_state.get("evidence_hash") or "")
-            receipt_id = delivery_receipt_id_var.get().strip()
             if not evidence_hash or not receipt_id:
                 status_var.set("Checkpoint evidence changed. Refresh the card.")
                 return
@@ -5637,69 +5752,71 @@ def run_native_presence(
         decline_button.pack(side="left", padx=(8, 0))
 
         def open_details() -> None:
-            webbrowser.open(primary_url_var.get() or url)
+            webbrowser.open(details_url)
             close_checkpoint()
 
         ttk.Button(footer, text="More details", command=open_details).pack(side="right")
+        checkpoint_font = tkfont.nametofont("TkDefaultFont")
 
-        checkpoint_state["request"] = int(checkpoint_state["request"]) + 1
-        request_id = checkpoint_state["request"]
-        confirm_button.state(["disabled"])
-        decline_button.state(["disabled"])
-        result: dict[str, object] = {}
+        def compact_line(value: str, *, max_pixels: int = 480) -> str:
+            prefix = "• "
+            if checkpoint_font.measure(prefix + value) <= max_pixels:
+                return prefix + value
+            low, high = 0, len(value)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = prefix + value[:middle] + "…"
+                if checkpoint_font.measure(candidate) <= max_pixels:
+                    low = middle
+                else:
+                    high = middle - 1
+            return prefix + value[:low] + "…"
 
-        def fetch() -> None:
-            try:
-                receipt_id = urllib.parse.quote(delivery_receipt_id_var.get().strip(), safe="")
-                endpoint = f"{url.rstrip('/')}/api/delivery-reviews?limit=1&receipt_id={receipt_id}"
-                with urllib.request.urlopen(endpoint, timeout=8) as response:
-                    result["payload"] = json.loads(response.read().decode("utf-8"))
-            except (OSError, ValueError):
-                result["error"] = True
-            finally:
-                result["done"] = True
+        def compact_lines(values: list[str], *, limit: int = 2) -> str:
+            lines = [compact_line(value) for value in values[:limit]]
+            if len(values) > limit:
+                lines.append(f"• +{len(values) - limit} more in details")
+            return "\n".join(lines)
 
-        def settle_card() -> None:
-            if not panel.winfo_exists() or request_id != checkpoint_state["request"]:
+        def apply_preview(preview: dict[str, object]) -> None:
+            checkpoint_state["evidence_hash"] = ""
+            confirm_button.state(["disabled"])
+            decline_button.state(["disabled"])
+            if not preview:
+                changed_var.set("Loading the local checkpoint summary...")
+                status_var.set("Reading local delivery evidence...")
                 return
-            if not result.get("done"):
-                root.after(60, settle_card)
-                return
-            payload = result.get("payload")
-            rows = payload.get("reviews") if isinstance(payload, dict) else []
-            review = next((
-                row for row in rows
-                if isinstance(row, dict) and row.get("receipt_id") == delivery_receipt_id_var.get()
-            ), None) if isinstance(rows, list) else None
-            if not isinstance(review, dict):
-                changed_var.set("Checkpoint evidence is unavailable.")
-                status_var.set("Open More details to refresh the delivery review.")
-                return
+            commit_count = int(preview.get("commit_count") or 0)
+            changed_var.set(
+                f"{commit_count} commit{'s' if commit_count != 1 else ''} · "
+                f"{int(preview.get('changed_file_count') or 0)} files · "
+                f"+{int(preview.get('lines_added') or 0)}/-{int(preview.get('lines_removed') or 0)}"
+            )
+            checks = preview.get("checks") if isinstance(preview.get("checks"), list) else []
+            checks_var.set(
+                compact_lines([
+                    f"{row.get('runner') or 'Check'}: {row.get('status') or 'unknown'} ({row.get('scope') or 'unknown'})"
+                    for row in checks if isinstance(row, dict)
+                ]) if checks else "No exact-state check is recorded in the cached receipt."
+            )
+            workflow = preview.get("workflow") if isinstance(preview.get("workflow"), dict) else {}
+            stats_var.set(
+                f"{int(workflow.get('user_turns') or 0)} turns · "
+                f"{int(workflow.get('model_calls') or 0)} model calls · "
+                f"{int(workflow.get('tool_calls') or 0)} tool calls"
+                if int(workflow.get("session_count") or 0) > 0
+                else "Session activity is not linked in the cached receipt."
+            )
+            attention = [str(item) for item in (preview.get("attention") or []) if str(item)]
+            uncertain_var.set(compact_lines(attention) if attention else "No unresolved gap is recorded in the cached receipt.")
+            if not goal_var.get().strip() and str(preview.get("goal") or "").strip():
+                goal_var.set(str(preview["goal"]))
+            status_var.set("Cached local facts are ready. Refreshing editable goal and commit details...")
+
+        def render_review(review: dict[str, object], *, cached: bool) -> None:
             snapshot = review.get("snapshot") if isinstance(review.get("snapshot"), dict) else {}
             objective = review.get("objective") if isinstance(review.get("objective"), dict) else {}
             understanding = review.get("work_understanding") if isinstance(review.get("work_understanding"), dict) else {}
-            checkpoint_font = tkfont.nametofont("TkDefaultFont")
-
-            def compact_line(value: str, *, max_pixels: int = 480) -> str:
-                prefix = "• "
-                if checkpoint_font.measure(prefix + value) <= max_pixels:
-                    return prefix + value
-                low, high = 0, len(value)
-                while low < high:
-                    middle = (low + high + 1) // 2
-                    candidate = prefix + value[:middle] + "…"
-                    if checkpoint_font.measure(candidate) <= max_pixels:
-                        low = middle
-                    else:
-                        high = middle - 1
-                return prefix + value[:low] + "…"
-
-            def compact_lines(values: list[str], *, limit: int = 2) -> str:
-                lines = [compact_line(value) for value in values[:limit]]
-                if len(values) > limit:
-                    lines.append(f"• +{len(values) - limit} more in details")
-                return "\n".join(lines)
-
             commits = understanding.get("commits") if isinstance(understanding.get("commits"), list) else []
             subjects = [
                 str(row.get("subject")) for row in commits
@@ -5733,15 +5850,15 @@ def run_native_presence(
                 else "Session activity unavailable for this checkpoint."
             )
             attention = [str(item) for item in (review.get("attention") or []) if str(item)]
-            uncertain_var.set(
-                compact_lines(attention)
-                if attention else "No unresolved evidence gaps were recorded."
-            )
+            uncertain_var.set(compact_lines(attention) if attention else "No unresolved evidence gaps were recorded.")
             goal_var.set(str(objective.get("text") or ""))
-            checkpoint_state["evidence_hash"] = str(review.get("evidence_hash") or "")
+            checkpoint_state["evidence_hash"] = "" if cached else str(review.get("evidence_hash") or "")
             confirm_button.state(["!disabled"] if checkpoint_state["evidence_hash"] else ["disabled"])
             decline_button.state(["!disabled"] if checkpoint_state["evidence_hash"] else ["disabled"])
-            if not goal_var.get().strip():
+            retry_button.state(["disabled"])
+            if cached:
+                status_var.set("Showing cached local details while exact evidence refreshes...")
+            elif not goal_var.get().strip():
                 status_var.set("Goal could not be inferred. Enter it to confirm; Decline keeps the evidence.")
             elif str(objective.get("provenance") or "") == "inferred":
                 status_var.set(
@@ -5752,8 +5869,79 @@ def run_native_presence(
             else:
                 status_var.set("Confirm accepts this exact goal and evidence. Decline keeps the evidence.")
 
-        threading.Thread(target=fetch, daemon=True).start()
-        root.after(60, settle_card)
+        def show_failure(reason: str) -> None:
+            checkpoint_state["evidence_hash"] = ""
+            confirm_button.state(["disabled"])
+            decline_button.state(["disabled"])
+            retry_button.state(["!disabled"])
+            if not changed_var.get().strip():
+                changed_var.set("The local checkpoint summary could not be read.")
+            status_var.set(f"{reason} Cached facts remain visible. Retry or open More details.")
+
+        def load_card() -> None:
+            checkpoint_state["request"] = int(checkpoint_state["request"]) + 1
+            request_id = int(checkpoint_state["request"])
+            checkpoint_state["evidence_hash"] = ""
+            confirm_button.state(["disabled"])
+            decline_button.state(["disabled"])
+            retry_button.state(["disabled"])
+            status_var.set("Refreshing exact local evidence...")
+            if not receipt_id:
+                show_failure("This checkpoint no longer has a receipt ID.")
+                return
+            result: dict[str, object] = {}
+
+            def fetch() -> None:
+                try:
+                    encoded_receipt_id = urllib.parse.quote(receipt_id, safe="")
+                    endpoint = f"{url.rstrip('/')}/api/delivery-reviews?limit=1&receipt_id={encoded_receipt_id}"
+                    with urllib.request.urlopen(endpoint, timeout=3) as response:
+                        result["payload"] = json.loads(response.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                    result["status"] = exc.code
+                except (OSError, ValueError):
+                    result["error"] = True
+                finally:
+                    result["done"] = True
+
+            def settle_card() -> None:
+                if not panel.winfo_exists() or request_id != checkpoint_state["request"]:
+                    return
+                if not result.get("done"):
+                    root.after(60, settle_card)
+                    return
+                payload = result.get("payload")
+                rows = payload.get("reviews") if isinstance(payload, dict) else []
+                review = next((
+                    row for row in rows
+                    if isinstance(row, dict) and row.get("receipt_id") == receipt_id
+                ), None) if isinstance(rows, list) else None
+                if not isinstance(review, dict):
+                    reason = (
+                        f"The local dashboard returned HTTP {result['status']}."
+                        if result.get("status") else
+                        "Detailed evidence did not respond within 3 seconds."
+                        if result.get("error") else
+                        "The local dashboard did not return this receipt."
+                    )
+                    show_failure(reason)
+                    return
+                cache = checkpoint_state.get("cache")
+                if isinstance(cache, dict):
+                    cache[receipt_id] = review
+                render_review(review, cached=False)
+
+            threading.Thread(target=fetch, daemon=True).start()
+            root.after(60, settle_card)
+
+        retry_button = ttk.Button(footer, text="Retry", command=load_card)
+        retry_button.pack(side="right", padx=(0, 8))
+        apply_preview(delivery_checkpoint_preview)
+        cache = checkpoint_state.get("cache")
+        cached_review = cache.get(receipt_id) if isinstance(cache, dict) else None
+        if isinstance(cached_review, dict):
+            render_review(cached_review, cached=True)
+        load_card()
 
     def open_usage() -> None:
         existing = usage_state["window"]
@@ -5967,6 +6155,37 @@ def run_native_presence(
     collapsed_canvas.bind("<ButtonRelease-1>", collapsed_button_release)
     collapsed_canvas.bind("<Return>", lambda _event: toggle_collapsed())
     collapsed_canvas.bind("<space>", lambda _event: toggle_collapsed())
+
+    def collapse_if_pointer_outside() -> None:
+        try:
+            if collapsed.get():
+                return
+            pointer_widget = root.winfo_containing(root.winfo_pointerx(), root.winfo_pointery())
+            if pointer_widget is not None:
+                top = pointer_widget.winfo_toplevel()
+                checkpoint_window = checkpoint_state.get("window")
+                usage_window = usage_state.get("window")
+                if top is root or top is checkpoint_window or top is usage_window:
+                    return
+            for state in (checkpoint_state, usage_state):
+                window = state.get("window")
+                if window is not None and window.winfo_exists():
+                    window.destroy()
+                state["window"] = None
+            checkpoint_state["idle_token"] = int(checkpoint_state["idle_token"]) + 1
+            checkpoint_state["reset_idle"] = None
+            set_collapsed(True)
+        except tk.TclError:
+            pass
+
+    def schedule_outside_collapse(_event: object = None) -> None:
+        try:
+            root.after(180, collapse_if_pointer_outside)
+        except tk.TclError:
+            pass
+
+    root.bind("<Leave>", schedule_outside_collapse, add="+")
+    root.bind("<FocusOut>", schedule_outside_collapse, add="+")
     set_collapsed(True)
     refresh_state()
     pulse_attention()

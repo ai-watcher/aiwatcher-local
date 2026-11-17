@@ -15,6 +15,38 @@ from aiwatcher_cli.local_state import compact_nudge, record_companion_skip, upda
 from aiwatcher_cli.scanner import LocalSession
 
 
+class CompanionStateCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.previous_cache = ui._COMPANION_STATE_CACHE
+        self.previous_refreshing = ui._COMPANION_STATE_REFRESHING
+        ui._COMPANION_STATE_CACHE = None
+        ui._COMPANION_STATE_REFRESHING = False
+
+    def tearDown(self) -> None:
+        ui._COMPANION_STATE_CACHE = self.previous_cache
+        ui._COMPANION_STATE_REFRESHING = self.previous_refreshing
+
+    def test_cold_poll_returns_refreshing_state_and_starts_only_one_rebuild(self) -> None:
+        thread = Mock()
+        with patch.object(ui.threading, "Thread", return_value=thread) as constructor:
+            first = ui.build_companion_state_cached()
+            second = ui.build_companion_state_cached()
+
+        self.assertEqual(first["state"], "connecting")
+        self.assertEqual(second["state"], "connecting")
+        constructor.assert_called_once()
+        thread.start.assert_called_once_with()
+
+    def test_fresh_poll_returns_cached_state_without_rebuilding(self) -> None:
+        ui._COMPANION_STATE_CACHE = (time.monotonic(), {"state": "delivery_review_ready"})
+        with patch.object(ui, "build_companion_state") as builder:
+            state = ui.build_companion_state_cached()
+
+        self.assertEqual(state["state"], "delivery_review_ready")
+        self.assertEqual(state["companion_cache"]["status"], "fresh")
+        builder.assert_not_called()
+
+
 class CompanionLifecycleTests(unittest.TestCase):
     def test_command_runs_dashboard_independent_companion(self) -> None:
         command = companion.companion_command(10)
@@ -438,6 +470,15 @@ class WaitingSessionCompanionTests(unittest.TestCase):
                 "runner": "python -m unittest", "status": "passed",
                 "scope": "targeted", "exact_state": True,
             }],
+            "workflow": {
+                "session_count": 1, "user_turns": 2,
+                "model_calls": 7, "tool_calls": 5,
+            },
+            "objective": {
+                "text": "Make checkpoint reviews fast and dismissible",
+                "provenance": "inferred",
+            },
+            "attention": ["Only targeted verification passed."],
         }
 
     def test_confirmed_delivery_review_owns_an_advisory_companion_state(self):
@@ -449,6 +490,16 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         self.assertEqual(state["primary_action"], "open_delivery_card")
         self.assertEqual(state["checkpoint_preview"]["changed_file_count"], 4)
         self.assertEqual(state["checkpoint_preview"]["check_count"], 1)
+        self.assertEqual(state["checkpoint_preview"]["checks"][0]["status"], "passed")
+        self.assertEqual(state["checkpoint_preview"]["workflow"]["user_turns"], 2)
+        self.assertEqual(
+            state["checkpoint_preview"]["goal"],
+            "Make checkpoint reviews fast and dismissible",
+        )
+        self.assertEqual(
+            state["checkpoint_preview"]["attention"],
+            ["Only targeted verification passed."],
+        )
         self.assertIn("receipt-1", state["primary_url"])
         self.assertTrue(state["delivery_confirmed"])
         self.assertEqual(state["confidence"], "confirmed_delivery")
