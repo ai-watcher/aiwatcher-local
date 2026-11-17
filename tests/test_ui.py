@@ -156,6 +156,17 @@ class DashboardRestartCommandTests(unittest.TestCase):
             ui.sys.executable, [ui.sys.executable, "-m", "aiwatcher_cli", "ui"],
         )
 
+    def test_product_restart_replaces_dashboard_and_companion(self) -> None:
+        command = ui.product_restart_command(
+            host="127.0.0.1", port=8899, interval=45, presence=False,
+        )
+        self.assertEqual(command[:5], [
+            ui.sys.executable, "-m", "aiwatcher_cli", "restart", "--from-companion",
+        ])
+        self.assertEqual(command[command.index("--ui-port") + 1], "8899")
+        self.assertEqual(command[command.index("--interval") + 1], "45")
+        self.assertIn("--no-presence", command)
+
     def test_the_rebuilt_command_actually_starts(self) -> None:
         # The bug was only visible by running the command. --help exits 0
         # after argparse, which is enough to prove the package imports.
@@ -464,7 +475,7 @@ class DashboardServeTests(unittest.TestCase):
         self.assertEqual(body["message"], "Working tree has local changes.")
         apply.assert_called_once_with(fetch=True)
 
-    def test_update_apply_can_request_dashboard_restart_after_success(self) -> None:
+    def test_update_apply_restarts_dashboard_and_companion_after_success(self) -> None:
         server, thread, base = self._serve_one()
         payload = json.dumps({"restart": True}).encode("utf-8")
         http_request = request.Request(
@@ -482,8 +493,11 @@ class DashboardServeTests(unittest.TestCase):
         }
         with (
             patch.object(ui, "apply_updates", return_value=result) as apply,
-            patch.object(ui, "schedule_dashboard_restart") as restart,
-            patch.object(ui, "get_watcher_status", return_value={"running": True}),
+            patch.object(ui, "schedule_product_restart") as restart,
+            patch.object(
+                ui, "get_watcher_status",
+                return_value={"running": True, "interval_seconds": 45, "overlay": True},
+            ),
         ):
             try:
                 with request.urlopen(http_request, timeout=5) as response:
@@ -493,16 +507,18 @@ class DashboardServeTests(unittest.TestCase):
                 server.server_close()
 
         self.assertTrue(body["restart_requested"])
-        # Only the dashboard restarts. The Companion is a detached process the
-        # dashboard does not supervise, so the message must not claim it.
-        self.assertIn("Restarting the dashboard", body["message"])
-        self.assertNotIn("and Companion", body["message"])
-        self.assertTrue(body["companion_running"])
-        self.assertIn("aiwatcher companion stop", body["message"])
+        self.assertEqual(body["restart_target"], "dashboard_and_companion")
+        self.assertEqual(body["previous_dashboard_pid"], os.getpid())
+        self.assertIn("dashboard and Companion", body["message"])
         apply.assert_called_once_with(fetch=True)
-        restart.assert_called_once_with()
+        restart.assert_called_once_with(
+            host="127.0.0.1",
+            port=server.server_address[1],
+            interval=45,
+            presence=True,
+        )
 
-    def test_update_apply_restart_message_skips_the_companion_when_it_is_not_running(self) -> None:
+    def test_update_apply_starts_default_companion_when_it_was_not_running(self) -> None:
         server, thread, base = self._serve_one()
         http_request = request.Request(
             f"{base}/api/update-apply",
@@ -513,7 +529,7 @@ class DashboardServeTests(unittest.TestCase):
         result = {"ok": True, "install_kind": "source", "message": "Updated.", "applied": True}
         with (
             patch.object(ui, "apply_updates", return_value=result),
-            patch.object(ui, "schedule_dashboard_restart"),
+            patch.object(ui, "schedule_product_restart") as restart,
             patch.object(ui, "get_watcher_status", return_value={"running": False}),
         ):
             try:
@@ -523,8 +539,14 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
-        self.assertFalse(body["companion_running"])
-        self.assertNotIn("companion", body["message"].lower())
+        self.assertEqual(body["restart_target"], "dashboard_and_companion")
+        self.assertIn("companion", body["message"].lower())
+        restart.assert_called_once_with(
+            host="127.0.0.1",
+            port=server.server_address[1],
+            interval=30,
+            presence=True,
+        )
 
     def test_update_auto_check_endpoint_stores_the_switch(self) -> None:
         server, thread, base = self._serve_one()

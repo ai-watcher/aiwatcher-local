@@ -1596,7 +1596,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 if self.checkpointGoal.stringValue.isEmpty {
                     self.checkpointStatus.stringValue = "Goal could not be inferred. Enter it to confirm; Decline keeps the evidence."
                 } else if objectiveProvenance == "inferred" {
-                    self.checkpointStatus.stringValue = "Goal inferred from the linked session. Edit if needed, then confirm."
+                    let basis = objective["inference_basis"] as? String ?? "linked_session"
+                    self.checkpointStatus.stringValue = basis == "commit_subject"
+                        ? "Goal draft inferred from a commit subject. Edit if needed, then confirm."
+                        : "Goal inferred from the linked session. Edit if needed, then confirm."
                 } else {
                     self.checkpointStatus.stringValue = "Confirm accepts this exact goal and evidence. Decline keeps the evidence."
                 }
@@ -5741,7 +5744,11 @@ def run_native_presence(
             if not goal_var.get().strip():
                 status_var.set("Goal could not be inferred. Enter it to confirm; Decline keeps the evidence.")
             elif str(objective.get("provenance") or "") == "inferred":
-                status_var.set("Goal inferred from the linked session. Edit if needed, then confirm.")
+                status_var.set(
+                    "Goal draft inferred from a commit subject. Edit if needed, then confirm."
+                    if objective.get("inference_basis") == "commit_subject"
+                    else "Goal inferred from the linked session. Edit if needed, then confirm."
+                )
             else:
                 status_var.set("Confirm accepts this exact goal and evidence. Decline keeps the evidence.")
 

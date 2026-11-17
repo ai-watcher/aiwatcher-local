@@ -168,7 +168,7 @@ from .session_presence import (
     presence_for_sessions,
     tool_label,
 )
-from .work_understanding import build_work_understanding
+from .work_understanding import build_work_understanding, objective_from_commit_subjects
 from .session_health import (
     ContextHealth,
     analyze_all_sessions,
@@ -265,12 +265,67 @@ def restart_command(
 
 
 def _restart_current_process() -> None:
+    """Re-exec this dashboard for callers that specifically own only the UI."""
     command = restart_command()
     os.execv(command[0], command)
 
 
-def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
-    timer = threading.Timer(delay_seconds, _restart_current_process)
+def product_restart_command(
+    *, host: str, port: int, interval: int = 30, presence: bool = True,
+) -> list[str]:
+    """Build the one-product restart command used after a dashboard update."""
+    command = [
+        sys.executable,
+        "-m",
+        "aiwatcher_cli",
+        "restart",
+        "--from-companion",
+        "--interval",
+        str(max(15, int(interval))),
+        "--ui-host",
+        host,
+        "--ui-port",
+        str(port),
+    ]
+    if not presence:
+        command.append("--no-presence")
+    return command
+
+
+def _launch_product_restart(*, host: str, port: int, interval: int, presence: bool) -> None:
+    package_root = str(Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+    log_path = Path(tempfile.gettempdir()) / "aiwatcher-restart.log"
+    kwargs: dict[str, object] = {"start_new_session": os.name != "nt"}
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    with log_path.open("ab") as log:
+        subprocess.Popen(
+            product_restart_command(
+                host=host, port=port, interval=interval, presence=presence,
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            cwd=package_root,
+            env=env,
+            **kwargs,
+        )
+
+
+def schedule_product_restart(
+    *, host: str, port: int, interval: int = 30, presence: bool = True,
+    delay_seconds: float = 0.8,
+) -> None:
+    timer = threading.Timer(
+        delay_seconds,
+        _launch_product_restart,
+        kwargs={"host": host, "port": port, "interval": interval, "presence": presence},
+    )
     timer.daemon = True
     timer.start()
 
@@ -4425,10 +4480,25 @@ def _finalize_delivery_review(
             objective = ObjectiveClaim(
                 provenance="inferred", confidence="low", text=prompt,
             ).to_json()
+            objective["inference_basis"] = "linked_session"
             payload["objective"] = objective
+        else:
+            commit_objective = objective_from_commit_subjects(
+                (understanding or {}).get("commits") or [],
+            )
+            if commit_objective:
+                objective = ObjectiveClaim(
+                    provenance="inferred", confidence="low", text=commit_objective,
+                ).to_json()
+                objective["inference_basis"] = "commit_subject"
+                payload["objective"] = objective
     payload["objective_retained"] = bool(objective.get("text"))
     payload["objective_label"] = (
-        "Objective inferred from a linked session; confirm before sharing"
+        (
+            "Editable objective draft inferred from a commit subject; confirm before sharing"
+            if objective.get("inference_basis") == "commit_subject"
+            else "Objective inferred from a linked session; confirm before sharing"
+        )
         if objective.get("provenance") == "inferred"
         else (
             "Objective confirmed; text is not retained"
@@ -11357,20 +11427,21 @@ class UIHandler(BaseHTTPRequestHandler):
                     "process_cwd": process_cwd,
                 }
             if result.get("ok") and result.get("applied") and restart:
-                # Only this process restarts. The Companion is a detached
-                # process the dashboard does not supervise (the heartbeat is a
-                # heartbeat, not a supervisor, and it does not record the
-                # presence flags a relaunch would need), so the message says
-                # what it needs rather than claiming it was covered.
+                watcher = get_watcher_status()
+                server_host, server_port = self.server.server_address[:2]
+                restart_host = str(server_host or "127.0.0.1")
+                if restart_host in {"0.0.0.0", "::"}:
+                    restart_host = "127.0.0.1"
                 result["restart_requested"] = True
-                result["companion_running"] = bool(get_watcher_status().get("running"))
-                result["message"] = "Updated. Restarting the dashboard so it uses the new code."
-                if result["companion_running"]:
-                    result["message"] += (
-                        " The Companion keeps the old code until you run"
-                        " `aiwatcher companion stop`, then `aiwatcher companion start`."
-                    )
-                schedule_dashboard_restart()
+                result["restart_target"] = "dashboard_and_companion"
+                result["previous_dashboard_pid"] = os.getpid()
+                result["message"] = "Updated. Restarting the dashboard and Companion with the new code."
+                schedule_product_restart(
+                    host=restart_host,
+                    port=int(server_port),
+                    interval=int(watcher.get("interval_seconds") or 30),
+                    presence=bool(watcher.get("overlay")) if watcher.get("running") else True,
+                )
             status = 200 if result.get("ok") else 409
             self._send(status, json.dumps(result), "application/json; charset=utf-8")
             return
