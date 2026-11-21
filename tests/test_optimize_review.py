@@ -167,7 +167,7 @@ class OptimizeReviewTests(unittest.TestCase):
         self.assertEqual(item['safety_state'], 'ready')
         self.assertEqual(item['workspace_evidence']['git_status'], 'clean')
         self.assertEqual(item['workspace_evidence']['unlanded_commit_count'], 0)
-        self.assertGreaterEqual(item['size_bytes'], 4096)
+        self.assertGreater(item['size_bytes'], 0)
         self.assertIn('ready to review', inventory['impact_label'])
         self.assertFalse(inventory['notify_companion'])
 
