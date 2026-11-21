@@ -98,6 +98,22 @@ class RuntimeProcess:
         return f"kill {self.pid}"
 
 
+class ProcessRows(list[ProcessRow]):
+    """Process rows plus whether the platform inventory completed."""
+
+    def __init__(self, values=(), *, coverage_complete: bool = True):
+        super().__init__(values)
+        self.coverage_complete = coverage_complete
+
+
+class RuntimeProcessInventory(list[RuntimeProcess]):
+    """Runtime rows plus whether process and CWD coverage completed."""
+
+    def __init__(self, values=(), *, coverage_complete: bool = True):
+        super().__init__(values)
+        self.coverage_complete = coverage_complete
+
+
 def _parse_age_to_seconds(value: str) -> int | None:
     text = value.strip()
     if not text or text == "-":
@@ -125,7 +141,7 @@ def _parse_age_to_seconds(value: str) -> int | None:
 
 def _read_ps_rows() -> list[ProcessRow]:
     if os.name == "nt":
-        return []
+        return ProcessRows(coverage_complete=False)
     try:
         completed = subprocess.run(
             ["ps", "-axo", "pid=,ppid=,stat=,etime=,rss=,%cpu=,command="],
@@ -135,13 +151,56 @@ def _read_ps_rows() -> list[ProcessRow]:
             timeout=5,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return []
+        return ProcessRows(coverage_complete=False)
     rows: list[ProcessRow] = []
     for line in completed.stdout.splitlines():
         parsed = parse_ps_line(line)
         if parsed:
             rows.append(parsed)
-    return rows
+    return ProcessRows(rows, coverage_complete=True)
+
+
+def _process_working_directories(pids: list[int]) -> dict[int, str]:
+    """Best-effort actual CWDs for processes, without trusting their argv.
+
+    Linux exposes this directly through procfs. macOS does not, so use the
+    system lsof binary once for the whole batch. Windows has no equivalent in
+    the metadata source used here; callers must treat missing coverage as unknown.
+    """
+    valid = sorted({pid for pid in pids if 0 < pid <= 0x7FFFFFFF})
+    if not valid or os.name == "nt":
+        return {}
+    found: dict[int, str] = {}
+    if sys.platform != "darwin":
+        for pid in valid:
+            try:
+                value = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                continue
+            if os.path.isabs(value):
+                found[pid] = value
+        return found
+    try:
+        completed = subprocess.run(
+            ["/usr/sbin/lsof", "-a", "-p", ",".join(str(pid) for pid in valid), "-d", "cwd", "-Fn"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    current_pid: int | None = None
+    for line in completed.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            current_pid = int(line[1:])
+        elif current_pid is not None and line.startswith("n/"):
+            found[current_pid] = line[1:]
+    return found
+
+
+def _process_working_directory(pid: int) -> str | None:
+    return _process_working_directories([pid]).get(pid)
 
 
 def parse_ps_line(line: str) -> ProcessRow | None:
@@ -239,13 +298,17 @@ def _tool_label(command: str, argv: list[str]) -> str | None:
     return None
 
 
-def classify_process(row: ProcessRow, *, stale_minutes: int = DEFAULT_STALE_MINUTES) -> RuntimeProcess | None:
+def classify_process(
+    row: ProcessRow, *, stale_minutes: int = DEFAULT_STALE_MINUTES, resolve_cwd: bool = True,
+) -> RuntimeProcess | None:
     argv = _argv(row.command)
     tool = _tool_label(row.command, argv)
     if not tool:
         return None
 
     cwd = _flag_value(argv, "--working-dir", "--working_dir", "--cwd", "--workspace", "--workspace-root")
+    if not cwd and resolve_cwd:
+        cwd = _process_working_directory(row.pid)
     session_id = _flag_value(argv, "--session-id", "--session_id", "--conversation-id", "--conversation_id")
     deep_link = _flag_value(
         argv,
@@ -302,11 +365,21 @@ def classify_process(row: ProcessRow, *, stale_minutes: int = DEFAULT_STALE_MINU
 
 
 def discover_runtime_processes(*, stale_minutes: int = DEFAULT_STALE_MINUTES) -> list[RuntimeProcess]:
-    return [
+    rows = _read_ps_rows()
+    processes = [
         process
-        for row in _read_ps_rows()
-        if (process := classify_process(row, stale_minutes=stale_minutes)) is not None
+        for row in rows
+        if (process := classify_process(row, stale_minutes=stale_minutes, resolve_cwd=False)) is not None
     ]
+    missing = [process.pid for process in processes if not process.cwd]
+    actual_cwds = _process_working_directories(missing)
+    for process in processes:
+        if not process.cwd:
+            process.cwd = actual_cwds.get(process.pid)
+    coverage_complete = bool(getattr(rows, "coverage_complete", True))
+    if missing and any(pid not in actual_cwds for pid in missing):
+        coverage_complete = False
+    return RuntimeProcessInventory(processes, coverage_complete=coverage_complete)
 
 
 def seconds_label(seconds: int | None) -> str:

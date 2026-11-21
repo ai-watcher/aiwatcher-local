@@ -2773,7 +2773,8 @@ class DashboardWindowTests(unittest.TestCase):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "optimize_available")
-        self.assertEqual(state["label"], "Optimize")
+        self.assertEqual(state["label"], "Protect work")
+        self.assertEqual(state["primary_label"], "Check work")
         self.assertEqual(state["primary_url"], "/?view=control#optimizeWorkspace")
         self.assertEqual(state["skip_state"], "optimize_available")
         self.assertIn("3 change(s) look absent from main", state["subtitle"])
@@ -3742,12 +3743,13 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(inventory["status"], "needs_action")
         self.assertEqual(inventory["top"]["kind"], "agent_workspace")
-        self.assertEqual(inventory["top"]["title"], "Review AI scratch workspace")
+        self.assertEqual(inventory["top"]["title"], "Review AI workspace")
         self.assertEqual(inventory["top"]["project_full"], "/private/tmp/codex-export-test")
         self.assertIn("Scratch workspace", inventory["top"]["activity_summary"])
         self.assertIn("last signal", inventory["top"]["activity_summary"])
-        self.assertIn("4+ hours", inventory["top"]["why_inactive"])
-        self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
+        self.assertEqual(inventory["top"]["safety_state"], "review")
+        self.assertIn("evidence is incomplete", inventory["top"]["why_inactive"])
+        self.assertIn("bounded lower bound", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
         self.assertIn("if it looks disposable", inventory["top"]["cleanup_prompt"])
         self.assertIn("separate cleanup decision", inventory["top"]["cleanup_prompt"])
@@ -3769,7 +3771,8 @@ class DashboardWindowTests(unittest.TestCase):
             inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[])
 
         self.assertEqual(inventory["status"], "quiet")
-        self.assertEqual(inventory["candidates"], [])
+        self.assertEqual(inventory["top"]["safety_state"], "active")
+        self.assertFalse(inventory["notify_companion"])
 
     def test_agent_workspace_rows_scans_bounded_temp_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7053,6 +7056,66 @@ class CompanionNotificationClarityTests(unittest.TestCase):
 
         self.assertEqual(state["state"], "optimize_available")
         self.assertEqual(state["primary_label"], "Tidy up")
+
+    def test_small_or_protected_disk_findings_do_not_interrupt(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None, "handoff_decisions": [], "insights": [],
+                "optimize": {
+                    "status": "needs_action", "notify_companion": False,
+                    "candidate_count": 1,
+                    "top": {"kind": "worktree", "safety_state": "preserve", "project_full": "/repo"},
+                },
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+        self.assertNotEqual(state["state"], "optimize_available")
+
+    def test_meaningful_clean_disk_relief_gets_specific_companion_copy(self) -> None:
+        summary = "1.4 GB · 3 clean AI worktrees ready"
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None, "handoff_decisions": [], "insights": [],
+                "optimize": {
+                    "status": "needs_action", "notify_companion": True,
+                    "disk_notify_bytes": ui.OPTIMIZE_DISK_NOTIFY_BYTES,
+                    "companion_summary": summary, "candidate_count": 3,
+                    "top": {"kind": "worktree", "safety_state": "ready", "project_full": "/repo"},
+                },
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+        self.assertEqual(state["state"], "optimize_available")
+        self.assertEqual(state["label"], "Reclaim disk")
+        self.assertEqual(state["primary_label"], "Review space")
+        self.assertEqual(state["subtitle"], summary)
+
+    def test_unlanded_work_leads_mixed_disk_notification(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None, "handoff_decisions": [], "insights": [],
+                "optimize": {
+                    "status": "needs_action", "notify_companion": True,
+                    "disk_notify_bytes": 2 * ui.OPTIMIZE_DISK_NOTIFY_BYTES,
+                    "candidate_count": 2,
+                    "top": {"id": "unlanded:/repo", "kind": "unlanded_work", "project_full": "/repo",
+                            "unlanded_count": 1, "lines_at_stake": 42, "evidence_hash": "e"},
+                },
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+        self.assertEqual(state["label"], "Protect work")
+        self.assertEqual(state["primary_label"], "Check work")
+        self.assertIn("absent from main", state["subtitle"])
 
     def _proof_state(self, viewed: bool) -> dict:
         receipt = {

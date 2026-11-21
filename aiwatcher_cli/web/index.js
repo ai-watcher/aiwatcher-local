@@ -279,10 +279,16 @@ function renderOptimizeReviewEvidence(item, expanded = false) {
   const activity = item.project_activity || {};
   const rows = item.sessions || [];
   const changes = item.changes || [];
+  const workspace = item.workspace_evidence || {};
+  const workspaceLine = Object.keys(workspace).length ? `<div class="optimize-workspace-facts">
+    <p><strong>Git:</strong> ${esc(workspace.branch || 'unknown branch')} · ${esc(workspace.git_status || 'status unknown')}${workspace.main_ref ? ` · against ${esc(workspace.main_ref)}` : ''}${workspace.unlanded_commit_count !== null && workspace.unlanded_commit_count !== undefined ? ` · ${esc(workspace.unlanded_commit_count)} unlanded commit(s)` : ''}</p>
+    <p><strong>Activity:</strong> ${esc(workspace.runtime_status || 'runtime unknown')}${workspace.recent_session_active ? ' · recent linked session' : ''}${workspace.recent_file_active ? ' · recent file activity' : ''}</p>
+  </div>` : '';
   return `<div class="optimize-review-context">
     <p><strong>Why review:</strong> ${esc(item.selection_rule || item.why_inactive || item.summary || '')}</p>
     ${activity.session_id ? `<p><strong>Latest project activity:</strong> ${esc(activity.title || activity.session_id)} · ${esc(formatOptimizeTime(activity.last_activity))}<br>${esc(activity.status || '')}</p>` : ''}
     <p><strong>Review scope:</strong> ${esc(item.review_scope || `${item.session_count || 0} items`)}${item.excluded_internal_count ? ` · ${esc(item.excluded_internal_count)} internal approval/session logs excluded` : ''}</p>
+    ${workspaceLine}
     ${rows.length ? `<details class="aiw-details" ${expanded ? 'open' : ''}><summary>Inspect ${rows.length} exact sessions and ownership</summary><div class="optimize-session-table"><table><thead><tr><th>Exact session</th><th>Owner / role</th><th>Last observed state</th></tr></thead><tbody>${rows.map(row => `<tr>
       <td><strong>${esc(row.title || 'Untitled session')}</strong><br><code>${esc(row.session_id)}</code><br><button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button></td>
       <td>${esc(row.tool)} · ${esc(row.surface || 'unknown')}<br>${esc(row.session_role || 'unknown')}${row.parent_session_id ? `<br>Parent: <code>${esc(row.parent_session_id)}</code><br>${esc(row.parent_title || 'Parent title unavailable')}` : ''}</td>
@@ -2508,7 +2514,7 @@ function fmtMoney(value) {
 }
 function optimizeIsRefreshing(optimize, cache = {}) {
   const state = optimize?.review_state;
-  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
+  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 4);
   return state === 'refreshing' || cache.refreshing
     || ['building', 'refreshing', 'stale'].includes(cache.status) || outdated;
 }
@@ -2582,8 +2588,15 @@ function setPanelHtmlHolding(node, html, rebuilding) {
   setPanelHtml(node, html);
 }
 function renderOptimizeWorkspace(optimize, cache = {}) {
+  const formatBytes = value => {
+    const bytes = Number(value || 0);
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${bytes} B`;
+  };
   const state = optimize?.review_state;
-  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 3);
+  const outdated = (optimize?.candidates || []).some(item => item.review_contract_version !== 4);
   if (state === 'error' || cache.error) {
     return `<div role="status" class="verdict-card"><h3>Optimize evidence refresh failed</h3><p>Copying is paused until the evidence is ready.</p><button onclick="load(false, true)">Retry evidence refresh</button></div>`;
   }
@@ -2597,27 +2610,25 @@ function renderOptimizeWorkspace(optimize, cache = {}) {
     return `<div class="empty">${esc(optimize.summary || 'No stale chats, worktrees, or runtime cleanup opportunities stood out.')}</div>`;
   }
   const topImpact = optimize.impact_label || 'No measured resource impact';
-  return `<div id="optimizeReward" class="verdict-card" hidden></div>
-    <div class="mini-grid" style="margin-bottom:12px">
-      <div class="mini"><span class="label">Status</span><strong>${esc(optimize.title || 'Optimize')}</strong></div>
-      <div class="mini"><span class="label">Review scope</span><strong>${esc(topImpact)}</strong></div>
-      <div class="mini"><span class="label">Evidence</span><strong>${esc(optimize.evidence_label || 'Observed')}</strong></div>
-      <div class="mini"><span class="label">Items shown</span><strong>${esc(candidates.length)} of ${esc(optimize.candidate_count || candidates.length)}</strong></div>
-    </div>
-    <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Start with one review batch. Verify current work in the owning app, then confirm the review summary. Only the unchanged item is quieted for 24 hours. Historical tokens are not cleanup savings.</p>
-    <p class="receipt-note">Discovery covers known project worktrees and bounded temp/tool workspace locations, not every folder on this machine.${optimize.omitted_candidate_count ? ` ${esc(optimize.omitted_candidate_count)} additional candidates are outside this displayed batch; reviewing or skipping items allows later candidates to appear.` : ''}</p>
-    <div class="action-queue">${candidates.map(item => {
-      const cleanupPrompt = item.cleanup_prompt || checklist;
-      const aiCleanup = optimizeAiButton(item.id || '');
-      if (item.kind === 'stale_processes') {
-        return renderRuntimeOptimizeCard(item, cleanupPrompt);
-      }
-      const fullPath = item.project_full || '';
-      const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
-      const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
-      return `<div class="action-row optimize-card low" data-optimize-id="${esc(item.id)}">
+  const renderCandidate = item => {
+    const cleanupPrompt = item.cleanup_prompt || checklist;
+    const protectedWorkspace = ['preserve', 'active'].includes(item.safety_state);
+    const aiCleanup = protectedWorkspace ? '' : optimizeAiButton(item.id || '');
+    if (item.kind === 'stale_processes') return renderRuntimeOptimizeCard(item, cleanupPrompt);
+    const fullPath = item.project_full || '';
+    const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
+    const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
+    const safety = item.safety_state ? `<span class="pill optimize-${esc(item.safety_state)}">${esc(item.safety_state)}</span>` : '';
+    const actions = protectedWorkspace
+      ? `<button class="btn-primary" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review evidence</button>
+        <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Keep protected</button>`
+      : `${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>` : `<button class="btn-primary" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">${esc(item.action_label || 'Copy cleanup prompt')}</button>`}
+        ${aiCleanup}
+        <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
+        <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>`;
+    return `<div class="action-row optimize-card low" data-optimize-id="${esc(item.id)}">
       <div class="optimize-card-copy">
-        <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
+        <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span>${safety}</div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         ${pathLine}
@@ -2628,13 +2639,34 @@ function renderOptimizeWorkspace(optimize, cache = {}) {
         </div></details>` : ''}
       </div>
       <div class="actions optimize-card-actions">
-        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">Copy cleanup prompt</button>` : `<button class="btn-primary" data-candidate="${esc(item.id)}" onclick="copyOptimizeCleanupPrompt(this.dataset.candidate, this)">${esc(item.action_label || 'Copy cleanup prompt')}</button>`}
-        ${aiCleanup}
-        <button class="btn-quiet" data-candidate="${esc(item.id)}" onclick="openOptimizeReview(this.dataset.candidate)">Review decision</button>
-        <button class="btn-quiet" data-candidate="${esc(item.id)}" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
+        ${actions}
       </div>
     </div>`;
-    }).join('')}</div>
+  };
+  const groups = [
+    {key: 'ready', title: 'Ready to review', note: 'Clean, inactive, and patch-equivalent to local main.'},
+    {key: 'preserve', title: 'Needs preservation', note: 'Dirty or unlanded work is protected.'},
+    {key: 'review', title: 'Needs evidence', note: 'Ownership or landing evidence is incomplete.'},
+    {key: 'active', title: 'Active · keep', note: 'Recent session, file, or process activity was observed.'},
+    {key: 'other', title: 'Workflow review', note: 'Non-disk workflow or runtime evidence.'},
+  ];
+  const grouped = groups.map(group => {
+    const items = candidates.filter(item => (item.safety_state || 'other') === group.key);
+    if (!items.length) return '';
+    const bytes = items.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
+    const lowerBound = items.some(item => item.size_complete === false);
+    return `<section class="optimize-group optimize-group-${group.key}"><div class="optimize-group-head"><div><h3>${esc(group.title)}</h3><p>${esc(group.note)}</p></div>${bytes ? `<span class="pill">${lowerBound ? '≥ ' : ''}${esc(formatBytes(bytes))}</span>` : ''}</div><div class="action-queue">${items.map(renderCandidate).join('')}</div></section>`;
+  }).join('');
+  return `<div id="optimizeReward" class="verdict-card" hidden></div>
+    <div class="mini-grid" style="margin-bottom:12px">
+      <div class="mini"><span class="label">Status</span><strong>${esc(optimize.title || 'Optimize')}</strong></div>
+      <div class="mini"><span class="label">Review scope</span><strong>${esc(topImpact)}</strong></div>
+      <div class="mini"><span class="label">Evidence</span><strong>${esc(optimize.evidence_label || 'Observed')}</strong></div>
+      <div class="mini"><span class="label">Items shown</span><strong>${esc(candidates.length)} of ${esc(optimize.candidate_count || candidates.length)}</strong></div>
+    </div>
+    <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Start with one review batch. Verify current work in the owning app, then confirm the review summary. Only the unchanged item is quieted for 24 hours. Historical tokens are not cleanup savings.</p>
+    <p class="receipt-note">Discovery covers known project worktrees and bounded temp/tool workspace locations, not every folder on this machine.${optimize.omitted_candidate_count ? ` ${esc(optimize.omitted_candidate_count)} additional candidates are outside this displayed batch; reviewing or skipping items allows later candidates to appear.` : ''}</p>
+    ${grouped}
     <div class="copy-row" style="margin-top:12px">
       <button class="btn-quiet" onclick="copyOptimizeCleanupPrompt('', this)">Copy displayed review items</button>
     </div>`;
