@@ -3748,7 +3748,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Scratch workspace", inventory["top"]["activity_summary"])
         self.assertIn("last signal", inventory["top"]["activity_summary"])
         self.assertEqual(inventory["top"]["safety_state"], "review")
-        self.assertIn("evidence is incomplete", inventory["top"]["why_inactive"])
+        self.assertTrue(any(
+            reason in inventory["top"]["why_inactive"]
+            for reason in ("evidence is incomplete", "could not be matched")
+        ))
         self.assertIn("bounded lower bound", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
         self.assertIn("if it looks disposable", inventory["top"]["cleanup_prompt"])

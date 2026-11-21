@@ -161,7 +161,7 @@ class OptimizeReviewTests(unittest.TestCase):
         root, _owner, checkout = self.nested_codex_worktree()
         with patch.object(ui, '_agent_workspace_scan_roots', return_value=[root]), patch.object(ui, '_worktree_rows', return_value=[]):
             workspace = next(row for row in ui._agent_workspace_rows(set()) if row['path'] == str(checkout.resolve()))
-        with patch.object(ui, 'safe_runtime_processes', return_value=[]), patch.object(ui, 'recent_optimize_decisions', return_value=[]), patch.object(ui, '_agent_workspace_rows', return_value=[workspace]):
+        with patch.object(ui, 'safe_runtime_processes', return_value=[]), patch.object(ui, '_runtime_inventory_coverage_complete', return_value=True), patch.object(ui, 'recent_optimize_decisions', return_value=[]), patch.object(ui, '_agent_workspace_rows', return_value=[workspace]):
             inventory = ui.build_optimize_inventory([])
         item = inventory['top']
         self.assertEqual(item['safety_state'], 'ready')
@@ -176,7 +176,7 @@ class OptimizeReviewTests(unittest.TestCase):
         with patch.object(ui, '_agent_workspace_scan_roots', return_value=[root]), patch.object(ui, '_worktree_rows', return_value=[]):
             workspace = next(row for row in ui._agent_workspace_rows(set()) if row['path'] == str(checkout.resolve()))
         measured = {'bytes': ui.OPTIMIZE_DISK_NOTIFY_BYTES, 'complete': True, 'entries': 1, 'basis': 'exclusive_allocated'}
-        with patch.object(ui, '_workspace_disk_usage', return_value=measured), patch.object(ui, 'safe_runtime_processes', return_value=[]), patch.object(ui, 'recent_optimize_decisions', return_value=[]), patch.object(ui, '_agent_workspace_rows', return_value=[workspace]):
+        with patch.object(ui, '_workspace_disk_usage', return_value=measured), patch.object(ui, 'safe_runtime_processes', return_value=[]), patch.object(ui, '_runtime_inventory_coverage_complete', return_value=True), patch.object(ui, 'recent_optimize_decisions', return_value=[]), patch.object(ui, '_agent_workspace_rows', return_value=[workspace]):
             inventory = ui.build_optimize_inventory([])
         self.assertTrue(inventory['notify_companion'])
         self.assertEqual(inventory['ready_disk_bytes'], ui.OPTIMIZE_DISK_NOTIFY_BYTES)
