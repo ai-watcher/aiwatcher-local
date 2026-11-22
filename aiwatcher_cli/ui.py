@@ -235,8 +235,8 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # 11: Codex chat labels use the concise name field and reject prompt-mirroring caches.
 # 12: evidence-accurate activity, Fresh Start, and historical-token semantics.
 # 13: session payloads carry separate repository and checkout identities.
-SUMMARY_CACHE_SCHEMA_VERSION = 17
-OPTIMIZE_REVIEW_CONTRACT_VERSION = 3
+SUMMARY_CACHE_SCHEMA_VERSION = 18
+OPTIMIZE_REVIEW_CONTRACT_VERSION = 4
 
 
 def restart_command(
@@ -1190,11 +1190,13 @@ def _elapsed_label(stamp: datetime | None, *, now: datetime | None = None) -> st
     return f"{hours // 24}d ago"
 
 
-def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
+def _worktree_rows(projects: set[str], *, deadline: float | None = None) -> list[dict[str, object]]:
     """Read-only git worktree inventory for known project roots."""
     rows: list[dict[str, object]] = []
     seen: set[str] = set()
     for project in sorted(projects):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
             root = Path(project).expanduser()
         except (TypeError, ValueError):
@@ -1202,12 +1204,13 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
         if not root.exists():
             continue
         try:
+            timeout = 3.0 if deadline is None else max(0.05, min(3.0, deadline - time.monotonic()))
             completed = subprocess.run(
                 ["git", "-C", str(root), "worktree", "list", "--porcelain"],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=timeout,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -1252,9 +1255,15 @@ AGENT_WORKSPACE_SCAN_MAX_DEPTH = 3
 AGENT_WORKSPACE_SCAN_MAX_DIRS = 1200
 AGENT_WORKSPACE_MIN_AGE_HOURS = 4
 AGENT_WORKSPACE_PREFIXES = ("agent-", "claude-", "codex-")
+WORKSPACE_SIZE_MAX_ENTRIES = 50_000
+WORKSPACE_SIZE_MAX_SECONDS = 0.5
+WORKSPACE_SIZE_CACHE_SECONDS = 5 * 60
+OPTIMIZE_WORKSPACE_AUDIT_MAX_SECONDS = 2.0
+OPTIMIZE_DISK_NOTIFY_BYTES = 500 * 1024 * 1024
+_WORKSPACE_SIZE_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
 
 
-def _agent_workspace_scan_roots(projects: set[str]) -> list[Path]:
+def _agent_workspace_scan_roots(projects: set[str], *, deadline: float | None = None) -> list[Path]:
     roots = {
         Path("/tmp").resolve(),
         Path("/private/tmp").resolve(),
@@ -1262,6 +1271,8 @@ def _agent_workspace_scan_roots(projects: set[str]) -> list[Path]:
         Path.home() / '.codex' / 'worktrees',
     }
     for project in projects:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
             root = Path(project).expanduser()
         except (TypeError, ValueError):
@@ -1270,6 +1281,8 @@ def _agent_workspace_scan_roots(projects: set[str]) -> list[Path]:
     existing: list[Path] = []
     seen: set[str] = set()
     for root in roots:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
             resolved = root.resolve()
         except OSError:
@@ -1295,98 +1308,320 @@ def _is_temporary_workspace(path: Path) -> bool:
                (Path('/tmp'), Path('/private/tmp'), Path(tempfile.gettempdir())))
 
 
-def _temporary_agent_checkout(path: Path) -> dict[str, object] | None:
-    """Discover arbitrary-name temporary Git checkouts using a tool branch signal.
+def _temporary_agent_checkout(path: Path, *, deadline: float | None = None) -> dict[str, object] | None:
+    """Discover a Git checkout inside bounded AI workspace roots.
 
-    A branch/path signal is an inference, never ownership or deletion proof.
-    No remote fetch or file-content scan occurs here.
+    Temporary checkouts require an AI-tool-named branch. Checkouts below a
+    known AI workspace root may be detached or use another branch name; the
+    path is still only an ownership inference, never deletion proof. No remote
+    fetch or file-content scan occurs here.
     """
     marker = path / '.git'
     try:
-        if not _is_temporary_workspace(path) or marker.is_symlink() or not marker.exists():
+        if marker.is_symlink() or not marker.exists():
             return None
         is_worktree = marker.is_file()
     except OSError:
         # Shared temporary roots contain protected service directories and
         # entries can disappear mid-scan. Neither may break the inventory.
         return None
+    if deadline is not None and time.monotonic() >= deadline:
+        return None
     try:
+        timeout = 3.0 if deadline is None else max(0.05, min(3.0, deadline - time.monotonic()))
         result = subprocess.run(['git', '-C', str(path), 'symbolic-ref', '--quiet', '--short', 'HEAD'],
-                                capture_output=True, text=True, timeout=3)
+                                capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    branch = result.stdout.strip()
-    if result.returncode or not branch.startswith(('codex/', 'claude/', 'agent/')):
+    branch = result.stdout.strip() if result.returncode == 0 else ""
+    path_signal = _looks_agent_workspace_path(path)
+    if not path_signal and (
+        not _is_temporary_workspace(path)
+        or not branch.startswith(('codex/', 'claude/', 'agent/'))
+    ):
+        return None
+    if deadline is not None and time.monotonic() >= deadline:
         return None
     try:
+        timeout = 3.0 if deadline is None else max(0.05, min(3.0, deadline - time.monotonic()))
         metadata = subprocess.run(['git', '-C', str(path), 'rev-parse', '--path-format=absolute', '--git-common-dir', 'HEAD'],
-                                  capture_output=True, text=True, timeout=3)
+                                  capture_output=True, text=True, timeout=timeout)
         fields = metadata.stdout.strip().splitlines() if metadata.returncode == 0 else []
     except (OSError, subprocess.TimeoutExpired):
         fields = []
     return {'source': 'git_worktree' if is_worktree else 'scratch_scan',
-            'branch': branch, 'agent_owned': True,
+            'branch': branch or None, 'agent_owned': True,
+            'registered_worktree': is_worktree,
             'common_git_directory': fields[0] if len(fields) == 2 else None,
             'head': fields[1] if len(fields) == 2 else None,
-            'discovery_reason': 'Temporary Git checkout on an AI-tool-named branch; verify actual ownership'}
+            'discovery_reason': (
+                'Git checkout below a bounded AI workspace root; verify actual ownership'
+                if path_signal
+                else 'Temporary Git checkout on an AI-tool-named branch; verify actual ownership'
+            )}
 
 
-def _scan_agent_workspace_root(root: Path, seen: set[str]) -> list[dict[str, object]]:
+def _workspace_disk_usage(path: Path, *, deadline: float | None = None) -> dict[str, object]:
+    """Return bounded, cached logical bytes for one exact workspace.
+
+    Symlinks are never followed. A bounded result is explicitly a lower bound
+    so a large dependency tree cannot stall the dashboard or become an exact
+    cleanup claim.
+    """
+    key = str(path)
+    now = time.monotonic()
+    with _SUMMARY_CACHE_LOCK:
+        cached = _WORKSPACE_SIZE_CACHE.get(key)
+        if cached and now - cached[0] <= WORKSPACE_SIZE_CACHE_SECONDS:
+            return dict(cached[1])
+    total = 0
+    shared_bytes = 0
+    entries = 0
+    complete = True
+    basis = "allocated"
+    seen_files: set[tuple[int, int]] = set()
+    started = time.monotonic()
+    local_deadline = started + WORKSPACE_SIZE_MAX_SECONDS
+    if deadline is not None:
+        local_deadline = min(local_deadline, deadline)
+    stack = [path]
+    while stack:
+        if time.monotonic() >= local_deadline:
+            complete = False
+            break
+        current = stack.pop()
+        try:
+            children = os.scandir(current)
+        except OSError:
+            complete = False
+            continue
+        with children:
+            for child in children:
+                entries += 1
+                if entries > WORKSPACE_SIZE_MAX_ENTRIES or time.monotonic() >= local_deadline:
+                    complete = False
+                    stack.clear()
+                    break
+                try:
+                    if child.is_symlink():
+                        continue
+                    if child.is_dir(follow_symlinks=False):
+                        stack.append(Path(child.path))
+                    elif child.is_file(follow_symlinks=False):
+                        stat = child.stat(follow_symlinks=False)
+                        identity = (int(stat.st_dev), int(stat.st_ino))
+                        if identity in seen_files:
+                            continue
+                        seen_files.add(identity)
+                        blocks = getattr(stat, "st_blocks", None)
+                        if isinstance(blocks, int) and blocks >= 0:
+                            allocated = blocks * 512
+                            if int(getattr(stat, "st_nlink", 1) or 1) > 1:
+                                shared_bytes += allocated
+                            else:
+                                total += allocated
+                        else:
+                            total += stat.st_size
+                            basis = "logical"
+                except OSError:
+                    complete = False
+    result: dict[str, object] = {
+        "bytes": total, "shared_bytes_excluded": shared_bytes,
+        "complete": complete, "entries": entries,
+        "basis": "exclusive_allocated" if basis == "allocated" else basis,
+    }
+    with _SUMMARY_CACHE_LOCK:
+        _WORKSPACE_SIZE_CACHE[key] = (now, result)
+        if len(_WORKSPACE_SIZE_CACHE) > 64:
+            oldest = min(_WORKSPACE_SIZE_CACHE, key=lambda item: _WORKSPACE_SIZE_CACHE[item][0])
+            _WORKSPACE_SIZE_CACHE.pop(oldest, None)
+    return dict(result)
+
+
+def _git_text(path: Path, *args: str, deadline: float | None = None) -> str | None:
+    timeout = 3.0
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args], capture_output=True, text=True,
+            timeout=max(0.05, timeout), check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _workspace_git_evidence(path: Path, *, deadline: float | None = None) -> dict[str, object]:
+    """Read local-only preservation and landing evidence for one checkout."""
+    status_text = _git_text(path, "status", "--porcelain=v1", "--untracked-files=normal", deadline=deadline)
+    if status_text is None:
+        return {"git_status": "unavailable", "merge_status": "Unknown; Git evidence unavailable"}
+    status_lines = [line for line in status_text.splitlines() if line]
+    untracked = sum(1 for line in status_lines if line.startswith("??"))
+    branch = _git_text(path, "symbolic-ref", "--quiet", "--short", "HEAD", deadline=deadline)
+    upstream = _git_text(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", deadline=deadline)
+    refs = set((_git_text(path, "for-each-ref", "--format=%(refname:short)", deadline=deadline) or "").splitlines())
+    main_ref = next((ref for ref in ("origin/main", "main", "origin/master", "master") if ref in refs), None)
+    cherry = _git_text(path, "cherry", main_ref, "HEAD", deadline=deadline) if main_ref else None
+    unlanded = None if cherry is None else sum(1 for line in cherry.splitlines() if line.startswith("+"))
+    equivalent = None if cherry is None else sum(1 for line in cherry.splitlines() if line.startswith("-"))
+    upstream_counts = _git_text(path, "rev-list", "--left-right", "--count", "@{upstream}...HEAD", deadline=deadline) if upstream else None
+    behind = ahead = None
+    if upstream_counts:
+        fields = upstream_counts.split()
+        if len(fields) == 2 and all(field.isdigit() for field in fields):
+            behind, ahead = int(fields[0]), int(fields[1])
+    return {
+        "git_status": "dirty" if status_lines else "clean",
+        "dirty_entry_count": len(status_lines),
+        "untracked_entry_count": untracked,
+        "branch": branch or "detached",
+        "upstream": upstream,
+        "ahead_of_upstream": ahead,
+        "behind_upstream": behind,
+        "main_ref": main_ref,
+        "unlanded_commit_count": unlanded,
+        "patch_equivalent_commit_count": equivalent,
+        "merge_status": (
+            f"Local HEAD has no patch-unique commits beyond {main_ref}"
+            if main_ref and unlanded == 0
+            else f"{unlanded} patch-unique commit(s) are not in {main_ref}"
+            if main_ref and unlanded is not None
+            else "Unknown; no local main reference was found"
+        ),
+        "remote_note": "Compared with local refs only; no remote fetch was performed",
+    }
+
+
+def _runtime_uses_workspace(process: object, path: Path) -> bool:
+    cwd = getattr(process, "cwd", None)
+    if not isinstance(cwd, str) or not cwd or not os.path.isabs(cwd):
+        return False
+    try:
+        process_path = Path(cwd).expanduser().resolve(strict=False)
+        workspace = path.resolve(strict=False)
+    except OSError:
+        return False
+    return process_path == workspace or workspace in process_path.parents
+
+
+def _runtime_inventory_coverage_complete(processes: list[object]) -> bool:
+    """Whether every discoverable AI runtime can be placed on disk safely."""
+    if os.name == "nt" or not bool(getattr(processes, "coverage_complete", True)):
+        return False
+    return all(
+        isinstance(getattr(process, "cwd", None), str)
+        and bool(getattr(process, "cwd", None))
+        and os.path.isabs(str(getattr(process, "cwd", None)))
+        for process in processes
+    )
+
+
+def _classify_workspace_safety(
+    git_evidence: dict[str, object], *, registered: bool, active_reason: str | None = None,
+    runtime_coverage_complete: bool = True,
+) -> tuple[str, str]:
+    if active_reason:
+        return "active", active_reason
+    if git_evidence.get("git_status") == "dirty":
+        return "preserve", f"Git reports {git_evidence.get('dirty_entry_count') or 0} modified or untracked item(s)."
+    unlanded = git_evidence.get("unlanded_commit_count")
+    if isinstance(unlanded, int) and unlanded > 0:
+        return "preserve", f"{unlanded} patch-unique commit(s) are not in {git_evidence.get('main_ref') or 'main'}."
+    if not runtime_coverage_complete:
+        return "review", "An active AI runtime could not be matched to a working directory; keep this workspace until ownership is verified."
+    if registered and git_evidence.get("main_ref") and unlanded == 0:
+        return "ready", "The registered worktree is clean, inactive, and has no patch-unique commits beyond local main."
+    return "review", "Ownership, landing, or recoverability evidence is incomplete; keep it until reviewed."
+
+
+def _scan_agent_workspace_root(
+    root: Path, seen: set[str], *, deadline: float | None = None,
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     stack: list[tuple[Path, int]] = [(root, 0)]
     visited = 0
     while stack and visited < AGENT_WORKSPACE_SCAN_MAX_DIRS:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         current, depth = stack.pop()
         try:
-            children = list(current.iterdir())
+            children = os.scandir(current)
         except OSError:
             continue
-        for child in children:
-            if visited >= AGENT_WORKSPACE_SCAN_MAX_DIRS:
-                break
-            try:
-                is_dir = not child.is_symlink() and child.is_dir()
-            except OSError:
-                continue
-            if not is_dir:
-                continue
-            visited += 1
-            try:
-                resolved = child.resolve()
-            except OSError:
-                resolved = child
-            key = str(resolved)
-            if key in seen:
-                continue
-            checkout = _temporary_agent_checkout(resolved) if key not in seen else None
-            if (_looks_agent_workspace_path(resolved) or checkout) and key not in seen:
+        with children:
+            for child in children:
+                if visited >= AGENT_WORKSPACE_SCAN_MAX_DIRS or (deadline is not None and time.monotonic() >= deadline):
+                    break
                 try:
-                    stat = resolved.stat()
+                    is_dir = not child.is_symlink() and child.is_dir(follow_symlinks=False)
                 except OSError:
-                    stat = None
-                seen.add(key)
-                rows.append({
-                    "path": key,
-                    "source": "scratch_scan",
-                    "agent_owned": True,
-                    "mtime": (
-                        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                        if stat is not None
-                        else None
-                    ),
-                    **(checkout or {}),
-                })
-                continue
-            if depth < AGENT_WORKSPACE_SCAN_MAX_DEPTH and child.name not in {".git", "node_modules"}:
-                stack.append((resolved, depth + 1))
+                    continue
+                if not is_dir:
+                    continue
+                visited += 1
+                child_path = Path(child.path)
+                try:
+                    resolved = child_path.resolve()
+                except OSError:
+                    resolved = child_path
+                key = str(resolved)
+                if key in seen:
+                    continue
+                checkout = _temporary_agent_checkout(resolved, deadline=deadline)
+                if checkout and key not in seen:
+                    try:
+                        stat = resolved.stat()
+                    except OSError:
+                        stat = None
+                    seen.add(key)
+                    rows.append({
+                        "path": key,
+                        "source": "scratch_scan",
+                        "agent_owned": True,
+                        "mtime": (
+                            datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                            if stat is not None
+                            else None
+                        ),
+                        **checkout,
+                    })
+                    continue
+                # Codex commonly stores `<id>/<repository>` below its worktrees
+                # root. The id is a container, not the checkout. Descend until
+                # the exact `.git` root is found.
+                normalized = str(resolved).replace("\\", "/")
+                nested_codex_container = "/.codex/worktrees/" in normalized
+                if nested_codex_container and depth < AGENT_WORKSPACE_SCAN_MAX_DEPTH:
+                    stack.append((resolved, depth + 1))
+                    continue
+                if _looks_agent_workspace_path(resolved) and key not in seen:
+                    try:
+                        stat = resolved.stat()
+                    except OSError:
+                        stat = None
+                    seen.add(key)
+                    rows.append({
+                        "path": key, "source": "scratch_scan", "agent_owned": True,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc) if stat else None,
+                    })
+                    continue
+                if depth < AGENT_WORKSPACE_SCAN_MAX_DEPTH and child.name not in {".git", "node_modules"}:
+                    stack.append((resolved, depth + 1))
     return rows
 
 
-def _agent_workspace_rows(projects: set[str]) -> list[dict[str, object]]:
-    rows = _worktree_rows(projects)
+def _agent_workspace_rows(projects: set[str], *, deadline: float | None = None) -> list[dict[str, object]]:
+    rows = _worktree_rows(projects, deadline=deadline)
     seen = {str(row.get("path") or "") for row in rows if row.get("path")}
-    for root in _agent_workspace_scan_roots(projects):
-        rows.extend(_scan_agent_workspace_root(root, seen))
+    for root in _agent_workspace_scan_roots(projects, deadline=deadline):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        rows.extend(_scan_agent_workspace_root(root, seen, deadline=deadline))
     return rows
 
 
@@ -1536,11 +1771,11 @@ def _optimize_candidate_evidence_hash(item: dict[str, object]) -> str:
             "kind",
             "project_full",
             "last_activity",
-            "updated_label",
             "session_count",
             "tool",
             "tools",
             "impact_label",
+            "safety_state", "safety_reason", "size_bytes", "size_complete", "size_basis", "shared_bytes_excluded",
             "evidence_label",
             "evidence",
             "summary",
@@ -1604,14 +1839,72 @@ def _refresh_optimize_review_candidate(candidate: dict[str, object]) -> dict[str
         path = Path(str(candidate.get('project_full') or ''))
         evidence = dict(candidate.get('workspace_evidence') or {})
         try:
-            evidence['directory_modified_at'] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
-            metadata = _temporary_agent_checkout(path)
+            deadline = time.monotonic() + OPTIMIZE_WORKSPACE_AUDIT_MAX_SECONDS
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            evidence['directory_modified_at'] = modified.isoformat()
+            metadata = _temporary_agent_checkout(path, deadline=deadline)
             if metadata:
-                evidence.update({key: metadata.get(key) for key in ('branch', 'head', 'common_git_directory')})
+                evidence.update({key: metadata.get(key) for key in ('branch', 'head', 'common_git_directory', 'registered_worktree')})
+                evidence.pop('identity_status', None)
             else:
                 evidence['identity_status'] = 'Reverify ownership and checkout; temporary tool-branch identity unavailable'
+            git_evidence = _workspace_git_evidence(path, deadline=deadline)
+            evidence.update(git_evidence)
+            with _SUMMARY_CACHE_LOCK:
+                _WORKSPACE_SIZE_CACHE.pop(str(path), None)
+            disk = _workspace_disk_usage(path, deadline=deadline)
+            size_bytes = int(disk.get('bytes') or 0)
+            size_complete = bool(disk.get('complete'))
+            size_basis = str(disk.get('basis') or 'logical')
+            shared_bytes_excluded = int(disk.get('shared_bytes_excluded') or 0)
+            evidence.update({'size_bytes': size_bytes, 'size_complete': size_complete, 'size_basis': size_basis,
+                             'shared_bytes_excluded': shared_bytes_excluded})
+            by_id = dict(_SESSION_INDEX)
+            related = [row for row in by_id.values() if any(
+                value and _is_inside_path(Path(value), path)
+                for value in (row.project_path, row.raw_cwd)
+            )]
+            latest = max((_parse_iso_datetime(session_review_identity(row, by_id).get('last_activity')) or MIN_DT
+                          for row in related), default=None)
+            recent_session = latest is not None and datetime.now(timezone.utc) - latest < timedelta(hours=12)
+            recent_files = datetime.now(timezone.utc) - modified < timedelta(hours=AGENT_WORKSPACE_MIN_AGE_HOURS)
+            try:
+                runtime_processes = safe_runtime_processes()
+            except OSError:
+                runtime_processes = []
+            active_runtimes = [process for process in runtime_processes if _runtime_uses_workspace(process, path)]
+            runtime_coverage_complete = _runtime_inventory_coverage_complete(runtime_processes)
+            active_reason = (
+                'A process is using this checkout.' if active_runtimes
+                else 'Recent same-checkout AI session activity was observed.' if recent_session
+                else 'The workspace changed recently.' if recent_files
+                else None
+            )
+            registered = bool(evidence.get('registered_worktree')) or candidate.get('kind') == 'worktree'
+            safety_state, safety_reason = _classify_workspace_safety(
+                git_evidence, registered=registered, active_reason=active_reason,
+                runtime_coverage_complete=runtime_coverage_complete,
+            )
+            evidence.update({
+                'active_runtime_pids': [getattr(process, 'pid', None) for process in active_runtimes],
+                'runtime_status': 'Active process observed' if active_runtimes else 'No matching process CWD observed',
+                'runtime_coverage_complete': runtime_coverage_complete,
+                'recent_session_active': recent_session, 'recent_file_active': recent_files,
+            })
+            size_label = bytes_label(size_bytes)
+            measured_prefix = '' if size_complete else 'at least '
+            item.update({
+                'safety_state': safety_state, 'safety_reason': safety_reason,
+                'size_bytes': size_bytes, 'size_complete': size_complete, 'size_basis': size_basis,
+                'shared_bytes_excluded': shared_bytes_excluded,
+                'impact_label': f'{measured_prefix}{size_label} · {safety_state}',
+                'summary': f'{measured_prefix}{size_label} in {safety_state} AI workspace · {safety_reason}',
+                'why_inactive': safety_reason,
+            })
         except OSError:
             evidence['identity_status'] = 'Path missing or unreadable; do not remove'
+            item.update({'safety_state': 'review', 'safety_reason': evidence['identity_status'],
+                         'why_inactive': evidence['identity_status']})
         item['workspace_evidence'] = evidence
         item['cleanup_prompt'] = _optimize_candidate_prompt(item)
         item['evidence_hash'] = _optimize_candidate_evidence_hash(item)
@@ -2582,8 +2875,15 @@ def build_optimize_inventory(
             "view": "receipts",
         })
 
+    try:
+        runtime_processes = safe_runtime_processes()
+    except OSError:
+        runtime_processes = []
+    runtime_coverage_complete = _runtime_inventory_coverage_complete(runtime_processes)
+    workspace_audit_deadline = time.monotonic() + OPTIMIZE_WORKSPACE_AUDIT_MAX_SECONDS
+
     projects = {project for project in by_project if is_reliable_project_path(project)}
-    for worktree in _agent_workspace_rows(projects):
+    for worktree in _agent_workspace_rows(projects, deadline=workspace_audit_deadline):
         path = str(worktree.get("path") or "")
         if not path or path in suppressed_projects:
             continue
@@ -2598,47 +2898,91 @@ def build_optimize_inventory(
         )]
         latest = max((_parse_iso_datetime(session_review_identity(row, by_id).get('last_activity')) or MIN_DT
                       for row in related_sessions), default=None)
-        if latest is not None and now - latest.astimezone(timezone.utc) < timedelta(hours=12):
-            continue
         mtime = worktree.get("mtime")
-        if latest is None and isinstance(mtime, datetime) and now - mtime.astimezone(timezone.utc) < timedelta(hours=AGENT_WORKSPACE_MIN_AGE_HOURS):
-            continue
-        title = "Review stale AI worktree" if source == "git_worktree" else "Review AI scratch workspace"
-        why = (
-            "The worktree path looks agent-created and no recent same-path local session activity was observed."
-            if source == "git_worktree"
-            else f"The folder name looks AI-created and it has not changed for {AGENT_WORKSPACE_MIN_AGE_HOURS}+ hours."
+        recent_session = latest is not None and now - latest.astimezone(timezone.utc) < timedelta(hours=12)
+        recent_files = (
+            isinstance(mtime, datetime)
+            and now - mtime.astimezone(timezone.utc) < timedelta(hours=AGENT_WORKSPACE_MIN_AGE_HOURS)
         )
+        active_runtimes = [process for process in runtime_processes if _runtime_uses_workspace(process, path_obj)]
+        disk = _workspace_disk_usage(path_obj, deadline=workspace_audit_deadline)
+        size_bytes = int(disk.get("bytes") or 0)
+        size_complete = bool(disk.get("complete"))
+        size_basis = str(disk.get("basis") or "logical")
+        shared_bytes_excluded = int(disk.get("shared_bytes_excluded") or 0)
+        git_evidence = _workspace_git_evidence(path_obj, deadline=workspace_audit_deadline)
+        registered = bool(worktree.get("registered_worktree")) or source == "git_worktree"
+        active_reason = (
+            "A process is using this checkout."
+            if active_runtimes
+            else "Recent same-checkout AI session activity was observed."
+            if recent_session
+            else "The workspace changed recently."
+            if recent_files
+            else None
+        )
+        safety_state, safety_reason = _classify_workspace_safety(
+            git_evidence, registered=registered, active_reason=active_reason,
+            runtime_coverage_complete=runtime_coverage_complete,
+        )
+        workspace_kind = "worktree" if source == "git_worktree" else "agent_workspace"
+        title = {
+            "ready": "Ready to review AI worktree",
+            "preserve": "Preserve AI workspace",
+            "active": "Active AI workspace",
+            "review": "Review AI workspace",
+        }[safety_state]
         evidence = (
-            "Inferred from git worktree path shape and local session age."
-            if source == "git_worktree"
-            else "Inferred from local temp/scratch path shape and directory modified time."
+            f"{safety_reason} Size is {'measured' if size_complete else 'a bounded lower bound'} from local files. "
+            f"{bytes_label(shared_bytes_excluded)} of shared hard-link allocation was excluded. "
+            "Git landing uses local refs and patch equivalence; no network fetch occurred."
         )
+        size_label = bytes_label(size_bytes)
+        measured_prefix = "" if size_complete else "at least "
         candidates.append({
             "id": f"worktree:{path}",
-            "selection_rule": "Inferred AI-tool branch or workspace path; no linked session update for 12+ hours, or directory mtime 4+ hours old when session activity is unavailable. This is review eligibility, not proof of inactivity or merged work.",
+            "selection_rule": "Bounded AI workspace discovery plus exact-path Git, disk, process, and session evidence. Clean and landed means patch-equivalent to a local main ref; it does not imply a remote fetch or authorize removal.",
+            "review_scope": "1 exact workspace · local disk, Git, process, and linked-session evidence",
             "scan_scope": f"Known-project Git worktree registrations plus temp and project worktree roots; bounded to depth {AGENT_WORKSPACE_SCAN_MAX_DEPTH} and {AGENT_WORKSPACE_SCAN_MAX_DIRS} directories per root. Arbitrary locations, detached unnamed clones and unobserved command working directories may be missed. This is not a complete machine inventory.",
             "workspace_evidence": {"discovery": source, "inventory_root": worktree.get("inventory_root"),
                                    "common_git_directory": worktree.get("common_git_directory"),
-                                   "branch": worktree.get("branch"), "head": worktree.get("head"),
+                                   "branch": git_evidence.get("branch") or worktree.get("branch"),
+                                   "head": worktree.get("head"), "registered_worktree": registered,
                                    "directory_modified_at": mtime.isoformat() if isinstance(mtime, datetime) else None,
                                    "related_session_ids": [row.session_id for row in related_sessions[:REVIEW_BATCH_SIZE]],
-                                   "merge_status": "Unknown; verify against current remote main including squash equivalents",
-                                   "runtime_status": "Unknown; verify directory-specific attachments"},
-            "kind": "worktree" if source == "git_worktree" else "agent_workspace",
+                                   "active_runtime_pids": [getattr(process, "pid", None) for process in active_runtimes],
+                                   "runtime_status": "Active process observed" if active_runtimes else "No matching process CWD observed",
+                                   "runtime_coverage_complete": runtime_coverage_complete,
+                                   "recent_session_active": recent_session, "recent_file_active": recent_files,
+                                   "size_bytes": size_bytes, "size_complete": size_complete, "size_basis": size_basis,
+                                   "shared_bytes_excluded": shared_bytes_excluded,
+                                   **git_evidence},
+            "kind": workspace_kind,
             "title": title,
             "project": short_path(path),
             "project_full": path,
-            "summary": "This looks like AI-created scratch space. AIWatcher will not delete it automatically; review it first.",
+            "summary": f"{measured_prefix}{size_label} in {safety_state} AI workspace · {safety_reason}",
             "activity_summary": (
                 f"{'Git worktree' if source == 'git_worktree' else 'Scratch workspace'} · "
+                f"{measured_prefix}{size_label} · {safety_state} · "
                 f"last signal {_elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else 'not found'} · "
                 f"{len(related_sessions)} linked session{'s' if len(related_sessions) != 1 else ''}"
             ),
-            "why_inactive": why,
-            "evidence_label": "Inferred",
+            "why_inactive": safety_reason,
+            "evidence_label": "Observed/inferred",
             "evidence": evidence,
-            "impact_label": "disk cleanup possible",
+            "impact_label": f"{measured_prefix}{size_label} · {safety_state}",
+            "reward_basis": (
+                f"Measured exclusive allocated workspace size: {measured_prefix}{size_label}; "
+                f"{bytes_label(shared_bytes_excluded)} shared hard-link allocation excluded. "
+                "Actual relief must be measured again after any separately confirmed owning-tool removal."
+            ),
+            "safety_state": safety_state,
+            "safety_reason": safety_reason,
+            "size_bytes": size_bytes,
+            "size_complete": size_complete,
+            "size_basis": size_basis,
+            "shared_bytes_excluded": shared_bytes_excluded,
             "token_volume": 0,
             "session_count": len(related_sessions),
             "updated_label": _elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else "no recent session",
@@ -2647,10 +2991,7 @@ def build_optimize_inventory(
             "action_label": "Copy cleanup prompt",
         })
 
-    try:
-        stale_processes = [process for process in safe_runtime_processes() if process.stale]
-    except OSError:
-        stale_processes = []
+    stale_processes = [process for process in runtime_processes if process.stale]
     if stale_processes:
         rss_kb = sum(process.rss_kb or 0 for process in stale_processes)
         rss_impact = f"{bytes_label(int(rss_kb * 1024))} RSS observed" if rss_kb else "runtime clutter"
@@ -2697,7 +3038,23 @@ def build_optimize_inventory(
         })
 
     candidates = _group_pending_fresh_starts(candidates)
-    candidates.sort(key=lambda item: (int(item.get("token_volume") or 0), int(item.get("session_count") or 0)), reverse=True)
+
+    def optimize_priority(item: dict[str, object]) -> tuple[int, int, int]:
+        kind = str(item.get("kind") or "")
+        safety = str(item.get("safety_state") or "")
+        priority = {
+            "unlanded_work": 60,
+            "ready": 50,
+            "preserve": 40,
+            "review": 30,
+            "fresh_start_pending": 20,
+            "stale_processes": 10,
+            "active": 0,
+        }.get(kind, {"ready": 50, "preserve": 40, "review": 30, "active": 0}.get(safety, 10))
+        resource_bytes = int(item.get("size_bytes") or 0) + int(item.get("rss_kb") or 0) * 1024
+        return priority, resource_bytes, int(item.get("lines_at_stake") or 0)
+
+    candidates.sort(key=optimize_priority, reverse=True)
     for item in candidates:
         item["review_contract_version"] = OPTIMIZE_REVIEW_CONTRACT_VERSION
         item["cleanup_prompt"] = _optimize_candidate_prompt(item)
@@ -2711,24 +3068,73 @@ def build_optimize_inventory(
         and receipt["evidence"].get("evidence_hash") == item["evidence_hash"]
         for receipt in receipts if isinstance(receipt, dict)
     )]
-    total_tokens = sum(int(item.get("token_volume") or 0) for item in candidates)
+    workspace_candidates = [item for item in candidates if item.get("kind") in {"worktree", "agent_workspace"}]
+    ready_workspaces = [item for item in workspace_candidates if item.get("safety_state") == "ready"]
+    protected_workspaces = [item for item in workspace_candidates if item.get("safety_state") in {"preserve", "review", "active"}]
+    ready_disk_bytes = sum(int(item.get("size_bytes") or 0) for item in ready_workspaces)
+    protected_disk_bytes = sum(int(item.get("size_bytes") or 0) for item in protected_workspaces)
+    ready_disk_complete = all(bool(item.get("size_complete")) for item in ready_workspaces)
+    protected_disk_complete = all(bool(item.get("size_complete")) for item in protected_workspaces)
+    disk_ready_workspaces = [item for item in ready_workspaces if item.get("size_basis") == "exclusive_allocated"]
+    disk_notify_bytes = sum(int(item.get("size_bytes") or 0) for item in disk_ready_workspaces)
     total_rss_kb = sum(int(item.get("rss_kb") or 0) for item in candidates)
-    if total_tokens:
-        impact_label = f"~{compact_int(total_tokens)} session tokens represented"
+    if ready_disk_bytes or protected_disk_bytes:
+        parts = []
+        if ready_disk_bytes:
+            parts.append(f"{'at least ' if not ready_disk_complete else ''}{bytes_label(ready_disk_bytes)} ready to review")
+        if protected_disk_bytes:
+            parts.append(f"{'at least ' if not protected_disk_complete else ''}{bytes_label(protected_disk_bytes)} protected")
+        impact_label = " · ".join(parts)
     elif total_rss_kb:
         impact_label = f"{bytes_label(int(total_rss_kb * 1024))} local RSS to review"
     else:
         impact_label = "no context savings claim"
+    notify_companion = (
+        disk_notify_bytes >= OPTIMIZE_DISK_NOTIFY_BYTES
+        or any(item.get("kind") == "unlanded_work" for item in candidates)
+    )
+    if any(item.get("kind") == "unlanded_work" for item in candidates):
+        companion_summary = "Work that may not have reached main needs review"
+    elif disk_notify_bytes >= OPTIMIZE_DISK_NOTIFY_BYTES:
+        disk_complete = all(bool(item.get("size_complete")) for item in disk_ready_workspaces)
+        companion_summary = (
+            f"{'At least ' if not disk_complete else ''}{bytes_label(disk_notify_bytes)} · "
+            f"{len(disk_ready_workspaces)} clean AI worktree"
+            f"{'s' if len(disk_ready_workspaces) != 1 else ''} ready"
+        )
+    else:
+        companion_summary = "Optimize evidence is available in Control"
+    actionable = any(
+        item.get("kind") not in {"worktree", "agent_workspace"}
+        or item.get("safety_state") != "active"
+        for item in candidates
+    )
     return {
-        "status": "needs_action" if candidates else "quiet",
-        "title": "Optimize workspace" if candidates else "Workspace clean",
-        "summary": f"{len(candidates)} review group{'s' if len(candidates) != 1 else ''} found." if candidates else "No cleanup candidates stood out in the scanned locations.",
+        "status": "needs_action" if actionable else "quiet",
+        "title": "Optimize workspace" if actionable else "Active work protected" if candidates else "Workspace clean",
+        "summary": (
+            f"{len(candidates)} review group{'s' if len(candidates) != 1 else ''} found."
+            if actionable else "Only active AI workspaces were found; no cleanup action is recommended."
+            if candidates else "No cleanup candidates stood out in the scanned locations."
+        ),
         "impact_label": impact_label,
         "evidence_label": "Observed/inferred" if candidates else "Observed",
         "candidates": candidates[:8],
         "candidate_count": len(candidates),
         "omitted_candidate_count": max(0, len(candidates) - 8),
         "top": candidates[0] if candidates else None,
+        "ready_disk_bytes": ready_disk_bytes,
+        "ready_disk_label": bytes_label(ready_disk_bytes),
+        "ready_disk_complete": ready_disk_complete,
+        "disk_notify_bytes": disk_notify_bytes,
+        "ready_workspace_count": len(ready_workspaces),
+        "protected_disk_bytes": protected_disk_bytes,
+        "protected_disk_label": bytes_label(protected_disk_bytes),
+        "protected_disk_complete": protected_disk_complete,
+        "protected_workspace_count": len(protected_workspaces),
+        "notify_companion": notify_companion,
+        "companion_summary": companion_summary,
+        "disk_notification_threshold_bytes": OPTIMIZE_DISK_NOTIFY_BYTES,
         "recent_receipts": receipts[:5],
         "checklist": _optimize_checklist(candidates[:8]),
     }
@@ -10692,7 +11098,8 @@ def _build_companion_state() -> dict[str, object]:
                 ),
             }
     optimize = summary.get("optimize")
-    if isinstance(optimize, dict) and optimize.get("status") == "needs_action":
+    if (isinstance(optimize, dict) and optimize.get("status") == "needs_action"
+            and optimize.get("notify_companion", True)):
         top = optimize.get("top") if isinstance(optimize.get("top"), dict) else {}
         project = str(top.get("project_full") or top.get("project") or "")
         project_quiet = companion_skip_active(f"optimize_workspace:{project}") if project else False
@@ -10700,13 +11107,18 @@ def _build_companion_state() -> dict[str, object]:
         candidate_quiet = companion_skip_active(f"optimize_workspace:{top.get('id')}:{top.get('evidence_hash')}") if top.get("id") and top.get("evidence_hash") else False
         if not (project_quiet or global_quiet or candidate_quiet):
             groups = optimize.get("candidate_count") or len(optimize.get("candidates") or []) or 1
-            subtitle = str(top.get("summary") or optimize.get("summary") or "Cleanup review available.")
+            subtitle = str(optimize.get("companion_summary") or top.get("summary") or optimize.get("summary") or "Cleanup review available.")
             if top.get("kind") == "unlanded_work":
                 subtitle = f"{top.get('unlanded_count') or 0} change(s) look absent from main; {top.get('lines_at_stake') or 0} added lines. Check before assuming shipped."
+            protects_work = top.get("kind") == "unlanded_work"
+            disk_ready = (
+                not protects_work
+                and int(optimize.get("disk_notify_bytes") or 0) >= OPTIMIZE_DISK_NOTIFY_BYTES
+            )
             return {
                 **base,
                 "state": "optimize_available",
-                "label": "Optimize",
+                "label": "Protect work" if protects_work else "Reclaim disk" if disk_ready else "Optimize",
                 "title": "Optimize workspace",
                 "subtitle": subtitle,
                 # Not "Review". A context-health row's button says that, and the
@@ -10714,7 +11126,7 @@ def _build_companion_state() -> dict[str, object]:
                 # spot, different destination, and the click lands on whichever
                 # arrived last. This one is organization only by its own
                 # reward_basis, so it says so.
-                "primary_label": "Tidy up",
+                "primary_label": "Check work" if protects_work else "Review space" if disk_ready else "Tidy up",
                 "primary_url": "/?view=control#optimizeWorkspace",
                 "skip_label": "Skip",
                 "skip_state": "optimize_available",

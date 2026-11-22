@@ -17,7 +17,7 @@ import sys
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from .processes import RuntimeProcess, discover_runtime_processes
+from .processes import RuntimeProcess, RuntimeProcessInventory, discover_runtime_processes
 from .scanner import LocalSession, _normalize_project_path
 
 
@@ -443,7 +443,7 @@ def safe_runtime_processes() -> list[RuntimeProcess]:
     try:
         return discover_runtime_processes()
     except OSError:
-        return []
+        return RuntimeProcessInventory(coverage_complete=False)
 
 
 def perform_runtime_return(attachment: RuntimeAttachment) -> dict[str, object]:

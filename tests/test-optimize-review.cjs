@@ -73,14 +73,36 @@ test('progress and failure states do not expose cached copy controls', () => {
 test('current contract renders bounded coverage while older confirmation contract waits', () => {
   const h = harness();
   const current = {candidate_count: 11, omitted_candidate_count: 10,
-    candidates: [{id:'worktree:/tmp/example', kind:'worktree', review_contract_version:3, project_full:'/tmp/example'}]};
+    candidates: [{id:'worktree:/tmp/example', kind:'worktree', review_contract_version:4, project_full:'/tmp/example'}]};
   const html = h.context.renderOptimizeWorkspace(current);
   assert.match(html, /1 of 11/);
   assert.match(html, /not every folder on this machine/);
   assert.match(html, /10 additional candidates/);
   assert.match(html, /Copy displayed review items/);
   assert.doesNotMatch(html, /Updating Optimize evidence/);
-  assert.match(h.context.renderOptimizeWorkspace({candidates:[{review_contract_version:2}]}), /Updating Optimize evidence/);
+  assert.match(h.context.renderOptimizeWorkspace({candidates:[{review_contract_version:3}]}), /Updating Optimize evidence/);
+});
+test('disk candidates render in safety groups with measured size', () => {
+  const h = harness();
+  const html = h.context.renderOptimizeWorkspace({candidate_count: 2, candidates: [
+    {id:'ready', kind:'worktree', review_contract_version:4, safety_state:'ready', size_bytes:1073741824, title:'Ready', project_full:'/ready'},
+    {id:'dirty', kind:'worktree', review_contract_version:4, safety_state:'preserve', size_bytes:1048576, title:'Keep', project_full:'/dirty'},
+  ]});
+  assert.match(html, /Ready to review/);
+  assert.match(html, /Needs preservation/);
+  assert.match(html, /1\.0 GB/);
+  assert.match(html, /dirty or unlanded work is protected/i);
+});
+test('protected and active workspaces do not offer cleanup actions', () => {
+  const h = harness();
+  const html = h.context.renderOptimizeWorkspace({candidate_count: 2, candidates: [
+    {id:'dirty', kind:'worktree', review_contract_version:4, safety_state:'preserve', title:'Keep', project_full:'/dirty'},
+    {id:'active', kind:'worktree', review_contract_version:4, safety_state:'active', title:'Active', project_full:'/active'},
+  ]});
+  assert.match(html, /Review evidence/);
+  assert.match(html, /Keep protected/);
+  assert.doesNotMatch(html, />Copy cleanup prompt</);
+  assert.doesNotMatch(html, />Review decision</);
 });
 test('cancel cancels a pending summary without recording anything', async () => {
   const h = harness(), pending = h.context.openOptimizeReview('a');

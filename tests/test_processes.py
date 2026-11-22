@@ -137,6 +137,23 @@ class RuntimeProcessTests(unittest.TestCase):
         self.assertFalse(process.stale)
         self.assertEqual(process.stale_reasons, [])
 
+    def test_codex_without_cwd_flag_uses_actual_process_working_directory(self) -> None:
+        row = ProcessRow(
+            pid=792,
+            ppid=42,
+            state="S",
+            age_seconds=60,
+            rss_kb=128000,
+            cpu_percent=0.0,
+            command="/usr/local/bin/codex",
+        )
+        with patch("aiwatcher_cli.processes._process_working_directory", return_value="/repo/active") as resolver:
+            process = classify_process(row)
+        self.assertIsNotNone(process)
+        assert process is not None
+        self.assertEqual(process.cwd, "/repo/active")
+        resolver.assert_called_once_with(792)
+
     def test_seconds_label_is_compact(self) -> None:
         self.assertEqual(seconds_label(None), "unknown")
         self.assertEqual(seconds_label(90), "2m")
