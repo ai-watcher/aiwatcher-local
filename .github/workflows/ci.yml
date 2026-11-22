@@ -85,3 +85,49 @@ jobs:
         run: aiwatcher status
       - name: Export smoke test
         run: aiwatcher export --format json --since 2099-01-01
+
+  package-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build distributions once
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  package-acceptance:
+    needs: package-build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Verify the installed wheel outside the checkout
+        run: >-
+          python scripts/verify_release_artifact.py
+          --dist-dir dist
+          --json-output acceptance-${{ runner.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-acceptance-${{ runner.os }}
+          path: acceptance-${{ runner.os }}.json
+          if-no-files-found: error

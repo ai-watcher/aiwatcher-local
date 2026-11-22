@@ -622,6 +622,7 @@ Useful next reads:
 - [CLI reference](docs/CLI.md)
 - [HTTP API reference](docs/HTTP-API.md)
 - [Release checklist](docs/RELEASE.md)
+- [Focused beta acceptance](docs/BETA_ACCEPTANCE.md)
 
 ## AIWatcher Local and Enterprise
 
