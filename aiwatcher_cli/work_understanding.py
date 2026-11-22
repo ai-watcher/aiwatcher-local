@@ -14,6 +14,11 @@ MAX_INTENT_CHARS = 700
 MAX_COMMITS = 5
 MAX_AREAS = 6
 
+_UNUSABLE_OBJECTIVE_SUBJECTS = {
+    "change", "changes", "checkpoint", "feature", "fix", "fixes", "temp", "temporary",
+    "update", "updates", "wip", "work in progress",
+}
+
 
 def _clean_text(value: object, limit: int = MAX_INTENT_CHARS) -> str:
     return " ".join(str(value or "").strip().split())[:limit]
@@ -47,6 +52,30 @@ def _changed_areas(files: Iterable[object]) -> list[str]:
         if len(areas) >= MAX_AREAS:
             break
     return areas
+
+
+def objective_from_commit_subjects(commits: Iterable[dict[str, object]]) -> str | None:
+    """Return an editable objective draft only from a meaningful commit subject.
+
+    Commit subjects are delivery evidence, not proof of the developer's original
+    request. The first useful subject is kept verbatim so the UI can say exactly
+    where the draft came from instead of synthesizing a stronger claim.
+    """
+    for row in commits:
+        if not isinstance(row, dict):
+            continue
+        subject = _clean_text(row.get("subject"), MAX_INTENT_CHARS)
+        normalized = _intent_key(subject)
+        if (
+            not subject
+            or normalized in _UNUSABLE_OBJECTIVE_SUBJECTS
+            or normalized.startswith("merge ")
+            or normalized.startswith("revert ")
+            or normalized.startswith("bump version")
+        ):
+            continue
+        return subject
+    return None
 
 
 def _turn_timestamp(value: object) -> float | None:

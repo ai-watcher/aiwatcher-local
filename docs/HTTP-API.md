@@ -344,9 +344,10 @@ false` with the reason.
 checkouts fast-forward only when clean and non-diverged, while package installs
 run the detected installer command (`pipx`, `uv tool`, or the active Python's
 `pip`). When the dashboard posts
-`{"restart": true}` after a successful apply, the local server restarts itself.
-The Companion is a separate process and is not restarted; the response carries
-`companion_running` and the message says what it needs.
+`{"restart": true}` after a successful apply, AIWatcher restarts the dashboard
+and Companion together from the updated installation. The response identifies
+the coordinated restart target and the previous dashboard PID so the browser
+can wait for the replacement process before reloading.
 These endpoints are called by the dashboard or native companion only.
 
 If you need one of these programmatically, prefer the equivalent CLI command

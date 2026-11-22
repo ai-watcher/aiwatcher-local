@@ -168,7 +168,7 @@ from .session_presence import (
     presence_for_sessions,
     tool_label,
 )
-from .work_understanding import build_work_understanding
+from .work_understanding import build_work_understanding, objective_from_commit_subjects
 from .session_health import (
     ContextHealth,
     analyze_all_sessions,
@@ -225,6 +225,7 @@ REPLAY_CHART_MAX_TURNS = 1_200
 CACHE_WRITE_TURN_TOKENS = 10_000
 SUMMARY_MEMORY_TTL_SECONDS = 120
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
+COMPANION_STATE_MEMORY_TTL_SECONDS = 10.0
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
 # 9: claimed twice on separate branches -- chat titles and start times on
@@ -265,12 +266,67 @@ def restart_command(
 
 
 def _restart_current_process() -> None:
+    """Re-exec this dashboard for callers that specifically own only the UI."""
     command = restart_command()
     os.execv(command[0], command)
 
 
-def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
-    timer = threading.Timer(delay_seconds, _restart_current_process)
+def product_restart_command(
+    *, host: str, port: int, interval: int = 30, presence: bool = True,
+) -> list[str]:
+    """Build the one-product restart command used after a dashboard update."""
+    command = [
+        sys.executable,
+        "-m",
+        "aiwatcher_cli",
+        "restart",
+        "--from-companion",
+        "--interval",
+        str(max(15, int(interval))),
+        "--ui-host",
+        host,
+        "--ui-port",
+        str(port),
+    ]
+    if not presence:
+        command.append("--no-presence")
+    return command
+
+
+def _launch_product_restart(*, host: str, port: int, interval: int, presence: bool) -> None:
+    package_root = str(Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+    log_path = Path(tempfile.gettempdir()) / "aiwatcher-restart.log"
+    kwargs: dict[str, object] = {"start_new_session": os.name != "nt"}
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    with log_path.open("ab") as log:
+        subprocess.Popen(
+            product_restart_command(
+                host=host, port=port, interval=interval, presence=presence,
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            cwd=package_root,
+            env=env,
+            **kwargs,
+        )
+
+
+def schedule_product_restart(
+    *, host: str, port: int, interval: int = 30, presence: bool = True,
+    delay_seconds: float = 0.8,
+) -> None:
+    timer = threading.Timer(
+        delay_seconds,
+        _launch_product_restart,
+        kwargs={"host": host, "port": port, "interval": interval, "presence": presence},
+    )
     timer.daemon = True
     timer.start()
 
@@ -348,6 +404,9 @@ UNLANDED_CACHE_TTL_SECONDS = 600.0
 _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
+_COMPANION_STATE_CACHE_LOCK = threading.Lock()
+_COMPANION_STATE_CACHE: tuple[float, dict[str, object]] | None = None
+_COMPANION_STATE_REFRESHING = False
 _AI_ASSIST_INFLIGHT_LOCK = threading.Lock()
 _COMPANION_DELIVERY_DECISION_LOCK = threading.Lock()
 _AI_ASSIST_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
@@ -4831,10 +4890,25 @@ def _finalize_delivery_review(
             objective = ObjectiveClaim(
                 provenance="inferred", confidence="low", text=prompt,
             ).to_json()
+            objective["inference_basis"] = "linked_session"
             payload["objective"] = objective
+        else:
+            commit_objective = objective_from_commit_subjects(
+                (understanding or {}).get("commits") or [],
+            )
+            if commit_objective:
+                objective = ObjectiveClaim(
+                    provenance="inferred", confidence="low", text=commit_objective,
+                ).to_json()
+                objective["inference_basis"] = "commit_subject"
+                payload["objective"] = objective
     payload["objective_retained"] = bool(objective.get("text"))
     payload["objective_label"] = (
-        "Objective inferred from a linked session; confirm before sharing"
+        (
+            "Editable objective draft inferred from a commit subject; confirm before sharing"
+            if objective.get("inference_basis") == "commit_subject"
+            else "Objective inferred from a linked session; confirm before sharing"
+        )
         if objective.get("provenance") == "inferred"
         else (
             "Objective confirmed; text is not retained"
@@ -10776,6 +10850,8 @@ def _build_companion_state() -> dict[str, object]:
     if delivery_receipt is not None:
         event = delivery_receipt.get("event") if isinstance(delivery_receipt.get("event"), dict) else {}
         snapshot = delivery_receipt.get("snapshot") if isinstance(delivery_receipt.get("snapshot"), dict) else {}
+        objective = delivery_receipt.get("objective") if isinstance(delivery_receipt.get("objective"), dict) else {}
+        workflow = delivery_receipt.get("workflow") if isinstance(delivery_receipt.get("workflow"), dict) else {}
         receipt_id = str(delivery_receipt.get("receipt_id") or "")
         branch = str(snapshot.get("branch") or "detached HEAD")
         commit_count = len(snapshot.get("commit_shas") or [])
@@ -10809,6 +10885,23 @@ def _build_companion_state() -> dict[str, object]:
                 "lines_added": lines_added,
                 "lines_removed": lines_removed,
                 "check_count": len(exact_checks),
+                "checks": [
+                    {
+                        "runner": str(row.get("runner") or "Check"),
+                        "status": str(row.get("status") or "unknown"),
+                        "scope": str(row.get("scope") or "unknown"),
+                    }
+                    for row in exact_checks[:2]
+                ],
+                "workflow": {
+                    "session_count": int(workflow.get("session_count") or 0),
+                    "user_turns": int(workflow.get("user_turns") or 0),
+                    "model_calls": int(workflow.get("model_calls") or 0),
+                    "tool_calls": int(workflow.get("tool_calls") or 0),
+                },
+                "attention": [str(item) for item in (delivery_receipt.get("attention") or [])[:2]],
+                "goal": str(objective.get("text") or ""),
+                "goal_provenance": str(objective.get("provenance") or "unavailable"),
                 "destination": destination,
             },
             "badge": {
@@ -11190,6 +11283,81 @@ def build_companion_state() -> dict[str, object]:
     return _companion_activity_contract(_build_companion_state())
 
 
+def _companion_refreshing_state() -> dict[str, object]:
+    """Truthful first paint while one local Companion snapshot is being built."""
+    return {
+        "state": "connecting",
+        "label": "Refreshing local activity",
+        "title": "AIWatcher",
+        "subtitle": "Reading the latest local evidence",
+        "primary_label": "UI",
+        "primary_action": "open_url",
+        "primary_session_id": "",
+        "primary_runtime_available": False,
+        "primary_url": "/",
+        "plan_url": "/?view=prompt",
+        "ask_url": "/?ask=1",
+        "control_url": "/?view=prompt",
+        "watch_url": "/",
+        "console_url": "/",
+        "detail": "One local refresh is running. Companion will update automatically.",
+        "presence": {"working": 0, "waiting": 0, "quiet": 0, "total": 0},
+        "badge": None,
+        "finished_sessions": [],
+        "completed_work": {"recent": 0, "label": ""},
+        "activity_sections": [],
+        "activity_line": "Refreshing local activity",
+        "visibility": "ambient",
+        "confidence": "refreshing",
+        "delivery_confirmed": False,
+        "delivery_receipt_id": "",
+        "companion_cache": {"status": "refreshing", "age_seconds": None},
+    }
+
+
+def _refresh_companion_state_cache() -> None:
+    global _COMPANION_STATE_CACHE, _COMPANION_STATE_REFRESHING
+    try:
+        payload = build_companion_state()
+        with _COMPANION_STATE_CACHE_LOCK:
+            _COMPANION_STATE_CACHE = (time.monotonic(), payload)
+    finally:
+        with _COMPANION_STATE_CACHE_LOCK:
+            _COMPANION_STATE_REFRESHING = False
+
+
+def build_companion_state_cached() -> dict[str, object]:
+    """Serve Companion polls immediately and allow only one evidence rebuild."""
+    global _COMPANION_STATE_REFRESHING
+    now = time.monotonic()
+    start_refresh = False
+    with _COMPANION_STATE_CACHE_LOCK:
+        cached = _COMPANION_STATE_CACHE
+        age = now - cached[0] if cached is not None else None
+        if age is not None and age <= COMPANION_STATE_MEMORY_TTL_SECONDS:
+            payload = dict(cached[1])
+            payload["companion_cache"] = {"status": "fresh", "age_seconds": round(age, 3)}
+            return payload
+        if not _COMPANION_STATE_REFRESHING:
+            _COMPANION_STATE_REFRESHING = True
+            start_refresh = True
+        stale_payload = dict(cached[1]) if cached is not None else None
+
+    if start_refresh:
+        threading.Thread(
+            target=_refresh_companion_state_cache,
+            name="aiwatcher-companion-state-refresh",
+            daemon=True,
+        ).start()
+    if stale_payload is None:
+        return _companion_refreshing_state()
+    stale_payload["companion_cache"] = {
+        "status": "refreshing",
+        "age_seconds": round(float(age or 0.0), 3),
+    }
+    return stale_payload
+
+
 def _build_compact_prompt(health: object) -> str:
     """Generate a /compact-style smart compaction prompt for a session."""
     if not isinstance(health, ContextHealth):
@@ -11420,7 +11588,7 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/companion-state":
-            self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
+            self._send(200, json.dumps(build_companion_state_cached()), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/companion-usage":
             if self._is_cross_origin():
@@ -11769,20 +11937,21 @@ class UIHandler(BaseHTTPRequestHandler):
                     "process_cwd": process_cwd,
                 }
             if result.get("ok") and result.get("applied") and restart:
-                # Only this process restarts. The Companion is a detached
-                # process the dashboard does not supervise (the heartbeat is a
-                # heartbeat, not a supervisor, and it does not record the
-                # presence flags a relaunch would need), so the message says
-                # what it needs rather than claiming it was covered.
+                watcher = get_watcher_status()
+                server_host, server_port = self.server.server_address[:2]
+                restart_host = str(server_host or "127.0.0.1")
+                if restart_host in {"0.0.0.0", "::"}:
+                    restart_host = "127.0.0.1"
                 result["restart_requested"] = True
-                result["companion_running"] = bool(get_watcher_status().get("running"))
-                result["message"] = "Updated. Restarting the dashboard so it uses the new code."
-                if result["companion_running"]:
-                    result["message"] += (
-                        " The Companion keeps the old code until you run"
-                        " `aiwatcher companion stop`, then `aiwatcher companion start`."
-                    )
-                schedule_dashboard_restart()
+                result["restart_target"] = "dashboard_and_companion"
+                result["previous_dashboard_pid"] = os.getpid()
+                result["message"] = "Updated. Restarting the dashboard and Companion with the new code."
+                schedule_product_restart(
+                    host=restart_host,
+                    port=int(server_port),
+                    interval=int(watcher.get("interval_seconds") or 30),
+                    presence=bool(watcher.get("overlay")) if watcher.get("running") else True,
+                )
             status = 200 if result.get("ok") else 409
             self._send(status, json.dumps(result), "application/json; charset=utf-8")
             return

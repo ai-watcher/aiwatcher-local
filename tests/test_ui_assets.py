@@ -3668,7 +3668,9 @@ class ApplyIsASecondStepTest(unittest.TestCase):
         self.assertIn("openUpdatePanel(", handler)
 
     def test_the_apply_button_names_the_restart(self):
-        self.assertIn(">Apply update and restart dashboard<", self.html)
+        self.assertIn(">Apply update and restart AIWatcher<", self.html)
+        self.assertIn("async function waitForDashboardRestart(previousPid)", self.js)
+        self.assertIn("Number(health.pid || 0) !== prior", self.js)
 
     def test_package_installs_keep_the_update_control(self):
         classifier = js_function_source(self.js, "classifyUpdateStatus")
