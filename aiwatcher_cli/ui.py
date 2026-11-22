@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import copy
+import ipaddress
 import json
 import os
 import re
@@ -11426,6 +11427,45 @@ class UIHandler(BaseHTTPRequestHandler):
             return
         super().handle_error(request, client_address)
 
+    def _allowed_request_hosts(self) -> set[str]:
+        """Host names that may address this server's bound socket."""
+        bound = str(self.server.server_address[0]).strip().lower().split("%", 1)[0]
+        loopback = {"127.0.0.1", "localhost", "::1"}
+        try:
+            address = ipaddress.ip_address(bound)
+        except ValueError:
+            address = None
+        if bound in {"", "0.0.0.0", "::"} or (address is not None and address.is_loopback):
+            return loopback
+        return {bound}
+
+    def _request_origin(self) -> str | None:
+        """Return the validated HTTP origin for Host, or None when invalid."""
+        authority = self.headers.get("Host", "").strip()
+        if not authority or any(value in authority for value in (",", "/", "@", "\t", " ")):
+            return None
+        try:
+            parsed = urlparse(f"http://{authority}")
+            port = parsed.port
+        except ValueError:
+            return None
+        host = (parsed.hostname or "").lower().split("%", 1)[0]
+        expected_port = int(self.server.server_address[1])
+        if host not in self._allowed_request_hosts() or port != expected_port:
+            return None
+        formatted_host = f"[{host}]" if ":" in host else host
+        return f"http://{formatted_host}:{expected_port}"
+
+    def _reject_invalid_host(self) -> bool:
+        if self._request_origin() is not None:
+            return False
+        self._send(
+            421,
+            json.dumps({"error": "Request Host does not match the AIWatcher loopback service"}),
+            "application/json; charset=utf-8",
+        )
+        return True
+
     def _trusted_origin(self) -> str | None:
         """Echo back Origin only for the AIWatcher extension or local dev pages.
 
@@ -11438,8 +11478,20 @@ class UIHandler(BaseHTTPRequestHandler):
         domains like http://127.0.0.1.evil.com or http://localhost.evil.com,
         which reintroduces the same cross-origin exposure a wildcard would have.
         """
-        origin = self.headers.get("Origin", "")
-        if origin.startswith("chrome-extension://"):
+        if self._request_origin() is None:
+            return None
+        origin = self.headers.get("Origin", "").strip()
+        extension = urlparse(origin)
+        extension_id = extension.hostname or ""
+        if (
+            extension.scheme == "chrome-extension"
+            and len(extension_id) == 32
+            and all("a" <= value <= "p" for value in extension_id)
+            and not extension.path
+            and not extension.params
+            and not extension.query
+            and not extension.fragment
+        ):
             return origin
         parsed = urlparse(origin)
         if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
@@ -11455,7 +11507,9 @@ class UIHandler(BaseHTTPRequestHandler):
         another site firing a GET. A client that sends neither (curl, the CLI)
         is not a browser page and is allowed through.
         """
-        own = f"http://{self.headers.get('Host', '').strip().lower()}"
+        own = self._request_origin()
+        if own is None:
+            return True
         origin = self.headers.get("Origin", "").strip().lower()
         if origin and origin != own:
             return True
@@ -11496,6 +11550,8 @@ class UIHandler(BaseHTTPRequestHandler):
             pass
 
     def do_OPTIONS(self) -> None:
+        if self._reject_invalid_host():
+            return
         trusted = self._trusted_origin()
         # A preflight only ever comes from another origin, so for these routes
         # the answer does not depend on which origin it is.
@@ -11511,6 +11567,8 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        if self._reject_invalid_host():
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/delivery-reviews" and self._is_cross_origin():
             self._send(
@@ -11795,6 +11853,8 @@ class UIHandler(BaseHTTPRequestHandler):
         self._send(404, "Not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:
+        if self._reject_invalid_host():
+            return
         parsed = urlparse(self.path)
         if parsed.path not in {
             "/api/outcome",
