@@ -1575,10 +1575,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let commitCount = preview["commit_count"] as? Int ?? 0
+        let commitShown = preview["commit_count_shown"] as? Int ?? commitCount
         let fileCount = preview["changed_file_count"] as? Int ?? 0
+        let fileShown = preview["changed_file_count_shown"] as? Int ?? fileCount
         let added = preview["lines_added"] as? Int ?? 0
         let removed = preview["lines_removed"] as? Int ?? 0
-        checkpointChanged.stringValue = "\(commitCount) commit\(commitCount == 1 ? "" : "s") · \(fileCount) files · +\(added)/-\(removed)"
+        let commitScope = preview["commits_complete"] as? Bool == false
+            ? "\(commitCount) commits (\(commitShown) shown)"
+            : "\(commitCount) commit\(commitCount == 1 ? "" : "s")"
+        let fileScope = preview["files_complete"] as? Bool == false
+            ? "\(fileCount) files (\(fileShown) shown)"
+            : "\(fileCount) files"
+        checkpointChanged.stringValue = "\(commitScope) · \(fileScope) · +\(added)/-\(removed)"
         let checks = preview["checks"] as? [[String: Any]] ?? []
         checkpointChecks.stringValue = checks.isEmpty
             ? "No exact-state check is recorded in the cached receipt."
@@ -1610,11 +1618,19 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             return value.isEmpty ? nil : value
         }
         if subjects.isEmpty {
-            let commitCount = (snapshot["commit_shas"] as? [String] ?? []).count
-            let fileCount = snapshot["changed_file_count"] as? Int ?? 0
+            let commitShown = snapshot["commit_count_shown"] as? Int ?? (snapshot["commit_shas"] as? [String] ?? []).count
+            let commitCount = snapshot["commit_count_total"] as? Int ?? commitShown
+            let fileShown = snapshot["changed_file_count_shown"] as? Int ?? (snapshot["changed_files"] as? [String] ?? []).count
+            let fileCount = snapshot["changed_file_count_total"] as? Int ?? snapshot["changed_file_count"] as? Int ?? fileShown
             let added = snapshot["lines_added"] as? Int ?? 0
             let removed = snapshot["lines_removed"] as? Int ?? 0
-            checkpointChanged.stringValue = "\(commitCount) commit\(commitCount == 1 ? "" : "s") · \(fileCount) files · +\(added)/-\(removed)"
+            let commitScope = snapshot["commits_complete"] as? Bool == false
+                ? "\(commitCount) commits (\(commitShown) shown)"
+                : "\(commitCount) commit\(commitCount == 1 ? "" : "s")"
+            let fileScope = snapshot["files_complete"] as? Bool == false
+                ? "\(fileCount) files (\(fileShown) shown)"
+                : "\(fileCount) files"
+            checkpointChanged.stringValue = "\(commitScope) · \(fileScope) · +\(added)/-\(removed)"
         } else {
             checkpointChanged.stringValue = checkpointLines(subjects)
         }
@@ -5787,9 +5803,21 @@ def run_native_presence(
                 status_var.set("Reading local delivery evidence...")
                 return
             commit_count = int(preview.get("commit_count") or 0)
+            commit_shown = int(preview.get("commit_count_shown") or commit_count)
+            file_count = int(preview.get("changed_file_count") or 0)
+            file_shown = int(preview.get("changed_file_count_shown") or file_count)
+            commit_scope = (
+                f"{commit_count} commits ({commit_shown} shown)"
+                if preview.get("commits_complete") is False
+                else f"{commit_count} commit{'s' if commit_count != 1 else ''}"
+            )
+            file_scope = (
+                f"{file_count} files ({file_shown} shown)"
+                if preview.get("files_complete") is False
+                else f"{file_count} files"
+            )
             changed_var.set(
-                f"{commit_count} commit{'s' if commit_count != 1 else ''} · "
-                f"{int(preview.get('changed_file_count') or 0)} files · "
+                f"{commit_scope} · {file_scope} · "
                 f"+{int(preview.get('lines_added') or 0)}/-{int(preview.get('lines_removed') or 0)}"
             )
             checks = preview.get("checks") if isinstance(preview.get("checks"), list) else []
@@ -5825,10 +5853,22 @@ def run_native_presence(
             if subjects:
                 changed_var.set(compact_lines(subjects))
             else:
-                commit_count = len(snapshot.get("commit_shas") or [])
+                commit_shown = int(snapshot.get("commit_count_shown") or len(snapshot.get("commit_shas") or []))
+                commit_count = int(snapshot.get("commit_count_total") or commit_shown)
+                file_shown = int(snapshot.get("changed_file_count_shown") or len(snapshot.get("changed_files") or []))
+                file_count = int(snapshot.get("changed_file_count_total") or snapshot.get("changed_file_count") or file_shown)
+                commit_scope = (
+                    f"{commit_count} commits ({commit_shown} shown)"
+                    if snapshot.get("commits_complete") is False
+                    else f"{commit_count} commit{'s' if commit_count != 1 else ''}"
+                )
+                file_scope = (
+                    f"{file_count} files ({file_shown} shown)"
+                    if snapshot.get("files_complete") is False
+                    else f"{file_count} files"
+                )
                 changed_var.set(
-                    f"{commit_count} commit{'s' if commit_count != 1 else ''} · "
-                    f"{int(snapshot.get('changed_file_count') or 0)} files · "
+                    f"{commit_scope} · {file_scope} · "
                     f"+{int(snapshot.get('lines_added') or 0)}/-{int(snapshot.get('lines_removed') or 0)}"
                 )
             checks = [

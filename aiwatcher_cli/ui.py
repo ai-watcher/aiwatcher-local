@@ -10855,8 +10855,10 @@ def _build_companion_state() -> dict[str, object]:
         workflow = delivery_receipt.get("workflow") if isinstance(delivery_receipt.get("workflow"), dict) else {}
         receipt_id = str(delivery_receipt.get("receipt_id") or "")
         branch = str(snapshot.get("branch") or "detached HEAD")
-        commit_count = len(snapshot.get("commit_shas") or [])
-        changed_file_count = int(snapshot.get("changed_file_count") or 0)
+        commit_count = int(snapshot.get("commit_count_total") or len(snapshot.get("commit_shas") or []))
+        commit_count_shown = int(snapshot.get("commit_count_shown") or len(snapshot.get("commit_shas") or []))
+        changed_file_count = int(snapshot.get("changed_file_count_total") or snapshot.get("changed_file_count") or 0)
+        changed_file_count_shown = int(snapshot.get("changed_file_count_shown") or len(snapshot.get("changed_files") or []))
         lines_added = int(snapshot.get("lines_added") or 0)
         lines_removed = int(snapshot.get("lines_removed") or 0)
         exact_checks = [
@@ -10882,7 +10884,11 @@ def _build_companion_state() -> dict[str, object]:
             "checkpoint_preview": {
                 "branch": branch,
                 "commit_count": commit_count,
+                "commit_count_shown": commit_count_shown,
+                "commits_complete": snapshot.get("commits_complete") is not False,
                 "changed_file_count": changed_file_count,
+                "changed_file_count_shown": changed_file_count_shown,
+                "files_complete": snapshot.get("files_complete") is not False,
                 "lines_added": lines_added,
                 "lines_removed": lines_removed,
                 "check_count": len(exact_checks),

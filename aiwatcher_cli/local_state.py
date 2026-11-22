@@ -3156,7 +3156,7 @@ def _privacy_safe_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     contributions = receipt.get("contributions") if isinstance(receipt.get("contributions"), list) else []
     workflow = receipt.get("workflow") if isinstance(receipt.get("workflow"), dict) else {}
     return {
-        "schema_version": 1,
+        "schema_version": max(1, int(receipt.get("schema_version") or 1)),
         "receipt_id": _delivery_value(receipt.get("receipt_id"), 160),
         "created_at": _delivery_value(receipt.get("created_at"), 80),
         "event": {
@@ -3178,9 +3178,17 @@ def _privacy_safe_work_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
             "clean": snapshot.get("clean") if isinstance(snapshot.get("clean"), bool) else None,
             "dirty_fingerprint": str(snapshot.get("dirty_fingerprint") or "")[:128] or None,
             "commit_shas": [str(value)[:64] for value in snapshot.get("commit_shas", []) if isinstance(value, str)][:200],
+            "commit_count_total": max(0, int(snapshot.get("commit_count_total") or len(snapshot.get("commit_shas", [])))),
+            "commit_count_shown": max(0, int(snapshot.get("commit_count_shown") or len(snapshot.get("commit_shas", [])))),
+            "commits_complete": bool(snapshot.get("commits_complete", True)),
+            "commit_limit": max(1, int(snapshot.get("commit_limit") or 200)),
             "changed_files": [],
             "changed_file_hashes": [],
             "changed_file_count": max(0, int(snapshot.get("changed_file_count") or 0)),
+            "changed_file_count_total": max(0, int(snapshot.get("changed_file_count_total") or snapshot.get("changed_file_count") or 0)),
+            "changed_file_count_shown": max(0, int(snapshot.get("changed_file_count_shown") or len(snapshot.get("changed_files", [])))),
+            "files_complete": bool(snapshot.get("files_complete", True)),
+            "file_limit": max(1, int(snapshot.get("file_limit") or 500)),
             "lines_added": max(0, int(snapshot.get("lines_added") or 0)) if snapshot.get("lines_added") is not None else None,
             "lines_removed": max(0, int(snapshot.get("lines_removed") or 0)) if snapshot.get("lines_removed") is not None else None,
         },

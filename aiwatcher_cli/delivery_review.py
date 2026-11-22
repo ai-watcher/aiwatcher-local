@@ -13,6 +13,8 @@ from typing import Any, Iterable
 
 from .delivery import (
     ContributionEdge,
+    DELIVERY_COMMIT_LIMIT,
+    DELIVERY_FILE_LIMIT,
     DELIVERY_SCHEMA_VERSION,
     DeliveryEvent,
     DeliverySnapshot,
@@ -33,8 +35,8 @@ from .scanner import LocalSession, scan_all, segment_session_by_prompt
 
 
 GIT_TIMEOUT_SECONDS = 4
-MAX_DELIVERY_COMMITS = 200
-MAX_DELIVERY_FILES = 500
+MAX_DELIVERY_COMMITS = DELIVERY_COMMIT_LIMIT
+MAX_DELIVERY_FILES = DELIVERY_FILE_LIMIT
 
 
 class DeliveryReviewUnavailable(ValueError):
@@ -112,22 +114,32 @@ def _delivery_base(
     return None, "unavailable"
 
 
-def _commit_range(repo: str, base: str | None, head: str) -> tuple[str, ...]:
-    args = ["rev-list", "--reverse", f"{base}..{head}"] if base else ["rev-list", "--reverse", head]
-    text = _git_text(repo, args)
+def _commit_range(repo: str, base: str | None, head: str) -> tuple[tuple[str, ...], int, bool]:
+    range_spec = f"{base}..{head}" if base else head
+    text = _git_text(repo, ["rev-list", f"--max-count={MAX_DELIVERY_COMMITS}", range_spec])
     if not text:
-        return ()
-    return tuple(line.strip() for line in text.splitlines() if line.strip())[:MAX_DELIVERY_COMMITS]
+        return (), 0, False
+    commits = tuple(reversed(tuple(line.strip() for line in text.splitlines() if line.strip())))
+    count_text = _git_text(repo, ["rev-list", "--count", range_spec])
+    try:
+        total = max(len(commits), int(count_text or ""))
+        complete = total == len(commits)
+    except ValueError:
+        total = len(commits)
+        complete = len(commits) < MAX_DELIVERY_COMMITS
+    return commits, total, complete
 
 
-def _range_files(repo: str, base: str | None, head: str) -> tuple[tuple[str, ...], int, int]:
+def _range_files(repo: str, base: str | None, head: str) -> tuple[tuple[str, ...], int, bool, int, int]:
     range_spec = f"{base}..{head}" if base else head
     names = _run_git(repo, ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", range_spec])
     if base:
         names = _run_git(repo, ["diff", "--name-only", "-z", range_spec])
-    files = tuple(
+    all_files = tuple(
         value for value in ((names.stdout if names and names.returncode == 0 else "").split("\0")) if value
-    )[:MAX_DELIVERY_FILES]
+    )
+    files = all_files[:MAX_DELIVERY_FILES]
+    files_observed = bool(names is not None and names.returncode == 0)
     stats = _run_git(repo, ["diff", "--numstat", range_spec] if base else ["show", "--numstat", "--format=", head])
     added = removed = 0
     if stats and stats.returncode == 0:
@@ -140,7 +152,7 @@ def _range_files(repo: str, base: str | None, head: str) -> tuple[tuple[str, ...
                 added += int(left)
             if right.isdigit():
                 removed += int(right)
-    return files, added, removed
+    return files, len(all_files), files_observed and len(all_files) <= MAX_DELIVERY_FILES, added, removed
 
 
 def _exact_verifications(identity: Any, head: str) -> tuple[VerificationClaim, ...]:
@@ -284,10 +296,10 @@ def build_work_receipt(
     upstream = _upstream(repo)
     upstream_sha = _commit(repo, upstream)
     base, base_basis = _delivery_base(repo, head, branch, upstream, event_base_sha)
-    commits = _commit_range(repo, base, head)
+    commits, commit_total, commits_complete = _commit_range(repo, base, head)
     if not commits:
         raise DeliveryReviewUnavailable("no commits were found in the delivery range")
-    files, added, removed = _range_files(repo, base, head)
+    files, file_total, files_complete, added, removed = _range_files(repo, base, head)
     status = _run_git(repo, ["status", "--porcelain=v1", "-z"])
     clean = status is not None and status.returncode == 0 and not status.stdout
     dirty_fingerprint = verification_git_fingerprint(repo).get("dirty_fingerprint")
@@ -333,6 +345,10 @@ def build_work_receipt(
         changed_files=files,
         lines_added=added,
         lines_removed=removed,
+        commit_count_total=commit_total,
+        commits_complete=commits_complete,
+        changed_file_count_total=file_total,
+        files_complete=files_complete,
     )
     verifications = _exact_verifications(identity, head)
     contributions = _contributions(identity, commits)
@@ -342,6 +358,16 @@ def build_work_receipt(
         attention.append("Objective unavailable. Confirm it before copying a PR summary.")
     if not clean:
         attention.append("The working tree has changes outside the delivered commit range.")
+    if not snapshot.commits_complete:
+        attention.append(
+            f"Commit evidence is bounded: {len(snapshot.commit_shas)} of "
+            f"{snapshot.commit_count_total} commits are shown; the delivery HEAD is preserved."
+        )
+    if not snapshot.files_complete:
+        attention.append(
+            f"File evidence is bounded: {len(snapshot.changed_files)} of "
+            f"{snapshot.changed_file_count_total} changed files are shown; line totals cover the full range."
+        )
     exact_checks = [item for item in verifications if item.exact_state]
     exact_passes = [item for item in exact_checks if item.status == "passed"]
     if not exact_checks:
@@ -385,8 +411,19 @@ def hydrate_persisted_receipt(receipt: dict[str, Any], event: dict[str, Any] | N
     base = str(snapshot.get("base_sha") or "") or None
     head = str(snapshot.get("head_sha") or "")
     if repo and head and _commit(repo, head) and (not base or _commit(repo, base)):
-        files, added, removed = _range_files(repo, base, head)
+        commits, commit_total, commits_complete = _commit_range(repo, base, head)
+        files, file_total, files_complete, added, removed = _range_files(repo, base, head)
+        snapshot["commit_shas"] = list(commits)
+        snapshot["commit_count_total"] = commit_total
+        snapshot["commit_count_shown"] = len(commits)
+        snapshot["commits_complete"] = commits_complete
+        snapshot["commit_limit"] = MAX_DELIVERY_COMMITS
         snapshot["changed_files"] = list(files)
+        snapshot["changed_file_count"] = file_total
+        snapshot["changed_file_count_total"] = file_total
+        snapshot["changed_file_count_shown"] = len(files)
+        snapshot["files_complete"] = files_complete
+        snapshot["file_limit"] = MAX_DELIVERY_FILES
         snapshot["lines_added"] = added
         snapshot["lines_removed"] = removed
         summaries = []
@@ -432,7 +469,10 @@ def work_receipt_evidence_hash(
             key: snapshot.get(key)
             for key in (
                 "repository_id", "checkout_id", "branch", "base_sha", "head_sha",
-                "upstream", "upstream_sha", "clean", "dirty_fingerprint", "commit_shas", "changed_file_count",
+                "upstream", "upstream_sha", "clean", "dirty_fingerprint", "commit_shas",
+                "commit_count_total", "commit_count_shown", "commits_complete", "commit_limit",
+                "changed_file_count", "changed_file_count_total", "changed_file_count_shown",
+                "files_complete", "file_limit",
                 "lines_added", "lines_removed",
             )
         },
@@ -488,6 +528,16 @@ def format_work_receipt(receipt: WorkReceipt | dict[str, Any]) -> str:
     checks = payload.get("verifications") or []
     workflow = payload.get("workflow") or {}
     understanding = payload.get("work_understanding") or {}
+    commit_total = int(snapshot.get("commit_count_total") or len(snapshot.get("commit_shas") or []))
+    commit_shown = int(snapshot.get("commit_count_shown") or len(snapshot.get("commit_shas") or []))
+    file_total = int(snapshot.get("changed_file_count_total") or snapshot.get("changed_file_count") or 0)
+    file_shown = int(snapshot.get("changed_file_count_shown") or len(snapshot.get("changed_files") or []))
+    commit_label = f"{commit_total} commit(s)"
+    file_label = f"{file_total} file(s)"
+    if snapshot.get("commits_complete") is False:
+        commit_label += f" ({commit_shown} shown; HEAD preserved)"
+    if snapshot.get("files_complete") is False:
+        file_label += f" ({file_shown} shown)"
     lines = ["AIWatcher Delivery Review", ""]
     objective_text = str(objective.get("text") or "Unknown; confirm before sharing.")
     if objective.get("provenance") == "inferred" and objective.get("text"):
@@ -523,7 +573,7 @@ def format_work_receipt(receipt: WorkReceipt | dict[str, Any]) -> str:
     destination = event.get("pull_request_url") or event.get("remote_ref") or snapshot.get("upstream") or "remote status unknown"
     lines.extend((
         "Delivered",
-        f"{len(snapshot.get('commit_shas') or [])} commit(s), {snapshot.get('changed_file_count') or 0} file(s), "
+        f"{commit_label}, {file_label}, "
         f"+{snapshot.get('lines_added') or 0}/-{snapshot.get('lines_removed') or 0} on "
         f"{snapshot.get('branch') or 'detached HEAD'}; destination: {destination}.",
         "",

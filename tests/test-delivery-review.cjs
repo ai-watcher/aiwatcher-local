@@ -85,6 +85,29 @@ test('review cards distinguish exact verification from stale checks', () => {
   assert.match(card, /<button[^>]*disabled>Copy PR summary<\/button>/);
 });
 
+test('partial delivery evidence distinguishes totals from displayed rows', () => {
+  const ctx = vm.createContext({
+    esc: value => String(value), jsArg: value => JSON.stringify(value),
+    deliveryStatusLabel: () => 'Push confirmed', deliveryDestination: () => 'feature',
+  });
+  vm.runInContext(extract('renderWorkUnderstanding'), ctx);
+  vm.runInContext(extract('deliveryReviewCard'), ctx);
+  const item = review('confirmed');
+  item.snapshot = {
+    ...item.snapshot,
+    commit_count_total: 201,
+    commit_count_shown: 200,
+    commits_complete: false,
+    changed_file_count_total: 501,
+    changed_file_count_shown: 500,
+    files_complete: false,
+  };
+  const card = ctx.deliveryReviewCard(item);
+  assert.match(card, /201 commits \(200 shown; HEAD preserved\)/);
+  assert.match(card, /501 files \(500 shown\)/);
+  assert.match(card, /1 paths omitted by the evidence limit/);
+});
+
 test('an approved exact review enables copying and removes the approval action', () => {
   const ctx = vm.createContext({
     esc: value => String(value), jsArg: value => JSON.stringify(value),
