@@ -5,8 +5,9 @@ runaway session surprises you.
 
 AIWatcher Local is the open-source individual tier of AIWatcher. It gives one
 developer a private, zero-code-change view of Claude Code, Codex CLI, Cursor,
-and other local AI coding activity. The implementation includes a read-only
-local scanner, CLI, JSON export, and browser dashboard, but the product promise
+and other local AI coding activity. The implementation includes a scanner that
+opens supported histories read-only, a CLI, JSON export, and browser dashboard,
+but the product promise
 is bigger than collection:
 
 > Local visibility for individual developers. Enterprise control for teams.
@@ -33,15 +34,29 @@ is bigger than collection:
 ## Privacy Contract
 
 - Private by default.
-- Read-only.
+- Supported AI-tool histories and Git evidence are opened read-only.
+- AIWatcher writes its own local settings, receipts, hashes, bounded caches,
+  runtime ownership records, and optional generated AI Assist output.
+- Hook, wrapper, autostart, delivery-tracking, update, and restart actions can
+  change local configuration or processes only after an explicit user action.
 - No LLM API calls unless the user explicitly configures an optional reviewer,
   enhancer, or connected workflow.
 - No phone-home telemetry by default.
-- No source-code or prompt-content storage in persisted summaries.
-- No cloud upload unless the user explicitly connects AIWatcher Enterprise.
+- Prompt Gate receipts and ordinary persisted summaries do not retain raw
+  prompt or source text. Optional AI Assist may retain bounded generated output
+  in local state.
+- No cloud upload by default. Optional Local AI Assist can send the disclosed,
+  bounded input to a user-configured cloud provider; Enterprise is not required.
 
 This trust boundary is the product. If AIWatcher Local cannot explain what it
 reads and why, it should not read it.
+
+Default product state lives under `~/.aiwatcher` on macOS/Linux and
+`%USERPROFILE%\.aiwatcher` on Windows. `AIWATCHER_HOME` and
+`AIWATCHER_STATE_FILE` can override those locations. Package uninstall does not
+erase local evidence or remove third-party hooks. Disable optional features,
+use the matching hook/wrapper/autostart uninstall commands, stop Companion, and
+review the state directory before deleting it separately.
 
 One explicit exception to the prompt-content rule: `resume`/`handoff
 --include-prompt-excerpt` is off by default, labeled as opt-in in both the CLI
@@ -94,8 +109,8 @@ aiwatcher today
 aiwatcher ui
 ```
 
-Before the PyPI release, early users can install an isolated CLI without
-keeping a clone:
+Developers who intentionally want unreleased GitHub `main` can install an
+isolated CLI without keeping a clone:
 
 ```bash
 pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
@@ -107,12 +122,13 @@ Users who want to install into the current Python environment can use:
 python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
 ```
 
-After the PyPI release, `pipx install aiwatcher-local` should become the
-recommended public install path.
+`pipx install aiwatcher-local` is the recommended public install path. GitHub
+`main` can be newer than the published package; do not switch an existing user
+to the unreleased channel without explaining that difference.
 
 ## Run From This Repo
 
-Before a PyPI release you can run everything straight from a clone (Python 3.9+):
+Contributors can run everything straight from a clone (Python 3.9+):
 
 ```bash
 python -m aiwatcher_cli start

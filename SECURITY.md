@@ -1,9 +1,14 @@
 # Security Policy
 
-AIWatcher Local is designed to be private by default and read-only. It does not
-make LLM API calls, phone home, or upload prompts or source code unless the user
-explicitly configures a connected workflow or optional reviewer. If you believe
-these guarantees are violated, we want to hear from you.
+AIWatcher Local is designed to be private by default. It opens supported
+AI-tool histories and Git evidence read-only, while writing its own local
+settings, receipts, bounded caches, and runtime records. Hook, update, restart,
+autostart, and delivery-tracking actions can change local files or processes
+only after an explicit user action. It does not make LLM API calls, phone home,
+or upload prompts or source code by default. Optional AI Assist can send the
+disclosed bounded input to a provider the user configured and can retain bounded
+generated output locally. If you believe these guarantees are violated, we want
+to hear from you.
 
 ## Reporting a vulnerability
 
