@@ -12756,6 +12756,13 @@ def serve(
     restart: bool = False,
     on_started: Callable[[str, int], Any] | None = None,
 ) -> None:
+    normalized_host = str(host).strip().lower().split("%", 1)[0]
+    try:
+        loopback_bind = normalized_host == "localhost" or ipaddress.ip_address(normalized_host).is_loopback
+    except ValueError:
+        loopback_bind = False
+    if not loopback_bind:
+        raise OSError("AIWatcher Local UI only binds to a loopback address")
     if restart:
         stopped_port = restart_local_server(port)
         if stopped_port is not None:

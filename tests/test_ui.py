@@ -204,6 +204,12 @@ class DashboardServeTests(unittest.TestCase):
             thread.join(timeout=5)
             server.server_close()
 
+    def test_serve_refuses_non_loopback_bind_before_opening_socket(self) -> None:
+        with patch.object(ui, "ThreadingHTTPServer") as server:
+            with self.assertRaisesRegex(OSError, "loopback"):
+                ui.serve(host="0.0.0.0", port=8765)
+        server.assert_not_called()
+
     def test_unrelated_host_is_rejected_before_get_post_or_options_routing(self) -> None:
         forged = {
             "Host": "review.invalid",
