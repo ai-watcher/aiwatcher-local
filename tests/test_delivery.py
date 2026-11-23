@@ -96,9 +96,11 @@ class DeliveryContractTests(unittest.TestCase):
         )
 
         payload = receipt.to_json()
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["event"]["observed_at"], "2026-10-09T16:00:00+00:00")
         self.assertEqual(payload["snapshot"]["changed_file_count"], 1)
+        self.assertTrue(payload["snapshot"]["commits_complete"])
+        self.assertTrue(payload["snapshot"]["files_complete"])
         self.assertEqual(payload["objective"]["provenance"], "user_confirmed")
         self.assertEqual(payload["verifications"][0]["exact_state"], True)
         self.assertEqual(payload["contributions"][0]["strength"], "exact")
@@ -123,6 +125,25 @@ class DeliveryContractTests(unittest.TestCase):
         self.assertEqual(receipt.to_persisted_json()["snapshot"]["changed_file_count"], 2)
         self.assertEqual(receipt.to_persisted_json()["snapshot"]["changed_file_hashes"], [])
         self.assertIsNotNone(receipt.to_persisted_json()["objective"]["source_hash"])
+
+    def test_bounded_snapshot_preserves_totals_head_and_completeness(self):
+        commits = tuple(f"{value:040x}" for value in range(1, 202))
+        files = tuple(f"src/file-{value}.py" for value in range(1, 502))
+        bounded = snapshot(
+            head_sha=commits[-1],
+            commit_shas=commits,
+            changed_files=files,
+            lines_added=501,
+        ).to_json()
+
+        self.assertEqual(bounded["commit_count_total"], 201)
+        self.assertEqual(bounded["commit_count_shown"], 200)
+        self.assertFalse(bounded["commits_complete"])
+        self.assertIn(bounded["head_sha"], bounded["commit_shas"])
+        self.assertEqual(bounded["changed_file_count_total"], 501)
+        self.assertEqual(bounded["changed_file_count_shown"], 500)
+        self.assertFalse(bounded["files_complete"])
+        self.assertEqual(bounded["lines_added"], 501)
 
     def test_unknown_values_degrade_conservatively(self):
         objective = ObjectiveClaim(provenance="magical", confidence="certain")

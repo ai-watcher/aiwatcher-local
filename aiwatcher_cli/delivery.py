@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-DELIVERY_SCHEMA_VERSION = 1
+DELIVERY_SCHEMA_VERSION = 2
+DELIVERY_COMMIT_LIMIT = 200
+DELIVERY_FILE_LIMIT = 500
 PROVENANCE_VALUES = {"observed", "user_confirmed", "inferred", "unavailable"}
 CONFIDENCE_VALUES = {"high", "medium", "low", "none"}
 DELIVERY_KINDS = {"explicit_review", "push", "pull_request"}
@@ -149,6 +151,10 @@ class DeliverySnapshot:
     changed_files: tuple[str, ...] = ()
     lines_added: int | None = None
     lines_removed: int | None = None
+    commit_count_total: int | None = None
+    commits_complete: bool | None = None
+    changed_file_count_total: int | None = None
+    files_complete: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "repository_id", _bounded(self.repository_id, 160))
@@ -159,10 +165,32 @@ class DeliverySnapshot:
         object.__setattr__(self, "upstream", _bounded(self.upstream, 300))
         object.__setattr__(self, "upstream_sha", _sha(self.upstream_sha))
         object.__setattr__(self, "dirty_fingerprint", _bounded(self.dirty_fingerprint, 128))
-        commits = tuple(item for item in (_sha(value) for value in self.commit_shas) if item)[:200]
-        files = tuple(filter(None, (_bounded(value, 1_000) for value in self.changed_files)))[:500]
+        all_commits = tuple(item for item in (_sha(value) for value in self.commit_shas) if item)
+        commits = all_commits[-DELIVERY_COMMIT_LIMIT:]
+        if all_commits and self.head_sha not in commits:
+            commits = (*commits[:-1], self.head_sha)
+        all_files = tuple(filter(None, (_bounded(value, 1_000) for value in self.changed_files)))
+        files = all_files[:DELIVERY_FILE_LIMIT]
         object.__setattr__(self, "commit_shas", commits)
         object.__setattr__(self, "changed_files", files)
+        commit_total = max(len(commits), int(self.commit_count_total or len(all_commits)))
+        file_total = max(len(files), int(self.changed_file_count_total or len(all_files)))
+        object.__setattr__(self, "commit_count_total", commit_total)
+        object.__setattr__(self, "changed_file_count_total", file_total)
+        object.__setattr__(
+            self,
+            "commits_complete",
+            bool(self.commits_complete) if self.commits_complete is not None else commit_total == len(commits),
+        )
+        object.__setattr__(
+            self,
+            "files_complete",
+            bool(self.files_complete) if self.files_complete is not None else file_total == len(files),
+        )
+        if commit_total > len(commits):
+            object.__setattr__(self, "commits_complete", False)
+        if file_total > len(files):
+            object.__setattr__(self, "files_complete", False)
         for name in ("lines_added", "lines_removed"):
             value = getattr(self, name)
             object.__setattr__(self, name, max(0, int(value)) if isinstance(value, int) else None)
@@ -183,9 +211,17 @@ class DeliverySnapshot:
             "clean": self.clean,
             "dirty_fingerprint": self.dirty_fingerprint,
             "commit_shas": list(self.commit_shas),
+            "commit_count_total": self.commit_count_total,
+            "commit_count_shown": len(self.commit_shas),
+            "commits_complete": self.commits_complete,
+            "commit_limit": DELIVERY_COMMIT_LIMIT,
             "changed_files": list(self.changed_files) if include_paths else [],
             "changed_file_hashes": [],
-            "changed_file_count": len(self.changed_files),
+            "changed_file_count": self.changed_file_count_total,
+            "changed_file_count_total": self.changed_file_count_total,
+            "changed_file_count_shown": len(self.changed_files),
+            "files_complete": self.files_complete,
+            "file_limit": DELIVERY_FILE_LIMIT,
             "lines_added": self.lines_added,
             "lines_removed": self.lines_removed,
         }

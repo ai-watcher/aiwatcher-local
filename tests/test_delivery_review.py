@@ -10,6 +10,8 @@ from unittest.mock import patch
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.delivery_review import (
     DeliveryReviewUnavailable,
+    _commit_range,
+    _range_files,
     _workflow_stats,
     build_work_receipt,
     format_work_receipt,
@@ -26,6 +28,49 @@ def git(repo: Path, *args: str) -> str:
         ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
     )
     return result.stdout.strip()
+
+
+class DeliveryEvidenceBoundaryTests(unittest.TestCase):
+    def test_commit_boundaries_keep_totals_and_delivery_head(self) -> None:
+        for total in (199, 200, 201):
+            with self.subTest(total=total):
+                commits = tuple(f"{value:040x}" for value in range(1, total + 1))
+
+                def git_text(_repo: str, args: list[str]) -> str:
+                    if "--count" in args:
+                        return str(total)
+                    return "\n".join(reversed(commits[-200:]))
+
+                with patch("aiwatcher_cli.delivery_review._git_text", side_effect=git_text):
+                    shown, observed_total, complete = _commit_range("repo", "base", commits[-1])
+
+                self.assertEqual(observed_total, total)
+                self.assertEqual(len(shown), min(total, 200))
+                self.assertEqual(complete, total <= 200)
+                self.assertIn(commits[-1], shown)
+
+    def test_file_boundaries_distinguish_total_from_shown(self) -> None:
+        for total in (499, 500, 501):
+            with self.subTest(total=total):
+                paths = tuple(f"src/file-{value}.py" for value in range(total))
+
+                def run_git(_repo: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+                    if "--name-only" in args:
+                        return subprocess.CompletedProcess(args, 0, "\0".join(paths) + "\0", "")
+                    return subprocess.CompletedProcess(
+                        args,
+                        0,
+                        "".join(f"1\t0\t{path}\n" for path in paths),
+                        "",
+                    )
+
+                with patch("aiwatcher_cli.delivery_review._run_git", side_effect=run_git):
+                    shown, observed_total, complete, added, removed = _range_files("repo", "base", "head")
+
+                self.assertEqual(observed_total, total)
+                self.assertEqual(len(shown), min(total, 500))
+                self.assertEqual(complete, total <= 500)
+                self.assertEqual((added, removed), (total, 0))
 
 
 class DeliveryReviewBuilderTests(unittest.TestCase):
@@ -60,6 +105,18 @@ class DeliveryReviewBuilderTests(unittest.TestCase):
         receipt["intent_source_hash"] = "a" * 64
         first = work_receipt_evidence_hash(receipt)
         receipt["intent_source_hash"] = "b" * 64
+
+        self.assertNotEqual(first, work_receipt_evidence_hash(receipt))
+
+    def test_approval_evidence_changes_when_completeness_changes(self) -> None:
+        receipt = build_work_receipt(
+            str(self.repo), event_kind="explicit_review", event_status="candidate",
+            event_source="test", persist=False,
+        ).to_json()
+        first = work_receipt_evidence_hash(receipt)
+        receipt["snapshot"]["commits_complete"] = False
+        receipt["snapshot"]["commit_count_total"] = 201
+        receipt["snapshot"]["commit_count_shown"] = 200
 
         self.assertNotEqual(first, work_receipt_evidence_hash(receipt))
 

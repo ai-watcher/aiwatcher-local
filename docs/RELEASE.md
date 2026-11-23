@@ -94,6 +94,12 @@ The source archive must include `docs/PYPI.md` so rebuilding it preserves the
 same description. A GitHub documentation merge does not update an existing PyPI
 release: publish the corrected metadata with the next version.
 
+Before tagging, compare the public README with the currently published package.
+Commands advertised directly after `pipx install` must exist in that package;
+otherwise label them as unreleased/source-only and give the released fallback.
+Recheck privacy wording whenever storage, hooks, update behavior, or optional
+provider calls change.
+
 Run a dependency audit against the release environment:
 
 ```sh
@@ -118,10 +124,17 @@ require the next major version.
 Before publishing, bump `version` in both `pyproject.toml` and
 `aiwatcher_cli/__init__.py`, update any literal version assertions, and commit
 the change. Push a tag with the same version, then create a GitHub release for
-that tag. The `publish-pypi.yml` workflow builds, checks, and publishes the
-artifacts through PyPI Trusted Publishing; no PyPI API token should live on a
-laptop or in repository secrets. The workflow also refuses to publish unless
-the release tag points to the current `origin/main` commit.
+that tag. The `publish-pypi.yml` workflow publishes through PyPI Trusted
+Publishing; no PyPI API token should live on a laptop or in repository secrets.
+
+CI builds the distribution once and installs that exact wheel outside the
+source checkout on Linux, macOS, and Windows. Acceptance verifies package
+assets, import provenance, CLI entry points, preflight, default no-external-
+network setup/status, loopback HTTP service, and invalid-Host rejection. The
+release workflow refuses to publish unless the tag points to current
+`origin/main`, a successful `main` CI run exists for that exact SHA, and the
+artifact downloaded from that run passes the installed-wheel check again. The
+release workflow never rebuilds the package.
 
 Configure the PyPI project with this Trusted Publisher before creating the
 release:
@@ -135,7 +148,8 @@ release:
 Create a protected GitHub environment named `pypi` and require approval there
 if releases should have a final human gate.
 
-Manual upload is an emergency fallback only:
+Manual upload is an emergency fallback only. Use only the artifact downloaded
+from the successful exact-commit CI run; do not rebuild locally:
 
 ```sh
 /tmp/aiwatcher-release/bin/python -m twine upload dist/*

@@ -10,7 +10,8 @@ Setup is complete when:
 
 - one AIWatcher Console and one logical Companion service are running;
 - `aiwatcher doctor` completes and its warnings are explained;
-- delivery tracking is recorded as enabled, declined, or deferred;
+- delivery tracking is recorded as enabled, declined, unavailable in the
+  installed release, or deferred;
 - the developer knows the local Console URL and normal start command; and
 - optional AI-tool hooks are installed only with the developer's approval.
 
@@ -89,8 +90,8 @@ dirty checkouts to the developer's normal Git workflow.
 
 If `pipx ensurepath` changes `PATH`, open a new terminal before continuing.
 
-Before relying on commands from this page, confirm the installed version
-supports them:
+Before relying on release-sensitive commands from this page, confirm the
+installed version supports them:
 
 ```console
 aiwatcher --help
@@ -98,9 +99,11 @@ aiwatcher delivery-tracking --help
 ```
 
 The guide tracks GitHub `main`, which can be newer than the current PyPI
-release. If a documented command is missing, explain that mismatch and ask
-whether the developer wants the stable PyPI feature set or an unreleased
-GitHub `main` installation. Do not silently switch update channels.
+release. In particular, automatic delivery tracking may be absent while manual
+`delivery-review` and per-repository `install-commit-hook` remain available. If
+a documented command is missing, mark that step unavailable and explain the
+mismatch. Do not silently switch update channels to obtain an unreleased
+feature.
 
 ## 3. Start The Private Local Services
 

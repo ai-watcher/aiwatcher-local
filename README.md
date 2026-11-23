@@ -6,7 +6,7 @@
 
 Private guardrails for AI coding work. AIWatcher helps you review risky
 prompts before they run, notice expensive or stuck sessions while they are
-active, and prove whether the work became useful code afterwards.
+active, and inspect evidence connecting the work to delivered code afterwards.
 
 It works with local history from tools such as Claude Code, Codex, and Cursor.
 No account is required. No cloud upload happens by default. No LLM call happens
@@ -128,8 +128,8 @@ context:
   loops, long-running work, and sessions waiting on you.
 - **Start fresh without losing the plot:** create a compact Fresh Start brief
   for continuing work in a new session.
-- **Prove what was worth it:** connect local AI sessions to commits, outcomes,
-  receipts, and API-equivalent usage.
+- **Review delivery evidence:** connect local AI sessions to commits, outcomes,
+  receipts, and API-equivalent usage without claiming requirement completion.
 - **Review delivered work:** after an observed push or pull request, get a
   concise evidence review of the Git range, exact-state checks, linked sessions,
   and unresolved gaps.
@@ -167,13 +167,15 @@ Console in your browser. Your normal command after the first setup is simply:
 aiwatcher start --open-ui
 ```
 
-In **Settings → General → Delivery tracking**, enable automatic tracking once.
-AIWatcher then configures repositories as they appear in local AI sessions;
-you do not need to repeat setup for each branch or linked worktree. The CLI
-fallback for a headless machine is `aiwatcher delivery-tracking enable`.
-Repositories with a custom or pre-existing `post-commit` hook are left
-unchanged and shown as needing review. Companion and dashboard refreshes keep
-discovering new repositories in bounded, recent-first batches.
+Automatic delivery tracking is currently an unreleased `main` feature and is
+not included in the published PyPI `0.2.0` package. Source installations that
+show `delivery-tracking` in `aiwatcher --help` can enable it once in
+**Settings → General → Delivery tracking**, or run
+`aiwatcher delivery-tracking enable` on a headless machine. Published-package
+users can still run `aiwatcher delivery-review` explicitly and install a
+repository hook with `aiwatcher install-commit-hook --repo /path/to/repo --write`.
+Do not switch from PyPI to an unreleased source install only to obtain this
+feature without reviewing that update-channel change.
 
 If `pipx` is not installed yet, expand [Other Install Methods](#other-install-methods)
 for short platform-specific instructions. Do not clone the repository just to
@@ -294,13 +296,15 @@ to repair it without disabling Prompt Gate.
 
 ## Review A Delivery
 
-Automatic delivery tracking must be enabled once in Settings. It records commit
+When automatic delivery tracking is available and enabled, it records commit
 facts in observed Git repositories and keeps its marked hook block current
-without replacing custom or pre-existing hooks. Those repositories are shown
-as needing review. One repository hook covers all of that repository's branches
-and linked worktrees. Exact commit-to-session linkage is shown only when the AI
-host exposes a session ID. Hook configuration is not execution proof; the first
-successful receipt proves the hook actually ran.
+without replacing custom or pre-existing hooks. Published PyPI `0.2.0` users
+must instead install the commit hook explicitly per repository. Repositories
+with custom hooks remain unchanged and need review. One repository hook covers
+all of that repository's branches and linked worktrees. Exact commit-to-session
+linkage is shown only when the AI host exposes a session ID. Hook configuration
+is not execution proof; the first successful receipt establishes that the hook
+actually ran.
 
 Capture verification against the exact Git state, then push through AIWatcher:
 
@@ -539,6 +543,18 @@ does not persist raw prompt text from Prompt Gate decisions. Optional AI Assist
 can send bounded prompt/source context only when you configure it and choose a
 workflow that uses it.
 
+By default this product state is under `~/.aiwatcher` on macOS/Linux and
+`%USERPROFILE%\.aiwatcher` on Windows. It includes `local-state.json`, runtime
+ownership metadata, bounded dashboard caches, optional generated AI Assist
+output, and machine-local configuration. Repository and AI-tool hooks are
+separate files owned by those tools.
+
+To disable and remove AIWatcher, first turn AI Assist and delivery tracking off,
+uninstall any hooks you enabled, stop Companion/autostart, and uninstall the
+package. After confirming no retained reviews are needed, remove the AIWatcher
+state directory separately. Package uninstall does not delete user evidence or
+silently modify third-party hook files.
+
 See [docs/AIWATCHER_LOCAL.md](docs/AIWATCHER_LOCAL.md) for the full privacy and
 coverage boundary.
 
@@ -606,6 +622,7 @@ Useful next reads:
 - [CLI reference](docs/CLI.md)
 - [HTTP API reference](docs/HTTP-API.md)
 - [Release checklist](docs/RELEASE.md)
+- [Focused beta acceptance](docs/BETA_ACCEPTANCE.md)
 
 ## AIWatcher Local and Enterprise
 

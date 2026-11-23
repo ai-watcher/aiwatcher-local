@@ -56,6 +56,13 @@ many sessions into fewer project review items. Historical tokens describe past
 activity; they are not reclaimable RAM, disk space, or guaranteed cost savings.
 Archiving a chat does not establish that a running process has stopped.
 
+Automatic repository discovery is version-dependent. Enable delivery tracking
+only when `aiwatcher delivery-tracking --help` succeeds. Otherwise use
+`aiwatcher install-commit-hook --repo /path/to/repo --write` for repositories
+you choose; explicit `delivery-review` remains available without automatic
+tracking. GitHub `main` may describe unreleased behavior that is not in the
+installed PyPI artifact.
+
 ## Connect the tools you actually use
 
 AIWatcher reads available local history from Claude Code, Codex, and Cursor.
@@ -86,6 +93,17 @@ unavailable. See the [tool coverage guide](https://github.com/ai-watcher/aiwatch
   objectives, uncertain ownership, and unverified checks remain explicit gaps.
 - Optimize recommends review. It does not automatically delete files, remove
   worktrees, archive chats, or stop processes.
+- AIWatcher opens supported AI-tool histories read-only. It does write its own
+  local settings, receipts, bounded caches, and runtime ownership metadata, and
+  changes third-party hook files only after an explicit install/enable action.
+- Optional AI Assist may retain bounded generated output in local state and may
+  send the disclosed bounded input to the provider you configured.
+
+AIWatcher state is stored under `~/.aiwatcher` on macOS/Linux or
+`%USERPROFILE%\.aiwatcher` on Windows by default. Package uninstall does not
+delete that evidence or third-party hooks. Disable optional features, uninstall
+the hooks you enabled, stop Companion/autostart, then remove the state directory
+separately only after reviewing anything you need to retain.
 
 Read the [privacy and coverage details](https://github.com/ai-watcher/aiwatcher-local/blob/main/docs/AIWATCHER_LOCAL.md)
 before enabling optional integrations.

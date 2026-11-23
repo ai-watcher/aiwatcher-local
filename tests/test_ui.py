@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import http.client
 import io
 import json
 import os
@@ -183,6 +184,74 @@ class DashboardServeTests(unittest.TestCase):
         thread = threading.Thread(target=server.handle_request)
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _raw_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        body: str | None = None,
+    ) -> tuple[int, str]:
+        server, thread, _base = self._serve_one()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        try:
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            return response.status, response.read().decode("utf-8", "replace")
+        finally:
+            connection.close()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_serve_refuses_non_loopback_bind_before_opening_socket(self) -> None:
+        with patch.object(ui, "ThreadingHTTPServer") as server:
+            with self.assertRaisesRegex(OSError, "loopback"):
+                ui.serve(host="0.0.0.0", port=8765)
+        server.assert_not_called()
+
+    def test_unrelated_host_is_rejected_before_get_post_or_options_routing(self) -> None:
+        forged = {
+            "Host": "review.invalid",
+            "Origin": "http://review.invalid",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        for method, body, extra in (
+            ("GET", None, {}),
+            ("POST", "{}", {"Content-Type": "application/json"}),
+            ("OPTIONS", None, {"Access-Control-Request-Method": "POST"}),
+        ):
+            with self.subTest(method=method):
+                status, response = self._raw_request(
+                    method,
+                    "/api/delivery-reviews",
+                    headers={**forged, **extra},
+                    body=body,
+                )
+                self.assertEqual(status, 421)
+                self.assertIn("does not match", response)
+
+    def test_loopback_alias_with_actual_port_is_an_allowed_host(self) -> None:
+        server, thread, _base = self._serve_one()
+        port = server.server_address[1]
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request("GET", "/api/health", headers={"Host": f"localhost:{port}"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["service"], "aiwatcher-local")
+        finally:
+            connection.close()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_loopback_host_with_wrong_port_is_rejected(self) -> None:
+        status, _response = self._raw_request(
+            "GET",
+            "/api/health",
+            headers={"Host": "127.0.0.1:1"},
+        )
+        self.assertEqual(status, 421)
 
     def test_delivery_reviews_refuse_pages_from_other_localhost_origins(self) -> None:
         server, thread, base = self._serve_one()

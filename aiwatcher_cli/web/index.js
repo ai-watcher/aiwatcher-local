@@ -5298,6 +5298,12 @@ function deliveryReviewCard(review) {
   const workflow = review.workflow || {};
   const checks = (review.verifications || []).filter(row => row && row.exact_state);
   const files = snapshot.changed_files || [];
+  const commitShown = Number(snapshot.commit_count_shown ?? (snapshot.commit_shas || []).length);
+  const commitTotal = Number(snapshot.commit_count_total ?? commitShown);
+  const fileShown = Number(snapshot.changed_file_count_shown ?? files.length);
+  const fileTotal = Number(snapshot.changed_file_count_total ?? snapshot.changed_file_count ?? fileShown);
+  const commitScope = snapshot.commits_complete === false ? `${commitTotal} commits (${commitShown} shown; HEAD preserved)` : `${commitTotal} commits`;
+  const fileScope = snapshot.files_complete === false ? `${fileTotal} files (${fileShown} shown)` : `${fileTotal} files`;
   const branch = snapshot.branch || 'detached HEAD';
   const statusClass = event.status === 'confirmed' ? 'active' : 'ended';
   const objectiveClaim = review.objective || {};
@@ -5322,7 +5328,7 @@ function deliveryReviewCard(review) {
     ? `<p>${esc(workflow.session_count)} linked session${workflow.session_count === 1 ? '' : 's'} · ${esc(workflow.user_turns || 0)} user turns · ${esc(workflow.model_calls || 0)} model calls · ${esc(workflow.tool_calls || 0)} tool calls</p>`
     : '<p>No session is linked by an exact commit receipt.</p>';
   const fileList = files.length
-    ? `<ul>${files.slice(0, 6).map(path => `<li>${esc(path)}</li>`).join('')}${files.length > 6 ? `<li>+${esc(files.length - 6)} more</li>` : ''}</ul>`
+    ? `<ul>${files.slice(0, 6).map(path => `<li>${esc(path)}</li>`).join('')}${fileShown > 6 ? `<li>+${esc(fileShown - 6)} more shown path${fileShown - 6 === 1 ? '' : 's'}</li>` : ''}${fileTotal > fileShown ? `<li>+${esc(fileTotal - fileShown)} paths omitted by the evidence limit</li>` : ''}</ul>`
     : `<p>${snapshot.evidence_available === false ? 'The local Git range is no longer available.' : 'No changed paths were observed.'}</p>`;
   const attention = review.attention || [];
   return `<article class="delivery-review-item" data-delivery-receipt="${esc(review.receipt_id || '')}" tabindex="-1">
@@ -5332,7 +5338,7 @@ function deliveryReviewCard(review) {
     </div>
     <div class="delivery-review-grid">
       <div class="delivery-review-block"><h4>Objective</h4><p>${esc(objective)}</p></div>
-      <div class="delivery-review-block"><h4>Delivered range</h4><p><strong>${esc((snapshot.commit_shas || []).length)}</strong> commits · <strong>${esc(snapshot.changed_file_count || files.length)}</strong> files · +${esc(snapshot.lines_added || 0)}/-${esc(snapshot.lines_removed || 0)}</p></div>
+      <div class="delivery-review-block"><h4>Delivered range</h4><p><strong>${esc(commitScope)}</strong> · <strong>${esc(fileScope)}</strong> · +${esc(snapshot.lines_added || 0)}/-${esc(snapshot.lines_removed || 0)}</p></div>
       <div class="delivery-review-block"><h4>Verification</h4>${verification}</div>
       <div class="delivery-review-block"><h4>Workflow evidence</h4>${contribution}</div>
     </div>
@@ -5402,10 +5408,11 @@ function renderDeliveryReviewTile(review) {
     return;
   }
   const snapshot = review.snapshot || {};
+  const commitCount = Number(snapshot.commit_count_total ?? (snapshot.commit_shas || []).length);
   host.hidden = false;
   host.className = 'card metric-card metric-green';
   host.innerHTML = `<div class="label">Delivery review ready</div>
-    <div class="value">${esc((snapshot.commit_shas || []).length)} commit${(snapshot.commit_shas || []).length === 1 ? '' : 's'}</div>
+    <div class="value">${esc(commitCount)} commit${commitCount === 1 ? '' : 's'}</div>
     <div class="sub">${esc(deliveryStatusLabel(review))} · <button class="link-inline" onclick="openDeliveryReview(${jsArg(review.receipt_id || '')})">review evidence</button></div>`;
 }
 
