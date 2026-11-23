@@ -70,6 +70,32 @@ def _normalize_signal_kind(value: str | None) -> str:
     return normalized if normalized in {"session_blocked", "critical_context", "loop", "velocity", "runway", "generic"} else "generic"
 
 
+def _can_clear_reviewed_checkpoint(
+    current_state: str,
+    current_receipt_id: str,
+    decided_receipt_id: str,
+) -> bool:
+    """Clear only the review that produced this successful decision."""
+    return (
+        current_state == "delivery_review_ready"
+        and bool(decided_receipt_id)
+        and current_receipt_id == decided_receipt_id
+    )
+
+
+def _is_stale_review_payload(
+    incoming_state: str,
+    incoming_receipt_id: str,
+    reviewed_receipt_ids: list[str],
+) -> bool:
+    """Recognize an out-of-order poll for an already reviewed receipt."""
+    return (
+        incoming_state == "delivery_review_ready"
+        and bool(incoming_receipt_id)
+        and incoming_receipt_id in reviewed_receipt_ids
+    )
+
+
 def _reduce_motion_requested() -> bool:
     """Honor the host preference in the Tk fallback, with an env override."""
     override = os.environ.get("AIWATCHER_REDUCE_MOTION")
@@ -757,6 +783,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var activityTone = ""
     var deliveryConfirmed = false
     var deliveryReceiptID = ""
+    var reviewedCheckpointReceiptIDs: [String] = []
     var deliveryCheckpointPreview: [String: Any] = [:]
     var detailText = ""
     var pressureAvailable = false
@@ -1743,6 +1770,30 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         openURL(checkpointDetailsURL.isEmpty ? primaryURL : checkpointDetailsURL)
     }
 
+    func acknowledgeCheckpointDecision(_ receiptID: String) {
+        if !reviewedCheckpointReceiptIDs.contains(receiptID) {
+            reviewedCheckpointReceiptIDs.append(receiptID)
+            if reviewedCheckpointReceiptIDs.count > 32 {
+                reviewedCheckpointReceiptIDs.removeFirst(reviewedCheckpointReceiptIDs.count - 32)
+            }
+        }
+        guard stateName == "delivery_review_ready", deliveryReceiptID == receiptID else {
+            return
+        }
+        stateName = "watching"
+        activityTone = ""
+        deliveryReceiptID = ""
+        deliveryCheckpointPreview = [:]
+        waitingCount = 0
+        reviewCount = 0
+        primaryAction = "none"
+        primarySessionID = ""
+        titleLabel.stringValue = "Review saved"
+        subtitleLabel.stringValue = "Watching quietly"
+        pulseOn = false
+        updateAppearance()
+    }
+
     func submitCheckpointDecision(_ decision: String) {
         let objective = checkpointGoal.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if decision == "confirmed" && objective.isEmpty {
@@ -1754,13 +1805,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             checkpointStatus.stringValue = "Checkpoint evidence changed. Refresh the card."
             return
         }
+        let submittedReceiptID = checkpointReceiptID
+        let submittedEvidenceHash = checkpointEvidenceHash
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "receipt_id": checkpointReceiptID,
-            "evidence_hash": checkpointEvidenceHash,
+            "receipt_id": submittedReceiptID,
+            "evidence_hash": submittedEvidenceHash,
             "objective": objective,
             "decision": decision,
         ])
@@ -1773,16 +1826,21 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 let ok = (response as? HTTPURLResponse)?.statusCode == 200 && (payload?["ok"] as? Bool ?? false)
                 if ok {
-                    self.checkpointStatus.stringValue = payload?["message"] as? String ?? "Decision saved."
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        self.checkpointPopover?.performClose(nil)
-                        self.stopCheckpointIdleMonitoring()
-                        self.refreshState()
+                    self.acknowledgeCheckpointDecision(submittedReceiptID)
+                    if self.checkpointReceiptID == submittedReceiptID {
+                        self.checkpointStatus.stringValue = payload?["message"] as? String ?? "Decision saved."
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            guard self.checkpointReceiptID == submittedReceiptID else { return }
+                            self.checkpointPopover?.performClose(nil)
+                            self.stopCheckpointIdleMonitoring()
+                        }
                     }
                 } else {
-                    self.checkpointConfirmButton.isEnabled = true
-                    self.checkpointDeclineButton.isEnabled = true
-                    self.checkpointStatus.stringValue = payload?["error"] as? String ?? "Could not save this decision."
+                    if self.checkpointReceiptID == submittedReceiptID && self.checkpointEvidenceHash == submittedEvidenceHash {
+                        self.checkpointConfirmButton.isEnabled = true
+                        self.checkpointDeclineButton.isEnabled = true
+                        self.checkpointStatus.stringValue = payload?["error"] as? String ?? "Could not save this decision."
+                    }
                 }
             }
         }.resume()
@@ -2931,6 +2989,16 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.consoleButton.isEnabled = true
         self.primaryButton.isEnabled = true
         let incomingState = json["state"] as? String ?? "watching"
+        let incomingDeliveryReceiptID = json["delivery_receipt_id"] as? String ?? ""
+        if incomingState == "delivery_review_ready",
+           reviewedCheckpointReceiptIDs.contains(incomingDeliveryReceiptID) {
+            // A refresh already in flight when Confirm/Decline completed may
+            // still carry the old review-ready payload. Keep the successful
+            // local decision visible until the dashboard reports its new
+            // state instead of flashing the reviewed badge back on screen.
+            updateAppearance()
+            return
+        }
         if let hold = suppressPassiveRefreshUntil,
            hold > Date(),
            !["prompt_gate", "command_gate"].contains(incomingState),
@@ -4160,6 +4228,7 @@ def run_native_presence(
     activity_tone_var = tk.StringVar(value="")
     delivery_confirmed_var = tk.BooleanVar(value=False)
     delivery_receipt_id_var = tk.StringVar(value="")
+    reviewed_delivery_receipt_ids: list[str] = []
     delivery_checkpoint_preview: dict[str, object] = {}
     orbit_angle_var = tk.IntVar(value=0)
     # The running arc's canvas id, so its angle can be nudged on its own frame
@@ -4392,6 +4461,17 @@ def run_native_presence(
         nonlocal offline_expanded
         offline_expanded = False
         incoming_state = str(payload.get("state") or "watching")
+        incoming_delivery_receipt_id = str(payload.get("delivery_receipt_id") or "")
+        if _is_stale_review_payload(
+            incoming_state,
+            incoming_delivery_receipt_id,
+            reviewed_delivery_receipt_ids,
+        ):
+            # Ignore an old review-ready response that was already in flight
+            # when the decision succeeded. The next dashboard state clears
+            # the guard and becomes authoritative again.
+            update_attention_style()
+            return
         if (
             suppress_passive_refresh_until.get() > time.time()
             and state_var.get() in {"fresh_start_copied", "clipboard_confirm", "compact_copied"}
@@ -5699,8 +5779,35 @@ def run_native_presence(
 
         def close_after_success(message: str) -> None:
             status_var.set(message)
-            root.after(800, panel.destroy)
-            root.after(900, refresh_state)
+
+            def close_if_open() -> None:
+                if panel.winfo_exists():
+                    panel.destroy()
+
+            root.after(800, close_if_open)
+
+        def acknowledge_checkpoint_decision() -> None:
+            if receipt_id not in reviewed_delivery_receipt_ids:
+                reviewed_delivery_receipt_ids.append(receipt_id)
+                del reviewed_delivery_receipt_ids[:-32]
+            if not _can_clear_reviewed_checkpoint(
+                state_var.get(),
+                delivery_receipt_id_var.get(),
+                receipt_id,
+            ):
+                return
+            state_var.set("watching")
+            activity_tone_var.set("")
+            delivery_receipt_id_var.set("")
+            delivery_checkpoint_preview.clear()
+            waiting_count_var.set(0)
+            review_count_var.set(0)
+            primary_action_var.set("none")
+            primary_session_id_var.set("")
+            title_var.set("Review saved")
+            set_subtitle("Watching quietly")
+            pulse_var.set(False)
+            update_attention_style()
 
         def submit(decision: str) -> None:
             objective = goal_var.get().strip()
@@ -5743,14 +5850,16 @@ def run_native_presence(
                     result["done"] = True
 
             def settle_decision() -> None:
-                if not panel.winfo_exists():
-                    return
                 if not result.get("done"):
                     root.after(60, settle_decision)
                     return
                 payload = result.get("payload")
                 if isinstance(payload, dict) and payload.get("ok"):
-                    close_after_success(str(payload.get("message") or "Decision saved."))
+                    acknowledge_checkpoint_decision()
+                    if panel.winfo_exists():
+                        close_after_success(str(payload.get("message") or "Decision saved."))
+                    return
+                if not panel.winfo_exists():
                     return
                 confirm_button.state(["!disabled"])
                 decline_button.state(["!disabled"])

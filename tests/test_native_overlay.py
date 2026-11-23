@@ -137,6 +137,39 @@ class CompanionExpressionTests(unittest.TestCase):
 
 
 class NativeOverlayConfigTests(unittest.TestCase):
+    def test_review_acknowledgement_clears_only_the_exact_visible_receipt(self) -> None:
+        self.assertTrue(
+            native_overlay._can_clear_reviewed_checkpoint(
+                "delivery_review_ready", "receipt-a", "receipt-a",
+            )
+        )
+        self.assertFalse(
+            native_overlay._can_clear_reviewed_checkpoint(
+                "prompt_gate", "receipt-a", "receipt-a",
+            )
+        )
+        self.assertFalse(
+            native_overlay._can_clear_reviewed_checkpoint(
+                "delivery_review_ready", "receipt-b", "receipt-a",
+            )
+        )
+
+    def test_reviewed_receipt_tombstone_rejects_late_review_payload_only(self) -> None:
+        reviewed = ["receipt-a"]
+        self.assertTrue(
+            native_overlay._is_stale_review_payload(
+                "delivery_review_ready", "receipt-a", reviewed,
+            )
+        )
+        self.assertFalse(
+            native_overlay._is_stale_review_payload("prompt_gate", "receipt-a", reviewed)
+        )
+        self.assertFalse(
+            native_overlay._is_stale_review_payload(
+                "delivery_review_ready", "receipt-b", reviewed,
+            )
+        )
+
     def test_restart_helper_uses_exact_interpreter_and_current_source_root(self) -> None:
         with (
             mock.patch.object(sys, "executable", "/venv/bin/python"),
@@ -780,6 +813,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('let animateCheckpoint = self.stateName == "delivery_review_ready" && !self.collapsed', mac)
         self.assertIn('usagePopover?.isShown == true || checkpointPopover?.isShown == true', mac)
         self.assertIn('checkpointDeclineButton.isEnabled = false', mac)
+        self.assertIn('func acknowledgeCheckpointDecision(_ receiptID: String)', mac)
+        self.assertIn('self.acknowledgeCheckpointDecision(submittedReceiptID)', mac)
+        self.assertIn('guard stateName == "delivery_review_ready", deliveryReceiptID == receiptID', mac)
+        self.assertIn('reviewedCheckpointReceiptIDs.contains(incomingDeliveryReceiptID)', mac)
         self.assertIn('func checkpointLines(', mac)
         self.assertIn('func checkpointLine(', mac)
         self.assertIn('size(withAttributes: [.font: font]).width', mac)
@@ -813,6 +850,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"PresenceReview.TButton"', tk_source)
         self.assertIn('checkpoint_window is not None and checkpoint_window.winfo_exists()', tk_source)
         self.assertIn('decline_button.state(["disabled"])', tk_source)
+        self.assertIn('def acknowledge_checkpoint_decision()', tk_source)
+        self.assertIn('acknowledge_checkpoint_decision()', tk_source)
+        self.assertIn('if not _can_clear_reviewed_checkpoint(', tk_source)
+        self.assertIn('if _is_stale_review_payload(', tk_source)
         self.assertIn('def compact_lines(', tk_source)
         self.assertIn('def compact_line(', tk_source)
         self.assertIn('checkpoint_font.measure(candidate)', tk_source)
@@ -823,6 +864,19 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('schedule_auto_collapse(6000 if has_primary_action() else 3000)', tk_source)
         self.assertIn('urllib.request.urlopen(endpoint, timeout=3)', tk_source)
         self.assertIn('apply_preview(delivery_checkpoint_preview)', tk_source)
+
+        mac_success = mac.split('if ok {', 1)[1].split('} else {', 1)[0]
+        self.assertLess(
+            mac_success.index('self.acknowledgeCheckpointDecision(submittedReceiptID)'),
+            mac_success.index('DispatchQueue.main.asyncAfter'),
+        )
+        tk_success = tk_source.split('if isinstance(payload, dict) and payload.get("ok"):', 1)[1].split(
+            'confirm_button.state(["!disabled"])', 1,
+        )[0]
+        self.assertLess(
+            tk_success.index('acknowledge_checkpoint_decision()'),
+            tk_success.index('close_after_success('),
+        )
         self.assertIn('Cached facts remain visible. Retry or open More details.', tk_source)
         self.assertIn('panel.bind(sequence, reset_checkpoint_idle, add="+")', tk_source)
         self.assertIn('close_checkpoint(collapse=True)', tk_source)
